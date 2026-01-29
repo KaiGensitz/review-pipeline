@@ -1,10 +1,29 @@
-venv
-__pycache__
+## Virtual envs and Python cache
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+## Local secrets / env files
+.env
+*.env
+
+## Local runs, data, and bulky artifacts (stay local)
+input/
+output/
+knowledge-base/
+_tests/
+papers/
+chroma_data/
 chroma.log
 db.sqlite3
-chroma_data
-.env
-# Ignore Django migrations
+
+## Framework noise
 **/migrations/*.py
 !**/migrations/__init__.py
+
+## OS/editor noise
+.DS_Store
+.ipynb_checkpoints/
+*.log
 
