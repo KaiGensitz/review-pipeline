@@ -1,0 +1,3 @@
+label,source,text
+POS,EXAMPLE_POS_EXTRACTION,"Replace with a short excerpt tied to an extraction field that clearly supports inclusion (1–3 sentences)."
+NEG,EXAMPLE_NEG_EXTRACTION,"Replace with a short excerpt tied to an extraction field that clearly supports exclusion (1–3 sentences)."

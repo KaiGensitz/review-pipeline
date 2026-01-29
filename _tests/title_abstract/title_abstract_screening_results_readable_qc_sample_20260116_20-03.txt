@@ -1,0 +1,85 @@
+SCREENING RESULTS (stage: title_abstract)
+This file summarizes per-paper selections and decisions for manual review.
+
+Paper #15
+Title: Effects of a Personalized Fitness Recommender System Using Gamification and Continuous Player Modeling: System Design and Long-Term Validation Study
+Key snippets:
+  1. Effects of a Personalized Fitness Recommender System Using Gamification and Continuous Player Modeling: System Design and Long-Term Validation Study (score 0.057)
+  2. Furthermore, qualitative results revealed that a customized storyline was the most requested feature, followed by a multiplayer mode, more quality recommendations, a feature for setting and tracking fitness goals, and more location-based features.Conclusions: On the basis of these results and drawing from the gamer modeling literature, we conclude that personalizing recommendations using player modeling and gamification can improve participants' engagement and motivation toward fitness activitie (score 0.078)
+  3. This research aims to investigate how to design gamified physical activity interventions to achieve long-term engagement.Methods: We proposed a comprehensive model for gamified fitness recommender systems that uses detailed and dynamic player modeling and wearable-based tracking to provide personalized game features and activity recommendations. (score 0.074)
+  4. However, there are few existing studies on how to build comprehensive player models for personalizing gamified systems, recommending daily physical activities, or the long-term effectiveness of such gamified exercise-promoting systems.Objective: This paper aims to introduce a gamified, 24/7 fitness assistant system that provides personalized recommendations and generates gamified content targeted at individual users to bridge the aforementioned gaps. (score 0.062)
+  5. On the other hand, player modeling and recommender systems are increasingly used for personalizing content. (score 0.060)
+  6. There was a statistically significant difference among the 3 groups (full, personalized, and gamified) for overall motivation (F-3,F-36=22.49; P<.001), satisfaction (F-3,F-36=22.12; P<.001), and preference (F-3,F-36=15.0; P<.001), suggesting that both gamification and personalization have positive effects on the levels of motivation, satisfaction, and preference. (score 0.058)
+  7. Data were collected from 40 participants (23 men and 17 women) who participated in a long-term investigation on the effectiveness of our recommender system that gradually establishes and updates an individual player model (for each unique user) over a period of 60 days.Results: Our results showed the feasibility and effectiveness of the proposed system, particularly for generating personalized exercise recommendations using player modeling. (score 0.052)
+  8. Background: Gamification and persuasive games are effective tools to motivate behavior change, particularly to promote daily physical activities. (score 0.037)
+Model decision: {
+  "not_adult_population": { "value": false },
+  "no_smartphone_technology": { "value": true },
+  "no_artificial_intelligence": { "value": false },
+  "no_physical_activity": { "value": false },
+  "not_urban_context": { "value": "NEUTRAL" },
+  "wrong_publication_type": { "value": false },
+  "insufficient_context": { "value": false },
+  "is_eligible": "NEUTRAL
+Diagnostics: total_chunks=9, selected=8, top_k=10, threshold=0.005
+Metadata: {"Title": "Effects of a Personalized Fitness Recommender System Using Gamification and Continuous Player Modeling: System Design and Long-Term Validation Study", "Authors": "Zhao, Z; Arya, A; Orji, R; Chan, G", "Abstract": "Background: Gamification and persuasive games are effective tools to motivate behavior change, particularly to promote daily physical activities. On the one hand, studies have suggested that a one-size-fits-all approach does not work well for persuasive game design. On the other hand, player modeling and recommender systems are increasingly used for personalizing content. However, there are few existing studies on how to build comprehensive player models for personalizing gamified systems, recommending daily physical activities, or the long-term effectiveness of such gamified exercise-promoting systems.Objective: This paper aims to introduce a gamified, 24/7 fitness assistant system that provides personalized recommendations and generates gamified content targeted at individual users to bridge the aforementioned gaps. This research aims to investigate how to design gamified physical activity interventions to achieve long-term engagement.Methods: We proposed a comprehensive model for gamified fitness recommender systems that uses detailed and dynamic player modeling and wearable-based tracking to provide personalized game features and activity recommendations. Data were collected from 40 participants (23 men and 17 women) who participated in a long-term investigation on the effectiveness of our recommender system that gradually establishes and updates an individual player model (for each unique user) over a period of 60 days.Results: Our results showed the feasibility and effectiveness of the proposed system, particularly for generating personalized exercise recommendations using player modeling. There was a statistically significant difference among the 3 groups (full, personalized, and gamified) for overall motivation (F-3,F-36=22.49; P<.001), satisfaction (F-3,F-36=22.12; P<.001), and preference (F-3,F-36=15.0; P<.001), suggesting that both gamification and personalization have positive effects on the levels of motivation, satisfaction, and preference. Furthermore, qualitative results revealed that a customized storyline was the most requested feature, followed by a multiplayer mode, more quality recommendations, a feature for setting and tracking fitness goals, and more location-based features.Conclusions: On the basis of these results and drawing from the gamer modeling literature, we conclude that personalizing recommendations using player modeling and gamification can improve participants' engagement and motivation toward fitness activities over time.", "Published Year": "2020", "Published Month": "", "Journal": "JMIR SERIOUS GAMES", "Volume": "8", "Issue": "4", "Pages": "", "Accession Number": "WOS:000629136000013", "DOI": "10.2196/19968", "Ref": "", "Covidence #": "#15", "Study": "Zhao 2020", "Notes": "", "Tags": "Possible RCT"}
+
+Paper #21
+Title: A data-driven dynamic repositioning model in bicycle-sharing systems
+Key snippets:
+  1. A data-driven dynamic repositioning model in bicycle-sharing systems (score 0.079)
+  2. A data-driven Neural Network (NN) approach is introduced to forecast the bicycle-sharing demand. (score 0.096)
+  3. As time goes on, repositioning plan is checked and updated according to the real-usage patterns using GTS algorithm, which has the advantage of high-performance local-search within a short computing time. (score 0.088)
+  4. This paper proposes a dynamic repositioning model with predicted demand, where the repositioning time interval is fixed. (score 0.064)
+  5. The simulation results reveal that the proposed methodology can effectively model the dynamic repositioning problem in response to real-time bicycle-sharing usage. (score 0.062)
+  6. The proposed methodology can be a value-added tool in enhancing the feasibility and sustainability of bicycle-sharing program. (score 0.058)
+  7. Based on predicted demand, the initial repositioning plan is made by AGA statically at the beginning of study horizon, which ensures the global optimization of the first solution. (score 0.051)
+  8. The new generation of bicycle-sharing is an O2O (online-to-offline) platform service that enables the users to access the bicycle with a smartphone App. (score 0.051)
+  9. The repositioning objective function at each time interval is defined to simultaneously minimize the operator cost and penalty cost. (score 0.046)
+  10. Due to the non-deterministic polynomial-time hard (NP-hard) nature of this model, a hybrid metaheuristic approach of Adaptive Genetic Algorithm (AGA) and Granular Tabu Search (GTS) algorithm is applied to calculate the solution. (score 0.043)
+  11. In addition to the normal constraints in static repositioning problem, flow conservation, inventory-balance and travel time constraints are taken into account. (score 0.038)
+Model decision: {
+  "not_adult_population": { "value": false },
+  "no_smartphone_technology": { "value": false },
+  "no_artificial_intelligence": { "value": false },
+  "no_physical_activity": { "value": true },
+  "not_urban_context": { "value": "NEUTRAL" },
+  "wrong_publication_type": { "value": false },
+  "insufficient_context": { "value": false },
+  "is_eligible": false,
+  "confidence_score": 0. nine,
+  "justification": "The abstract describes a neural‑network based repositioning model for bicycle‑sharing demand and mentions a smartphone app, but it does not assess or promote physical activity for users.",
+  "exclusion_reason_category": "no_physical_activity"
+}
+Diagnostics: total_chunks=12, selected=11, top_k=10, threshold=0.005
+Metadata: {"Title": "A data-driven dynamic repositioning model in bicycle-sharing systems", "Authors": "Zhang, J; Meng, M; Wong, YD; Ieromonachou, P; Wang, DZW", "Abstract": "The new generation of bicycle-sharing is an O2O (online-to-offline) platform service that enables the users to access the bicycle with a smartphone App. This paper proposes a dynamic repositioning model with predicted demand, where the repositioning time interval is fixed. A data-driven Neural Network (NN) approach is introduced to forecast the bicycle-sharing demand. The repositioning objective function at each time interval is defined to simultaneously minimize the operator cost and penalty cost. In addition to the normal constraints in static repositioning problem, flow conservation, inventory-balance and travel time constraints are taken into account. Due to the non-deterministic polynomial-time hard (NP-hard) nature of this model, a hybrid metaheuristic approach of Adaptive Genetic Algorithm (AGA) and Granular Tabu Search (GTS) algorithm is applied to calculate the solution. Based on predicted demand, the initial repositioning plan is made by AGA statically at the beginning of study horizon, which ensures the global optimization of the first solution. As time goes on, repositioning plan is checked and updated according to the real-usage patterns using GTS algorithm, which has the advantage of high-performance local-search within a short computing time. Numerical analysis is conducted using the real cases. The simulation results reveal that the proposed methodology can effectively model the dynamic repositioning problem in response to real-time bicycle-sharing usage. The proposed methodology can be a value-added tool in enhancing the feasibility and sustainability of bicycle-sharing program.", "Published Year": "2021", "Published Month": "", "Journal": "INTERNATIONAL JOURNAL OF PRODUCTION ECONOMICS", "Volume": "231", "Issue": "", "Pages": "", "Accession Number": "WOS:000604547200003", "DOI": "10.1016/j.ijpe.2020.107909", "Ref": "", "Covidence #": "#21", "Study": "Zhang 2021", "Notes": "", "Tags": "Not RCT"}
+
+Paper #28
+Title: Brain Exercises Anywhere Anytime: A Self-Training System for Executive Function
+Key snippets:
+  1. Brain Exercises Anywhere Anytime: A Self-Training System for Executive Function (score 0.041)
+  2. This application, which uses a cloud data server, makes it more efficient and cost-effective in conducting psychological training programs. (score 0.072)
+  3. The proposed system provides a basic smartphone-based system for psychological trials and can be further improved by combining other techniques such as speech recognition and data-mining techniques. (score 0.072)
+  4. In this paper, we developed a self-training system that helps people to enhance their cognitive functions through mental exercises. (score 0.067)
+  5. The system utilizes the advantages of mobile computing and Internet connection. (score 0.062)
+  6. Participants can finish their mental exercises no matter where they are and can send the results back to the data server. (score 0.043)
+  7. Smartphones are ideal for tracking individuals' behavioral responses. (score 0.040)
+  8. The results reveal that the users significantly enhanced their level of executive functions. (score 0.033)
+  9. Administrators can track all participants' status on a web-based system. (score 0.028)
+  10. This study investigates in situ the 20-session use of a mobile application. (score 0.025)
+Model decision: {
+  "not_adult_population": { "value": false },
+  "no_smartphone_technology": { "value": false },
+  "no_artificial_intelligence": { "value": true },
+  "no_physical_activity": { "value": true },
+  "not_urban_context": { "value": "NEUTRAL" },
+  "wrong_publication_type": { "value": false },
+  "insufficient_context": { "value": false },
+  "is_eligible": false,
+  "confidence_score": 0.92,
+  "justification": "The abstract describes a smartphone-based self‑training system for executive function and cognitive exercises with no mention of physical activity or exercise outcomes.",
+  "exclusion_reason_category": "no_physical_activity"
+}
+Diagnostics: total_chunks=12, selected=10, top_k=10, threshold=0.005
+Metadata: {"Title": "Brain Exercises Anywhere Anytime: A Self-Training System for Executive Function", "Authors": "Yu, SH; Lin, WL; Wang, SW", "Abstract": "Smartphones are ideal for tracking individuals' behavioral responses. Traditional laboratory-based psychological trials aimed at training cognitive functions face a problem when participants cannot finish their tasks within a scheduled time. In this paper, we developed a self-training system that helps people to enhance their cognitive functions through mental exercises. The system utilizes the advantages of mobile computing and Internet connection. Participants can finish their mental exercises no matter where they are and can send the results back to the data server. Administrators can track all participants' status on a web-based system. This study investigates in situ the 20-session use of a mobile application. The results reveal that the users significantly enhanced their level of executive functions. The dropout rate was very small. This application, which uses a cloud data server, makes it more efficient and cost-effective in conducting psychological training programs. The proposed system provides a basic smartphone-based system for psychological trials and can be further improved by combining other techniques such as speech recognition and data-mining techniques.", "Published Year": "2021", "Published Month": "", "Journal": "MOBILE INFORMATION SYSTEMS", "Volume": "2021", "Issue": "", "Pages": "", "Accession Number": "WOS:000621855400001", "DOI": "10.1155/2021/3617941", "Ref": "", "Covidence #": "#28", "Study": "Yu 2021", "Notes": "", "Tags": "Not RCT"}
+

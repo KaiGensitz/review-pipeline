@@ -1,0 +1,68 @@
+# https://mermaid.live/edit to execute below code #
+
+graph LR
+    %% Define Styling
+    classDef process fill:#e1f5fe,stroke:#01579b,stroke-width:2px,color:#000;
+    classDef decision fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,color:#000;
+    classDef input fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000;
+    classDef output fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px,color:#000;
+    classDef config fill:#eceff1,stroke:#455a64,stroke-width:2px,color:#000;
+
+    %% --- SECTION 1: INPUTS ---
+    subgraph Input Data Pool
+        direction TB
+        I1[(1. Documentation Data\n.csv Title, Abstract, Kw)]:::input
+        I2[(2. Knowledge Base\n.csv)]:::input
+        I3[(3. Full Research Text\n*Conditional*)]:::input
+    end
+
+    I4[4. AI Assistant Configuration\nData & Metadata]:::config
+
+
+    %% --- SECTION 2: THE FLOW ---
+    I1 --> DataStaging[Data Staging & Pooling]:::process
+    I2 --> DataStaging
+    I3 -.-> DataStaging
+
+    %% The Sampling Loop
+    DataStaging --> Sampler{Select Random 10% Sample}:::decision
+    
+    Sampler -- Sample Batch --> AISampleProc(AI Assistant Screening\nSample Batch):::process
+    I4 -.-> AISampleProc
+
+    AISampleProc --> HumanEval(Human Assessment Interface):::process
+    
+    HumanEval --> PassGate{Assessment Passed?}:::decision
+
+    PassGate -- NO\n(Reject & Retry) --> Sampler
+    
+    %% The Bulk Process Branch
+    PassGate -- YES\n(Approve Procedure) --> ValidatedData[Validated Sample Data]:::process
+    ValidatedData --> BulkTrigger[Trigger Bulk Processing]:::process
+    
+    BulkTrigger --> AIBulkProc(AI Assistant Screening\nRemaining 90%):::process
+    DataStaging -- Remaining Data --> AIBulkProc
+    I4 -.-> AIBulkProc
+
+    %% --- SECTION 3: AGGREGATION & METRICS ---
+    ValidatedData --> Aggregator(Results Aggregation):::process
+    AIBulkProc --> Aggregator
+
+    %% Collecting side-channel data (Metrics and PDF data) from both AI steps
+    AISampleProc -.-> MetricsCol(Metrics & Metadata Collection):::process
+    AIBulkProc -.-> MetricsCol
+    AISampleProc -.-> PDFMetaCol(PDF Usage/Markings Collection):::process
+    AIBulkProc -.-> PDFMetaCol
+
+    %% --- SECTION 4: OUTCOMES ---
+    subgraph Outcomes
+        direction TB
+        Aggregator --> O1[1. JSON Outcome\n+ Custom KB Flags]:::output
+        O1 --> O2[2. Human Interpretable\nResults .txt]:::output
+        MetricsCol --> O3[3. Reported Token Usage\n& Energy Metrics]:::output
+        PDFMetaCol --> O4[4. PDF Usage Metadata\n e.g., markings]:::output
+    end
+
+    %% Apply styling classes
+    class DataStaging,AISampleProc,HumanEval,ValidatedData,BulkTrigger,AIBulkProc,Aggregator,MetricsCol,PDFMetaCol process;
+    class Sampler,PassGate decision;

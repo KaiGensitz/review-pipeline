@@ -1,0 +1,11 @@
+pdfplumber==0.11.8 # Extract text from PDFs for screening
+nltk==3.9.2 # Tokenization/sentence splitting utilities
+openai==2.8.1 # OpenAI-compatible LLM client
+python-dotenv==1.0.1 # Load environment variables from .env
+numpy>=1.24 # Numeric routines used across embedding/selection
+pandas # CSV/structured data handling
+seaborn # Visualization utilities (validation)
+matplotlib # Plotting utilities (validation)
+scipy # Scientific helpers (stats/processing)
+codecarbon # Emissions tracking (CodeCarbon)
+tqdm # Progress bars for screening runs

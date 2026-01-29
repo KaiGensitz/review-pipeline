@@ -1,0 +1,3 @@
+label,source,text
+POS,EXAMPLE_POS_FULLTEXT,"Replace with a short excerpt from a full-text PDF that clearly supports inclusion (1–3 sentences)."
+NEG,EXAMPLE_NEG_FULLTEXT,"Replace with a short excerpt from a full-text PDF that clearly supports exclusion (1–3 sentences)."

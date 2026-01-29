@@ -1,0 +1,17 @@
+Validation report (AI vs Human) — stage: title_abstract
+This study compares the AI screening decisions against human ground truth from Covidence exports. Metrics emphasize agreement and error balance, with prevalence-adjusted bias-adjusted kappa (PABAK) to reduce skew from class imbalance (Byrt et al., 1993).
+
+Total papers analyzed (QC sample only): 3
+Confusion matrix (Human rows, AI columns): TP=1, TN=2, FP=0, FN=0
+Observed agreement (Po): 1.000
+PABAK: 1.000 (PABAK = 2×Po − 1)
+Sensitivity (recall of human-included): 100.0% (95% CI 100.0-100.0%)
+Specificity (correctly excluding human-negatives): 100.0% (95% CI 100.0-100.0%)
+PPV (precision of AI inclusions): 100.0% (95% CI 100.0-100.0%)
+NPV (precision of AI exclusions): 100.0% (95% CI 100.0-100.0%)
+
+Interpretation (plain language):
+- Sensitivity: fraction of human-relevant papers the AI kept.
+- Specificity: fraction of human-irrelevant papers the AI excluded.
+- PPV/NPV: how often AI include/exclude calls match human labels.
+- PABAK adjusts kappa for class imbalance, stabilizing agreement estimates.

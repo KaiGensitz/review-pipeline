@@ -1,0 +1,17 @@
+QC SAMPLE (pre-screen verification)
+stage: title_abstract
+timestamp: 2026-01-16T07:09:53.158693Z
+records: 3 of 29 planned (10.0% target)
+
+[1] paper_id: #29
+Title: Artificial Intelligence in Health Promotion and Disease Reduction: Rapid Review
+Abstract: Background: Chronic diseases represent a significant global burden of mortality, exacerbated by behavioral risk factors. Artificial intelligence (AI) has transformed health promotion and disease reduction through improved early detection, encouraging healthy lifestyle modifications, and mitigating the economic strain on health systems. Objective: The aim of this study is to investigate how AI contributes to health promotion and disease reduction among Organization for Economic Co-operation and Development countries. Methods: We conducted a rapid review of the literature to identify the latest evidence on how AI is used in health promotion and disease reduction. We applied comprehensive search strategies formulated for MEDLINE (OVID) and CINAHL to locate studies published between 2019 and 2024. A pair of reviewers independently applied the inclusion and exclusion criteria to screen the titles and abstracts, assess the full texts, and extract the data. We synthesized extracted data from 
+
+[2] paper_id: #21
+Title: A data-driven dynamic repositioning model in bicycle-sharing systems
+Abstract: The new generation of bicycle-sharing is an O2O (online-to-offline) platform service that enables the users to access the bicycle with a smartphone App. This paper proposes a dynamic repositioning model with predicted demand, where the repositioning time interval is fixed. A data-driven Neural Network (NN) approach is introduced to forecast the bicycle-sharing demand. The repositioning objective function at each time interval is defined to simultaneously minimize the operator cost and penalty cost. In addition to the normal constraints in static repositioning problem, flow conservation, inventory-balance and travel time constraints are taken into account. Due to the non-deterministic polynomial-time hard (NP-hard) nature of this model, a hybrid metaheuristic approach of Adaptive Genetic Algorithm (AGA) and Granular Tabu Search (GTS) algorithm is applied to calculate the solution. Based on predicted demand, the initial repositioning plan is made by AGA statically at the beginning of stu
+
+[3] paper_id: #6
+Title: IMU-to-Segment Assignment and Orientation Alignment for the Lower Body Using Deep Learning
+Abstract: Human body motion analysis based on wearable inertial measurement units (IMUs) receives a lot of attention from both the research community and the and industrial community. This is due to the significant role in, for instance, mobile health systems, sports and human computer interaction. In sensor based activity recognition, one of the major issues for obtaining reliable results is the sensor placement/assignment on the body. For inertial motion capture (joint kinematics estimation) and analysis, the IMU-to-segment (I2S) assignment and alignment are central issues to obtain biomechanical joint angles. Existing approaches for I2S assignment usually rely on hand crafted features and shallow classification approaches (e.g., support vector machines), with no agreement regarding the most suitable features for the assignment task. Moreover, estimating the complete orientation alignment of an IMU relative to the segment it is attached to using a machine learning approach has not been shown i
+

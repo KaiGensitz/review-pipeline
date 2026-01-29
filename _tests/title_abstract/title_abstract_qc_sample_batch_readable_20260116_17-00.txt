@@ -1,0 +1,17 @@
+QC SAMPLE (pre-screen verification)
+stage: title_abstract
+timestamp: 2026-01-16T16:00:56.590749Z
+records: 3 of 29 planned (10.0% target)
+
+[1] paper_id: #26
+Title: Use of Connected Technologies to Assess Barriers and Stressors for Age and Disability-Friendly Communities
+Abstract: Background: The benefits of engaging in outdoor physical activity are numerous for older adults. However, previous work on outdoor monitoring of physical activities did not sufficiently identify how older adults characterize and respond to diverse elements of urban built environments, including structural characteristics, safety attributes, and aesthetics.Objective: To synthesize emerging multidisciplinary trends on the use of connected technologies to assess environmental barriers and stressors among older adults and for persons with disability.Methods: A multidisciplinary overview and literature synthesis.Results: First, we review measurement and monitoring of outdoor physical activity in community environments and during transport using wearable sensing technologies, their contextualization and using smartphone-based applications. We describe physiological responses (e.g., gait patterns, electrodermal activity, brain activity, and heart rate), stressors and physical barriers during 
+
+[2] paper_id: #13
+Title: Predicting Psychotic Relapse in Schizophrenia With Mobile Sensor Data: Routine Cluster Analysis
+Abstract: Background: Behavioral representations obtained from mobile sensing data can be helpful for the prediction of an oncoming psychotic relapse in patients with schizophrenia and the delivery of timely interventions to mitigate such relapse. Objective: In this study, we aim to develop clustering models to obtain behavioral representations from continuous multimodal mobile sensing data for relapse prediction tasks. The identified clusters can represent different routine behavioral trends related to daily living of patients and atypical behavioral trends associated with impending relapse. Methods: We used the mobile sensing data obtained from the CrossCheck project for our analysis. Continuous data from six different mobile sensing-based modalities (ambient light, sound, conversation, acceleration, etc) obtained from 63 patients with schizophrenia, each monitored for up to a year, were used for the clustering models and relapse prediction evaluation. Two clustering models, Gaussian mixture m
+
+[3] paper_id: #29
+Title: Artificial Intelligence in Health Promotion and Disease Reduction: Rapid Review
+Abstract: Background: Chronic diseases represent a significant global burden of mortality, exacerbated by behavioral risk factors. Artificial intelligence (AI) has transformed health promotion and disease reduction through improved early detection, encouraging healthy lifestyle modifications, and mitigating the economic strain on health systems. Objective: The aim of this study is to investigate how AI contributes to health promotion and disease reduction among Organization for Economic Co-operation and Development countries. Methods: We conducted a rapid review of the literature to identify the latest evidence on how AI is used in health promotion and disease reduction. We applied comprehensive search strategies formulated for MEDLINE (OVID) and CINAHL to locate studies published between 2019 and 2024. A pair of reviewers independently applied the inclusion and exclusion criteria to screen the titles and abstracts, assess the full texts, and extract the data. We synthesized extracted data from 
+
