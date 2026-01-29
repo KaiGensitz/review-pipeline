@@ -14,6 +14,9 @@ output/
 knowledge-base/
 _tests/
 papers/
+!input/.gitkeep
+!output/.gitkeep
+!knowledge-base/.gitkeep
 chroma_data/
 chroma.log
 db.sqlite3
