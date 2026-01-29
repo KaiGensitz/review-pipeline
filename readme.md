@@ -1,4 +1,16 @@
+
 # Smartphone AI PA Screening Tool
+
+## Backup to GitHub (for non-coders)
+After running the pipeline, you will be prompted in the terminal:
+   "Do you want to back up your changes to GitHub now? (y/n):"
+If you type `y`, the tool will automatically commit and push all your changes to GitHub for you.
+
+You can also run the backup manually anytime by running:
+```
+python backup_to_github.py
+```
+This ensures your work is always safely backed up online.
 
 End-to-end study screening for a scoping review. Built for fast LLM decisions, reproducible sampling, and transparent logs.
 
