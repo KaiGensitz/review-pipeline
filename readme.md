@@ -12,6 +12,7 @@ End-to-end study screening for a scoping review. Built for fast LLM decisions, r
 ~~~bash
 cd "C:\Users\gensitz\OneDrive - Universitaet Bern\Desktop\my_new_project\review-pipeline"
 ~~~
+- Repo footprint: empty placeholders for [input/](input/), [output/](output/), and [knowledge-base/](knowledge-base/) are tracked; their contents stay local and ignored. [papers/](papers/) and [_tests/](\_tests/) stay fully local and are not tracked.
 
 ## Preparation (chronological by stage)
 - Assure you have a active connection to the University of Bern server; either via eduroam/unibe.ch ethernet or via VPN
