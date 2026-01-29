@@ -366,7 +366,7 @@ def _prop_ci(k: int, n: int, alpha: float = 0.05) -> Tuple[float, float]:
     if n == 0:
         return (math.nan, math.nan)
     p = k / n
-    z = norm.ppf(1 - alpha / 2)
+    z = float(norm.ppf(1 - alpha / 2))  # Ensure z is a Python float
     se = math.sqrt(max(p * (1 - p), 0) / n)
     lower = max(0.0, p - z * se)
     upper = min(1.0, p + z * se)

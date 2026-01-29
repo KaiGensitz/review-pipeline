@@ -252,3 +252,12 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    # Offer to trigger backup after pipeline run
+    try:
+        resp = input("\nDo you want to back up your changes to GitHub now? (y/n): ").strip().lower()
+        if resp == "y":
+            import subprocess
+            import sys
+            subprocess.run([sys.executable, "backup_to_github.py"])
+    except Exception:
+        print("[warning] Could not trigger backup script. Please run backup_to_github.py manually if needed.")

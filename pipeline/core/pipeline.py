@@ -109,32 +109,36 @@ class PaperScreeningPipeline:
         eligibility_output_path: str,
         chunks_output_path: str,
         text_output_path: str,
-        top_k: int | None = TOP_K_DEFAULT,
-        score_threshold: float | None = SCORE_THRESHOLD_DEFAULT,
-        batch_size: int = BATCH_SIZE_DEFAULT,
+        top_k: int | None = None,
+        score_threshold: float | None = None,
+        batch_size: int | None = None,
         embedder: EmbeddingBackend | None = None,
         examples: list[dict] | None = None,
-        sample_size: int = SAMPLE_SIZE_DEFAULT,
-        sample_seed: int | None = SAMPLE_SEED_DEFAULT,
-        sustainability_tracking: bool = SUSTAINABILITY_DEFAULT,
-        resource_log_path: str | None = PATH_SETTINGS.get("resource_log_path"),
-        codecarbon_enabled: bool = CODECARBON_ENABLED_DEFAULT,
+        sample_size: int | None = None,
+        sample_seed: int | None = None,
+        sustainability_tracking: bool | None = None,
+        resource_log_path: str | None = None,
+        codecarbon_enabled: bool | None = None,
         qc_sample_path: str | None = None,
         qc_sample_readable_path: str | None = None,
         confirm_sampling: bool = False,
-        sample_rate: float = 0.10,
+        sample_rate: float | None = None,
         qc_only: bool = False,
-        qc_enabled: bool = True,
+        qc_enabled: bool | None = None,
         force_new_qc: bool = False,
-        error_log_path: str | None = PATH_SETTINGS.get("error_log"),
-        stage: str = CURRENT_STAGE,
-        pdf_root: str | None = PATH_SETTINGS.get("pdf_root"),
-        overflow_log_path: str | None = PATH_SETTINGS.get("overflow_log"),
+        error_log_path: str | None = None,
+        stage: str | None = None,
+        pdf_root: str | None = None,
+        overflow_log_path: str | None = None,
         split_only: bool = False,
         quiet: bool = False,
         summary_to_console: bool = True,
     ) -> None:
-        """Initialize the screening/extraction pipeline with configuration."""
+        """
+        Initialize the screening/extraction pipeline with configuration.
+        All arguments are strictly typed and have clear defaults for robust, reproducible runs.
+        Non-coders: Each parameter controls a key aspect of the workflow (see README for details).
+        """
 
         self.csv_dir = Path(csv_dir)
         self.knowledge_base_path = Path(knowledge_base_path)
@@ -143,11 +147,17 @@ class PaperScreeningPipeline:
         self.text_output_path = Path(text_output_path)
         self.stage_output_dir = self.chunks_output_path.parent
 
-        self.top_k = top_k
-        self.score_threshold = score_threshold
-        self.sample_size = sample_size
-        self.sample_seed = sample_seed
-        self.sustainability_tracking = sustainability_tracking
+        # Import dynamic config from user_orchestrator
+        from config.user_orchestrator import (
+            SCREENING_DEFAULTS, QC_ENABLED, QC_SAMPLE_RATE, CURRENT_STAGE
+        )
+
+        self.top_k = top_k if top_k is not None else SCREENING_DEFAULTS.get("top_k", 10)
+        self.score_threshold = score_threshold if score_threshold is not None else SCREENING_DEFAULTS.get("score_threshold", 0.005)
+        self.batch_size = batch_size if batch_size is not None else SCREENING_DEFAULTS.get("batch_size", 32)
+        self.sample_size = sample_size if sample_size is not None else SCREENING_DEFAULTS.get("sample_size", None)
+        self.sample_seed = sample_seed if sample_seed is not None else SCREENING_DEFAULTS.get("sample_seed", None)
+        self.sustainability_tracking = sustainability_tracking if sustainability_tracking is not None else SCREENING_DEFAULTS.get("sustainability_tracking", True)
         self.resource_log_path = Path(resource_log_path) if resource_log_path else Path("output/resource_usage.log")
         self.qc_sample_path = Path(qc_sample_path) if qc_sample_path else Path("output/qc_sample_batch.csv")
         self.qc_sample_readable_path = (
@@ -156,12 +166,12 @@ class PaperScreeningPipeline:
             else Path("output/qc_sample_batch_readable.txt")
         )
         self.confirm_sampling = confirm_sampling
-        self.sample_rate = max(0.0, min(sample_rate, 1.0))
+        self.sample_rate = max(0.0, min(sample_rate if sample_rate is not None else QC_SAMPLE_RATE, 1.0))
         self.qc_only = qc_only
-        self.qc_enabled = qc_enabled
+        self.qc_enabled = qc_enabled if qc_enabled is not None else QC_ENABLED
         self.force_new_qc = force_new_qc
         self.error_log_path = Path(error_log_path) if error_log_path else Path("output/error_log.txt")
-        self.stage = stage
+        self.stage = stage if stage is not None else CURRENT_STAGE
         self.pdf_root = Path(pdf_root) if pdf_root else None
         self.overflow_log_path = Path(overflow_log_path) if overflow_log_path else Path("output/overflow_log.txt")
         self.split_only = split_only
@@ -173,11 +183,12 @@ class PaperScreeningPipeline:
         self._qc_sample_ids: set[str] = set()
         self._extraction_criteria = self._extract_criteria_from_prompt(prompt)
 
+        # Resource usage tracker logs tokens and energy for each run.
         self.resource_tracker = ResourceUsageTracker(
             ResourceUsageConfig(
                 resource_log_path=self.resource_log_path,
-                enable_tracking=sustainability_tracking,
-                enable_codecarbon=codecarbon_enabled,
+                enable_tracking=self.sustainability_tracking,
+                enable_codecarbon=codecarbon_enabled if codecarbon_enabled is not None else False,
                 stage=self.stage,
                 qc_sample_path=self.qc_sample_path,
             )
@@ -186,14 +197,30 @@ class PaperScreeningPipeline:
         self._run_wall_seconds = 0.0
         self._paper_count = 0
 
+        # Warn if the prompt template is missing the {data} placeholder.
         if not self.split_only and "{data}" not in prompt:
             print(
                 "[warning] prompt is missing {data} placeholder; LLM may not see evidence",
                 file=sys.stderr,
             )
 
-        self.embedder = embedder or EmbeddingBackend(batch_size=batch_size)
-        kb_examples = examples or load_labeled_examples(str(self.knowledge_base_path))
+        # Embedding backend for chunk selection; loads examples if not provided.
+        resolved_batch_size = batch_size if batch_size is not None else SCREENING_DEFAULTS.get("batch_size", 32)
+        self.embedder = embedder or EmbeddingBackend(batch_size=resolved_batch_size)
+        def to_labeled_examples(examples_list):
+            # Accepts list[dict] or list[LabeledExample], returns list[LabeledExample]
+            labeled = []
+            for ex in examples_list:
+                if isinstance(ex, dict) and "label" in ex and "text" in ex:
+                    labeled.append({"label": ex["label"], "text": ex["text"]})
+                else:
+                    raise ValueError("Each example must be a dict with 'label' and 'text' keys.")
+            return labeled
+
+        if examples is not None:
+            kb_examples = to_labeled_examples(examples)
+        else:
+            kb_examples = load_labeled_examples(str(self.knowledge_base_path))
         self.selector = RelevanceSelector(self.embedder, kb_examples)
 
     def run(self) -> bool:
@@ -854,8 +881,12 @@ class PaperScreeningPipeline:
     def _prepare_chunks(self, paper: PaperRecord) -> Tuple[list[dict], int, int]:
         """Create evidence chunks and token counts for one paper."""
 
+        # Always import dynamic config for language
+        from config.user_orchestrator import EMBEDDING_SETTINGS
+        language = str(EMBEDDING_SETTINGS.get("data_language", "en"))
+
         if self.stage == "title_abstract":
-            chunks = chunk_paper_sentences(paper.paper_id, paper.title, paper.abstract, data_language)
+            chunks = chunk_paper_sentences(paper.paper_id, paper.title, paper.abstract, language)
             return chunks, 0, 0
 
         if self.stage in {"full_text", "data_extraction"}:
@@ -868,14 +899,14 @@ class PaperScreeningPipeline:
                 paper.paper_id,
                 paper.title,
                 pdf_text,
-                data_language,
+                language,
                 page_texts=page_texts,
             )
             pdf_text_tokens = self._estimate_text_tokens(pdf_text)
             pdf_visual_tokens = page_count * TOKENS_PER_PAGE_IMAGE
             return chunks, pdf_text_tokens, pdf_visual_tokens
 
-        chunks = chunk_paper_sentences(paper.paper_id, paper.title, paper.abstract, data_language)
+        chunks = chunk_paper_sentences(paper.paper_id, paper.title, paper.abstract, language)
         return chunks, 0, 0
 
     def _materialize_paper_folders_full_text(self) -> None:
@@ -1247,23 +1278,28 @@ class PaperScreeningPipeline:
 
         try:
             if use_api:
+                # Import dynamic config for model and base_url
+                from config.user_orchestrator import LLM_SETTINGS
+                model = str(LLM_SETTINGS["model"])
+                base_url = LLM_SETTINGS.get("base_url")
+                base_url = str(base_url) if base_url is not None else None
                 responder = OpenAIResponder(
                     data=context,
-                    model=gpustack_model,
+                    model=model,
                     prompt_template=prompt,
-                    client=self._get_openai_client(),
+                    client=self._get_openai_client(base_url=base_url),
                 )
                 return responder.generate_response()
         except Exception as exc:  # pylint: disable=broad-except
             return f"LLM error: {exc}", None
         return None, None
 
-    def _get_openai_client(self):
+    def _get_openai_client(self, base_url: str | None = None):
         """Create a configured OpenAI API client."""
 
         from openai import OpenAI
 
-        return OpenAI(api_key=os.environ.get("LLM_API_KEY"), base_url=gpustack_base_url)
+        return OpenAI(api_key=os.environ.get("LLM_API_KEY"), base_url=base_url)
 
     def _log_error(self, paper_id: str, message: str) -> None:
         """Append errors to the error log for transparency."""

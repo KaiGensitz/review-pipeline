@@ -244,13 +244,52 @@ def run_pipeline(
         Path(PATH_SETTINGS.get("overflow_log", stage_root / f"{stage_prefix}overflow_log_{timestamp_label}.txt")), stage
     )
 
-    top_k = top_k if top_k is not None else require_setting(SCREENING_DEFAULTS, "top_k", "SCREENING_DEFAULTS")
-    score_threshold = score_threshold if score_threshold is not None else require_setting(SCREENING_DEFAULTS, "score_threshold", "SCREENING_DEFAULTS")
-    sample_size = sample_size if sample_size is not None else require_setting(SCREENING_DEFAULTS, "sample_size", "SCREENING_DEFAULTS")
-    sample_seed = sample_seed if sample_seed is not None else require_setting(SCREENING_DEFAULTS, "sample_seed", "SCREENING_DEFAULTS")
-    batch_size = batch_size if batch_size is not None else require_setting(SCREENING_DEFAULTS, "batch_size", "SCREENING_DEFAULTS")
+    def _safe_int(val, default=None):
+        if val is None:
+            return default
+        if isinstance(val, int):
+            return val
+        if isinstance(val, float):
+            return int(val)
+        if isinstance(val, str):
+            try:
+                return int(val)
+            except Exception:
+                pass
+        raise ValueError(f"Cannot convert {val!r} to int")
+
+    def _safe_float(val, default=None):
+        if val is None:
+            return default
+        if isinstance(val, float):
+            return val
+        if isinstance(val, int):
+            return float(val)
+        if isinstance(val, str):
+            try:
+                return float(val)
+            except Exception:
+                pass
+        raise ValueError(f"Cannot convert {val!r} to float")
+
+    def _safe_bool(val, default=None):
+        if val is None:
+            return default
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, (int, float)):
+            return bool(val)
+        if isinstance(val, str):
+            return val.lower() in ("1", "true", "yes", "on")
+        raise ValueError(f"Cannot convert {val!r} to bool")
+
+    top_k = top_k if top_k is not None else _safe_int(require_setting(SCREENING_DEFAULTS, "top_k", "SCREENING_DEFAULTS"))
+    score_threshold = score_threshold if score_threshold is not None else _safe_float(require_setting(SCREENING_DEFAULTS, "score_threshold", "SCREENING_DEFAULTS"))
+    sample_size = sample_size if sample_size is not None else _safe_int(require_setting(SCREENING_DEFAULTS, "sample_size", "SCREENING_DEFAULTS"))
+    sample_seed = sample_seed if sample_seed is not None else _safe_int(require_setting(SCREENING_DEFAULTS, "sample_seed", "SCREENING_DEFAULTS"))
+    batch_size = batch_size if batch_size is not None else _safe_int(require_setting(SCREENING_DEFAULTS, "batch_size", "SCREENING_DEFAULTS"))
     sustainability_tracking = (
-        require_setting(SCREENING_DEFAULTS, "sustainability_tracking", "SCREENING_DEFAULTS")
+        _safe_bool(require_setting(SCREENING_DEFAULTS, "sustainability_tracking", "SCREENING_DEFAULTS"))
         if sustainability_tracking is None
         else sustainability_tracking
     )
@@ -260,7 +299,18 @@ def run_pipeline(
     examples = load_labeled_examples(kb_file)
     neg_patterns = STAGE_RULES.get(stage, {}).get("neg_patterns", [])
     if neg_patterns:
-        examples.extend(_load_negative_examples_from_csvs(csv_dir_path, neg_patterns))
+        neg_examples = _load_negative_examples_from_csvs(csv_dir_path, neg_patterns)
+        # Ensure all negatives are dicts with 'label' and 'text' keys (LabeledExample structure)
+        for neg in neg_examples:
+            if "label" in neg and "text" in neg:
+                examples.append({"label": str(neg["label"]), "text": str(neg["text"])})
+
+    # Ensure csv_dir is always a str (never None)
+    if csv_dir is None:
+        raise ValueError("csv_dir must not be None")
+
+    # Cast examples to list[dict] for type safety
+    from typing import cast
 
     pipeline = PaperScreeningPipeline(
         csv_dir=csv_dir,
@@ -290,7 +340,7 @@ def run_pipeline(
         split_only=split_only,
         quiet=quiet,
         summary_to_console=False,
-        examples=examples,
+        examples=cast(list[dict], examples),
     )
     ran = pipeline.run()
 
