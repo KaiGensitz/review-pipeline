@@ -185,7 +185,7 @@ python main.py
    - Split eligibility files (each also ends with the same summary fields):
       - `title_abstract_eligibility_select_<qc_sample|remaining_sample>_*.jsonl` (is_eligible=True)
       - `title_abstract_eligibility_irrelevant_<qc_sample|remaining_sample>_*.jsonl` (is_eligible=False)
-   - Eligibility index: output/title_abstract/title_abstract_eligibility_index.csv (one row per eligibility file). Column definitions:
+   - Eligibility index for non-coders: output/title_abstract/title_abstract_eligibility_index.csv (one row per eligibility file). Column definitions:
       - sample_selection: stage + run segment + decision split (e.g., title_abstract_qc_sample_irrelevant).
       - stage: pipeline stage (title_abstract, full_text, data_extraction).
       - decision_split: which slice the file holds (all, select/included, irrelevant/excluded).
@@ -196,6 +196,7 @@ python main.py
       - max_seconds: slowest single paper in the split.
       - timestamp: when the summary row was written (UTC).
       - file_path: absolute path to the eligibility JSONL file (placed last for easy copy/open).
+   - QC validation alignment (AI vs human decisions and reasons, including agreements): output/title_abstract/title_abstract_validation_alignment.csv and output/full_text/full_text_validation_alignment.csv. Columns: ID, human_decision, ai_decision, decision_match (bool), human_note (free-text Notes), human_tag (explicit Covidence tags), ai_reason (LLM tag), reason_match (bool, compares ai_reason to human_tag only), plus Title/Abstract/Authors/Year when present.
 
 ### Validate AI vs human labels (optional, non-coder steps)
 ## Screening validation (title/abstract)

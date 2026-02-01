@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Generator, Iterable, Tuple
+from typing import Generator, Iterable, Tuple, TextIO
 from statistics import median
 
 try:
@@ -311,8 +311,8 @@ class PaperScreeningPipeline:
         elig_writer = None
         text_writer = None
         chunk_writer = None
-        extra_decision_writers: dict[bool, object] = {}
-        writer_paths: dict[object, Path] = {}
+        extra_decision_writers: dict[bool, TextIO] = {}
+        writer_paths: dict[TextIO, Path] = {}
         elig_main_count = 0
         extra_counts: dict[bool, int] = {True: 0, False: 0}
         reason_counts_main: dict[str, int] = {}
@@ -370,8 +370,9 @@ class PaperScreeningPipeline:
                 + "\n"
             )
 
+        times_by_decision: dict[bool, list[float]] = {True: [], False: []}
+
         try:
-            times_by_decision: dict[bool, list[float]] = {True: [], False: []}
 
             for idx, paper in enumerate(papers_iter, start=1):
                 self._paper_count = idx
@@ -413,13 +414,16 @@ class PaperScreeningPipeline:
                     reason_val = self._parse_exclusion_reason(record["llm_decision"])
                     if reason_val:
                         reason_counts_main[reason_val] = reason_counts_main.get(reason_val, 0) + 1
-                    extra_writer = extra_decision_writers.get(is_eligible_val)
-                    if extra_writer is not None and isinstance(is_eligible_val, bool):
-                        extra_writer.write(json.dumps(payload) + "\n")
-                        extra_counts[is_eligible_val] += 1
-                        times_by_decision[is_eligible_val].append(paper_elapsed)
-                        if reason_val:
-                            reason_counts_split[is_eligible_val][reason_val] = reason_counts_split[is_eligible_val].get(reason_val, 0) + 1
+                    if isinstance(is_eligible_val, bool):
+                        extra_writer = extra_decision_writers.get(is_eligible_val)
+                        if extra_writer is not None:
+                            extra_writer.write(json.dumps(payload) + "\n")
+                            extra_counts[is_eligible_val] += 1
+                            times_by_decision[is_eligible_val].append(paper_elapsed)
+                            if reason_val:
+                                reason_counts_split[is_eligible_val][reason_val] = (
+                                    reason_counts_split[is_eligible_val].get(reason_val, 0) + 1
+                                )
 
                 if chunk_writer:
                     chunk_writer.write(
@@ -488,7 +492,9 @@ class PaperScreeningPipeline:
                 """human readable hint: append per-file totals with share and timing percentiles."""
 
                 percent = (count / total_planned * 100.0) if total_planned else 0.0
-                time_stats = self._percentiles(self._paper_times if writer is elig_writer else times_by_decision.get(_reverse_lookup_writer(writer), []))
+                decision_key = _reverse_lookup_writer(writer)
+                decision_times = times_by_decision.get(decision_key, []) if isinstance(decision_key, bool) else []
+                time_stats = self._percentiles(self._paper_times if writer is elig_writer else decision_times)
                 summary: dict[str, object] = {
                     "meta": "summary",
                     "paper_count": count,

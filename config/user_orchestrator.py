@@ -25,6 +25,29 @@ CSV_DIR = REPO_ROOT / "input"  # folder where you place Covidence exports
 QC_ENABLED = True  # False = skip QC sampling and go straight to full screening
 QC_SAMPLE_RATE = 0.10  # percentage of papers to include in QC sample
 
+# Covidence study tags used for validation (case-insensitive)
+STUDY_TAGS_INCLUDE = [
+    "no smartphone technology",   # Maps to Concept 1
+    "no artificial intelligence", # Maps to Concept 2
+    "no physical activity",       # Maps to Outcome
+    "not adult population",       # Maps to Population
+    "not urban context",          # Maps to Context
+    "wrong publication type",     # Protocol, Review, etc.
+    "language not en/de",         # Specificity improves rigor
+    "full text not available"     # Standard scoping review exclusion
+]
+
+# Study tags to ignore (e.g., test/sample markers)
+STUDY_TAGS_IGNORE = [
+	"title/abstract screening test sample",
+	"data extraction test sample",
+	"fulltext screening test sample",
+	"ongoing study",
+	"possible rct",
+	"not rct",
+]
+
+
 # STAGE_RULES defines what each phase needs (read this like a checklist):
 # - screen_patterns: which CSV files are the main inputs for that phase.
 # - neg_patterns: optional CSVs used to add negative examples to the knowledge base.

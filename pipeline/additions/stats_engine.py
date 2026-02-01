@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -18,7 +19,7 @@ import pandas as pd
 import seaborn as sns
 from scipy.stats import norm
 
-from config.user_orchestrator import CURRENT_STAGE
+from config.user_orchestrator import CURRENT_STAGE, STUDY_TAGS_IGNORE, STUDY_TAGS_INCLUDE
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 OUTPUT_DIR = ROOT / "output" / CURRENT_STAGE
@@ -28,15 +29,8 @@ STAGE_OUTPUT_DIR = OUTPUT_DIR
 EXTRACTION_AI_PATH = OUTPUT_DIR / f"{CURRENT_STAGE}_extraction_results.jsonl"
 EXTRACTION_HUMAN_PATH = ROOT / "input" / "data_extraction_consensus.csv"
 
-# Substrings to look for in human exclusion reasons
-EXCLUSION_TAGS = [
-    "not_adult_population",
-    "no smartphone technology",
-    "no artificial intelligence",
-    "no physical activity",
-    "not urban context",
-    "wrong publication type",
-]
+EXCLUSION_TAGS = [t.lower() for t in STUDY_TAGS_INCLUDE]
+IGNORE_TAGS = {t.lower() for t in STUDY_TAGS_IGNORE}
 
 
 def _stage_file(name: str, suffix: str | None = None) -> Path:
@@ -105,16 +99,33 @@ def _normalize_id_column(df: pd.DataFrame) -> pd.Series:
     raise KeyError("Could not find an ID column in Covidence export")
 
 
-def _extract_reason(value: Optional[str]) -> str:
-    """Map free-text reasons into a small set of tags."""
+def _normalize_tag_text(value: str) -> str:
+    text = value.strip().lower().replace("_", " ").replace("-", " ")
+    text = " ".join(text.split())
+    return text
+
+
+def _extract_tags(value: Optional[object]) -> list[str]:
+    """human readable hint: map explicit Covidence tags to the curated include list; ignores notes."""
 
     if not isinstance(value, str):
-        return "Unspecified Reason"
-    lower = value.lower()
-    for tag in EXCLUSION_TAGS:
-        if tag.lower() in lower:
-            return tag
-    return "Unspecified Reason"
+        return []
+
+    found: list[str] = []
+    seen: set[str] = set()
+    parts = re.split(r"[;,|\n]", value)
+    for raw in parts:
+        norm = _normalize_tag_text(raw)
+        if not norm or norm in IGNORE_TAGS:
+            continue
+        for tag in EXCLUSION_TAGS:
+            if _normalize_tag_text(tag) in norm:
+                canon = _normalize_tag_text(tag)
+                if canon not in seen:
+                    seen.add(canon)
+                    found.append(tag)
+                break
+    return found
 
 
 def _extract_ft_reason(notes_val: Optional[str]) -> str:
@@ -171,12 +182,19 @@ def _load_qc_human_file(path: Path) -> pd.DataFrame:
         raise KeyError("QC human file must include a decision column (e.g., human_decision).")
     df["human_decision"] = df[decision_col].apply(_parse_human_decision)
 
-    reason_col = None
-    for cand in ["human_reason", "reason", "notes", "Notes", "Tags", "tags"]:
+    note_col = None
+    for cand in ["human_reason", "reason", "notes", "Notes"]:
         if cand in df.columns:
-            reason_col = cand
+            note_col = cand
             break
-    df["human_reason"] = df[reason_col] if reason_col else "QC human review"
+    df["human_note"] = df[note_col] if note_col else "QC human review"
+
+    tag_col = None
+    for cand in ["human_tag", "Tags", "tags"]:
+        if cand in df.columns:
+            tag_col = cand
+            break
+    df["human_tag"] = df[tag_col].apply(lambda v: " | ".join(_extract_tags(v)) if isinstance(v, str) else "") if tag_col else ""
 
     df = df.dropna(subset=["human_decision"]).copy()
     return df
@@ -204,15 +222,22 @@ def _load_human(stage: str, args) -> pd.DataFrame:
         df_exc = _clean_cols(pd.read_csv(excluded_path))
 
         df_inc["human_decision"] = 1
-        df_inc["human_reason"] = "Included at full text"
+        df_inc["human_note"] = "Included at full text"
+        df_inc["human_tag"] = ""
 
         df_exc["human_decision"] = 0
-        reason_col = None
-        for cand in ["Notes", "notes", "Note", "note", "Tags", "tags", "Tag", "tag"]:
+        note_col = None
+        for cand in ["Notes", "notes", "Note", "note"]:
             if cand in df_exc.columns:
-                reason_col = cand
+                note_col = cand
                 break
-        df_exc["human_reason"] = df_exc[reason_col].apply(_extract_ft_reason) if reason_col else "Unspecified Reason"
+        tag_col = None
+        for cand in ["Tags", "tags", "Tag", "tag"]:
+            if cand in df_exc.columns:
+                tag_col = cand
+                break
+        df_exc["human_note"] = df_exc[note_col].apply(_extract_ft_reason) if note_col else "Unspecified Reason"
+        df_exc["human_tag"] = df_exc[tag_col].apply(lambda v: " | ".join(_extract_tags(v)) if isinstance(v, str) else "") if tag_col else ""
 
         df_inc["covidence_id"] = _normalize_id_column(df_inc)
         df_exc["covidence_id"] = _normalize_id_column(df_exc)
@@ -233,15 +258,40 @@ def _load_human(stage: str, args) -> pd.DataFrame:
     df_no = _clean_cols(pd.read_csv(irrelevant_path))
 
     df_yes["human_decision"] = 1
-    df_yes["human_reason"] = "Included (Yes/Maybe)"
+    note_col_yes = None
+    for cand in ["Notes", "notes", "Note", "note"]:
+        if cand in df_yes.columns:
+            note_col_yes = cand
+            break
+    tag_col_yes = None
+    for cand in ["Tags", "tags", "Tag", "tag"]:
+        if cand in df_yes.columns:
+            tag_col_yes = cand
+            break
+    df_yes["human_note"] = (
+        df_yes[note_col_yes].fillna("Included (Yes/Maybe)").astype(str).str.strip().replace("", "Included (Yes/Maybe)")
+        if note_col_yes
+        else "Included (Yes/Maybe)"
+    )
+    df_yes["human_tag"] = df_yes[tag_col_yes].apply(lambda v: " | ".join(_extract_tags(v)) if isinstance(v, str) else "") if tag_col_yes else ""
 
     df_no["human_decision"] = 0
-    reason_col = None
-    for cand in ["Tags", "tags", "Tag", "tag", "Notes", "notes", "Note", "note"]:
+    note_col_no = None
+    for cand in ["Notes", "notes", "Note", "note"]:
         if cand in df_no.columns:
-            reason_col = cand
+            note_col_no = cand
             break
-    df_no["human_reason"] = df_no[reason_col].apply(_extract_reason) if reason_col else "Unspecified Reason"
+    tag_col_no = None
+    for cand in ["Tags", "tags", "Tag", "tag"]:
+        if cand in df_no.columns:
+            tag_col_no = cand
+            break
+    df_no["human_note"] = (
+        df_no[note_col_no].fillna("Unspecified Reason").astype(str).str.strip().replace("", "Unspecified Reason")
+        if note_col_no
+        else "Unspecified Reason"
+    )
+    df_no["human_tag"] = df_no[tag_col_no].apply(lambda v: " | ".join(_extract_tags(v)) if isinstance(v, str) else "") if tag_col_no else ""
 
     df_yes["covidence_id"] = _normalize_id_column(df_yes)
     df_no["covidence_id"] = _normalize_id_column(df_no)
@@ -303,14 +353,13 @@ def _parse_ai_decision(val) -> Tuple[Optional[int], str]:
     return None, reason
 
 
-
 def _load_ai() -> tuple[pd.DataFrame, Path]:
-    """Load AI screening decisions from JSONL and return the file path used."""
+    """Load AI screening decisions; require QC main eligibility (no split tags)."""
 
-    ai_path = _find_latest_match([f"{CURRENT_STAGE}_eligibility_*.jsonl"], [STAGE_OUTPUT_DIR])
+    ai_path = _find_latest_match([f"{CURRENT_STAGE}_eligibility_qc_sample_*.jsonl"], [STAGE_OUTPUT_DIR])
     if not ai_path:
         raise FileNotFoundError(
-            f"Missing AI eligibility file for {CURRENT_STAGE}. Expected {CURRENT_STAGE}_eligibility_*.jsonl in {STAGE_OUTPUT_DIR}."
+            f"Missing QC AI eligibility file for {CURRENT_STAGE}. Expected {CURRENT_STAGE}_eligibility_qc_sample_*.jsonl in {STAGE_OUTPUT_DIR}."
         )
 
     records = []
@@ -405,32 +454,51 @@ def _metrics(tp: int, tn: int, fp: int, fn: int) -> dict:
     }
 
 
-def _write_discrepancies(df: pd.DataFrame, suffix: str | None = None) -> None:
-    """Save the AI vs human disagreements for manual review."""
+def _write_alignment(df: pd.DataFrame, suffix: str | None = None) -> None:
+    """human readable hint: single QC alignment file with decisions and reasons."""
 
-    discrep = df[df["ai_decision"] != df["human_decision"]].copy()
-    if discrep.empty:
-        empty_path = _stage_file("discrepancy_log.csv", suffix)
-        if empty_path.exists():
-            empty_path.unlink()
+    if df.empty:
+        path = _stage_file("validation_alignment.csv", suffix)
+        if path.exists():
+            path.unlink()
         return
+
+    def _norm(val: object) -> str:
+        text = "" if val is None else str(val)
+        return _normalize_tag_text(text)
+
+    def _tag_list(val: object) -> list[str]:
+        return _extract_tags(val)
+
+    out = df.copy()
+    out.rename(columns={"covidence_id": "ID"}, inplace=True)
+    out["decision_match"] = out["ai_decision"] == out["human_decision"]
+    ai_tags = out["ai_reason"].apply(_tag_list)
+    human_tags_series = out["human_tag"].apply(_tag_list) if "human_tag" in out.columns else pd.Series([[]] * len(out))
+    out["human_tag"] = human_tags_series.apply(lambda tags: " | ".join(tags))
+    out["reason_match"] = [bool(a and h and (a[0] in h)) for a, h in zip(ai_tags, human_tags_series)]
 
     metadata_cols: list[str] = []
     for variants in [("Title", "title"), ("Abstract", "abstract"), ("Authors", "authors"), ("Year", "year")]:
         for candidate in variants:
-            if candidate in discrep.columns:
+            if candidate in out.columns:
                 metadata_cols.append(candidate)
                 break
 
-    discrep_out = discrep.copy()
-    discrep_out.rename(columns={"covidence_id": "ID"}, inplace=True)
-    discrep_out["Human_Tag"] = discrep_out.get("human_reason", "")
-    discrep_out["AI_Reason"] = discrep_out.get("ai_reason", "")
+    cols = [
+        "ID",
+        "human_decision",
+        "ai_decision",
+        "decision_match",
+        "human_note",
+        "human_tag",
+        "ai_reason",
+        "reason_match",
+    ] + metadata_cols
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    output_cols = ["ID", "Human_Tag", "AI_Reason"] + metadata_cols
-    discrep_out[[c for c in output_cols if c in discrep_out.columns]].to_csv(
-        _stage_file("discrepancy_log.csv", suffix), index=False, encoding="utf-8"
+    out[[c for c in cols if c in out.columns]].to_csv(
+        _stage_file("validation_alignment.csv", suffix), index=False, encoding="utf-8"
     )
 
 
@@ -513,9 +581,15 @@ def _extract_timestamp_suffix(path: Path) -> str | None:
 
     name = path.stem
     prefix = f"{CURRENT_STAGE}_eligibility_"
-    if name.startswith(prefix):
-        return name.replace(prefix, "")
-    return None
+    if not name.startswith(prefix):
+        return None
+
+    suffix = name.replace(prefix, "")
+    # Strip decision-split markers if present to keep validation names clean.
+    for token in ["select_", "irrelevant_", "included_", "excluded_"]:
+        if suffix.startswith(token):
+            suffix = suffix.replace(token, "", 1)
+    return suffix
 
 
 def _load_qc_sample_ids(suffix: str | None) -> set[str] | None:
@@ -564,13 +638,13 @@ def validate_screening(stage: str, args) -> None:
     tp, tn, fp, fn = _confusion(merged)
     stats = _metrics(tp, tn, fp, fn)
 
-    _write_discrepancies(merged, suffix)
+    _write_alignment(merged, suffix)
     _write_report(stats, tp, tn, fp, fn, stage, suffix)
     _plot_confusion(tp, tn, fp, fn, suffix)
 
     print(f"Validation complete (screening stage: {stage}). Outputs:")
     print(f"- {_stage_file('validation_stats_report.txt', suffix).relative_to(ROOT)}")
-    print(f"- {_stage_file('discrepancy_log.csv', suffix).relative_to(ROOT)}")
+    print(f"- {_stage_file('validation_alignment.csv', suffix).relative_to(ROOT)}")
     print(f"- {_stage_file('validation_matrix.png', suffix).relative_to(ROOT)}")
 
 

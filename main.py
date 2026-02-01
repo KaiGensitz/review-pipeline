@@ -123,6 +123,9 @@ def _run_validation() -> bool:
 
     Note: compares AI decisions to human QC exports.
     """
+    if not _prompt_yes_no("[qc] Have Covidence study tags changed since the last run? Update STUDY_TAGS_INCLUDE/STUDY_TAGS_IGNORE in config/user_orchestrator.py before continuing. Proceed with validation? [y/n]: "):
+        print("[qc] Validation skipped so you can update study tags.")
+        return False
     if not _prompt_yes_no("[qc] Run validation now? [y/n]: "):
         return False
 
