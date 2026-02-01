@@ -318,6 +318,7 @@ def run_pipeline(
         eligibility_output_path=str(eligibility_output),
         chunks_output_path=str(chunks_output),
         text_output_path=str(text_output),
+        run_label=run_label,
         error_log_path=str(error_log),
         resource_log_path=str(resource_log_path),
         codecarbon_enabled=codecarbon_enabled,

@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Generator, Iterable, Tuple
+from statistics import median
 
 try:
     from tqdm import tqdm
@@ -118,6 +119,7 @@ class PaperScreeningPipeline:
         sample_seed: int | None = None,
         sustainability_tracking: bool | None = None,
         resource_log_path: str | None = None,
+        run_label: str = "run",
         codecarbon_enabled: bool | None = None,
         qc_sample_path: str | None = None,
         qc_sample_readable_path: str | None = None,
@@ -159,6 +161,7 @@ class PaperScreeningPipeline:
         self.sample_seed = sample_seed if sample_seed is not None else SCREENING_DEFAULTS.get("sample_seed", None)
         self.sustainability_tracking = sustainability_tracking if sustainability_tracking is not None else SCREENING_DEFAULTS.get("sustainability_tracking", True)
         self.resource_log_path = Path(resource_log_path) if resource_log_path else Path("output/resource_usage.log")
+        self.run_label = run_label
         self.qc_sample_path = Path(qc_sample_path) if qc_sample_path else Path("output/qc_sample_batch.csv")
         self.qc_sample_readable_path = (
             Path(qc_sample_readable_path)
@@ -177,6 +180,8 @@ class PaperScreeningPipeline:
         self.split_only = split_only
         self.quiet = quiet
         self.summary_to_console = summary_to_console
+        # human readable hint: tracking response times to surface p50/p95 for operators.
+        self._paper_times: list[float] = []
 
         self._row_counter = 0
         self._paper_folders: list[Path] = []
@@ -191,10 +196,11 @@ class PaperScreeningPipeline:
                 enable_codecarbon=codecarbon_enabled if codecarbon_enabled is not None else False,
                 stage=self.stage,
                 qc_sample_path=self.qc_sample_path,
+                run_label=self.run_label,
             )
         )
 
-        self._run_wall_seconds = 0.0
+        self._total_runtime_seconds = 0.0
         self._paper_count = 0
 
         # Warn if the prompt template is missing the {data} placeholder.
@@ -305,21 +311,47 @@ class PaperScreeningPipeline:
         elig_writer = None
         text_writer = None
         chunk_writer = None
+        extra_decision_writers: dict[bool, object] = {}
+        writer_paths: dict[object, Path] = {}
+        elig_main_count = 0
+        extra_counts: dict[bool, int] = {True: 0, False: 0}
+        reason_counts_main: dict[str, int] = {}
+        reason_counts_split: dict[bool, dict[str, int]] = {True: {}, False: {}}
+        index_entries: list[dict[str, object]] = []
 
-        if self.stage == "title_abstract":
+        if self.stage in {"title_abstract", "full_text"}:
             self.eligibility_output_path.parent.mkdir(parents=True, exist_ok=True)
             self.text_output_path.parent.mkdir(parents=True, exist_ok=True)
             elig_writer = open(self.eligibility_output_path, "w", encoding="utf-8")
+            writer_paths[elig_writer] = self.eligibility_output_path
             text_writer = open(self.text_output_path, "w", encoding="utf-8")
-            elig_writer.write(
-                json.dumps(
-                    {
-                        "meta": "eligibility_records",
-                        "description": f"Per-paper LLM decisions for stage '{self.stage}' (JSONL).",
-                    }
-                )
-                + "\n"
+            meta_line = json.dumps(
+                {
+                    "meta": "eligibility_records",
+                    "description": f"Per-paper LLM decisions for stage '{self.stage}' (JSONL).",
+                }
             )
+            elig_writer.write(meta_line + "\n")
+
+            # Stage-specific split outputs for eligibility decisions
+            def _variant_path(tag: str) -> Path:
+                return self.eligibility_output_path.with_name(
+                    self.eligibility_output_path.name.replace("eligibility_", f"eligibility_{tag}_", 1)
+                )
+
+            if self.stage in {"title_abstract", "full_text"}:
+                select_tag = "select" if self.stage == "title_abstract" else "included"
+                exclude_tag = "irrelevant" if self.stage == "title_abstract" else "excluded"
+                extra_paths = {
+                    True: _variant_path(select_tag),
+                    False: _variant_path(exclude_tag),
+                }
+                for truthy, path in extra_paths.items():
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    writer = open(path, "w", encoding="utf-8")
+                    writer.write(meta_line + "\n")
+                    extra_decision_writers[truthy] = writer
+                    writer_paths[writer] = path
             text_writer.write(
                 f"SCREENING RESULTS (stage: {self.stage})\n"
                 "This file summarizes per-paper selections and decisions for manual review.\n\n"
@@ -339,6 +371,8 @@ class PaperScreeningPipeline:
             )
 
         try:
+            times_by_decision: dict[bool, list[float]] = {True: [], False: []}
+
             for idx, paper in enumerate(papers_iter, start=1):
                 self._paper_count = idx
 
@@ -362,20 +396,30 @@ class PaperScreeningPipeline:
                 paper_start_ts = time.time()
                 record, token_stats, extraction_payload = self._process_paper(paper)
                 paper_elapsed = time.time() - paper_start_ts
+                self._paper_times.append(paper_elapsed)
 
                 if elig_writer:
-                    elig_writer.write(
-                        json.dumps(
-                            {
-                                "paper_id": record["paper_id"],
-                                "llm_decision": record["llm_decision"],
-                                "diagnostics": record["diagnostics"],
-                                "metadata": record["metadata"],
-                                "stage": self.stage,
-                            }
-                        )
-                        + "\n"
-                    )
+                    payload = {
+                        "paper_id": record["paper_id"],
+                        "llm_decision": record["llm_decision"],
+                        "diagnostics": record["diagnostics"],
+                        "metadata": record["metadata"],
+                        "stage": self.stage,
+                    }
+                    elig_writer.write(json.dumps(payload) + "\n")
+                    elig_main_count += 1
+
+                    is_eligible_val = self._parse_is_eligible(record["llm_decision"])
+                    reason_val = self._parse_exclusion_reason(record["llm_decision"])
+                    if reason_val:
+                        reason_counts_main[reason_val] = reason_counts_main.get(reason_val, 0) + 1
+                    extra_writer = extra_decision_writers.get(is_eligible_val)
+                    if extra_writer is not None and isinstance(is_eligible_val, bool):
+                        extra_writer.write(json.dumps(payload) + "\n")
+                        extra_counts[is_eligible_val] += 1
+                        times_by_decision[is_eligible_val].append(paper_elapsed)
+                        if reason_val:
+                            reason_counts_split[is_eligible_val][reason_val] = reason_counts_split[is_eligible_val].get(reason_val, 0) + 1
 
                 if chunk_writer:
                     chunk_writer.write(
@@ -416,20 +460,103 @@ class PaperScreeningPipeline:
             elif not self.quiet:
                 print()
         finally:
+            def _reverse_lookup_writer(writer_obj):
+                for decision_val, w in extra_decision_writers.items():
+                    if w is writer_obj:
+                        return decision_val
+                return None
+
+            def _decision_label(writer_obj):
+                if writer_obj is elig_writer:
+                    return "all"
+                flag = _reverse_lookup_writer(writer_obj)
+                if flag is True:
+                    return "select" if self.stage == "title_abstract" else "included"
+                if flag is False:
+                    return "irrelevant" if self.stage == "title_abstract" else "excluded"
+                return "unknown"
+
+            def _reason_lookup(writer_obj):
+                key = _reverse_lookup_writer(writer_obj)
+                if writer_obj is elig_writer:
+                    return reason_counts_main
+                if isinstance(key, bool):
+                    return reason_counts_split.get(key, {})
+                return {}
+
+            def _write_summary(writer, count: int) -> None:
+                """human readable hint: append per-file totals with share and timing percentiles."""
+
+                percent = (count / total_planned * 100.0) if total_planned else 0.0
+                time_stats = self._percentiles(self._paper_times if writer is elig_writer else times_by_decision.get(_reverse_lookup_writer(writer), []))
+                summary: dict[str, object] = {
+                    "meta": "summary",
+                    "paper_count": count,
+                    "percent_of_stage": percent,
+                    "response_time_seconds": time_stats,
+                }
+                reason_payload = _reason_lookup(writer)
+                if reason_payload:
+                    summary["exclusion_reasons"] = reason_payload
+                writer.write(json.dumps(summary) + "\n")
+                decision_label = _decision_label(writer)
+                sample_selection = f"{self.stage}_{self.run_label}_{decision_label}"
+                index_entries.append(
+                    {
+                        "sample_selection": sample_selection,
+                        "stage": self.stage,
+                        "decision_split": decision_label,
+                        "paper_count": count,
+                        "percent_of_stage": percent,
+                        "p50_seconds": time_stats.get("p50", 0.0),
+                        "p95_seconds": time_stats.get("p95", 0.0),
+                        "max_seconds": time_stats.get("max", 0.0),
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "file_path": str(writer_paths.get(writer, "")),
+                    }
+                )
+
             if elig_writer:
+                _write_summary(elig_writer, elig_main_count)
                 elig_writer.close()
+            for truthy, writer in extra_decision_writers.items():
+                _write_summary(writer, extra_counts.get(truthy, 0))
+                writer.close()
+
+            # human readable hint: index CSV makes it easy for non-coders to find the right eligibility file.
+            if index_entries:
+                index_path = self.stage_output_dir / f"{self.stage}_eligibility_index.csv"
+                exists = index_path.exists()
+                with open(index_path, "a", newline="", encoding="utf-8") as handle:
+                    fieldnames = [
+                        "sample_selection",
+                        "stage",
+                        "decision_split",
+                        "paper_count",
+                        "percent_of_stage",
+                        "p50_seconds",
+                        "p95_seconds",
+                        "max_seconds",
+                        "timestamp",
+                        "file_path",
+                    ]
+                    writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                    if not exists:
+                        writer.writeheader()
+                    for row in index_entries:
+                        writer.writerow(row)
             if text_writer:
                 text_writer.close()
             if chunk_writer:
                 chunk_writer.close()
 
-        self._run_wall_seconds = time.time() - start_time
+        self._total_runtime_seconds = time.time() - start_time
 
         if not self.quiet and self.summary_to_console:
             print("[pipeline] screening run completed successfully")
 
         if self.sustainability_tracking:
-            self.resource_tracker.stop_run(self._run_wall_seconds, self._paper_count)
+            self.resource_tracker.stop_run(self._total_runtime_seconds, self._paper_count)
 
         if self.error_log_path.exists() and self.error_log_path.stat().st_size > 0 and (
             not self.quiet and self.summary_to_console
@@ -1279,10 +1406,10 @@ class PaperScreeningPipeline:
         try:
             if use_api:
                 # Import dynamic config for model and base_url
-                from config.user_orchestrator import LLM_SETTINGS
-                model = str(LLM_SETTINGS["model"])
-                base_url = LLM_SETTINGS.get("base_url")
-                base_url = str(base_url) if base_url is not None else None
+                from config.user_orchestrator import LLM_SETTINGS, require_setting
+                model = str(require_setting(LLM_SETTINGS, "screening_model", "LLM_SETTINGS"))
+                base_url_val = LLM_SETTINGS.get("gpustack_base_url")
+                base_url = str(base_url_val) if base_url_val is not None else None
                 responder = OpenAIResponder(
                     data=context,
                     model=model,
@@ -1300,6 +1427,59 @@ class PaperScreeningPipeline:
         from openai import OpenAI
 
         return OpenAI(api_key=os.environ.get("LLM_API_KEY"), base_url=base_url)
+
+    @staticmethod
+    def _percentiles(values: list[float]) -> dict:
+        """human readable hint: provide quick p50/p95/max without heavy deps."""
+
+        if not values:
+            return {"p50": 0.0, "p95": 0.0, "max": 0.0}
+        vals = sorted(values)
+        n = len(vals)
+        p50 = median(vals)
+        p95_idx = max(0, int(0.95 * n) - 1)
+        p95 = vals[p95_idx]
+        return {"p50": float(p50), "p95": float(p95), "max": float(vals[-1])}
+
+    @staticmethod
+    def _parse_is_eligible(decision: object) -> bool | None:
+        """Best-effort extraction of is_eligible from the LLM decision payload."""
+
+        payload = decision
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                return None
+
+        if isinstance(payload, dict):
+            val = payload.get("is_eligible")
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, str):
+                val_low = val.lower()
+                if val_low in {"true", "yes", "eligible", "include", "maybe", "neutral"}:
+                    return True
+                if val_low in {"false", "no", "ineligible", "exclude"}:
+                    return False
+        return None
+
+    @staticmethod
+    def _parse_exclusion_reason(decision: object) -> str | None:
+        """human readable hint: derive exclusion_reason_category if present in LLM output."""
+
+        payload = decision
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                return None
+        if isinstance(payload, dict):
+            for key in ("exclusion_reason_category", "exclusion_reason", "reason"):
+                val = payload.get(key)
+                if val:
+                    return str(val)
+        return None
 
     def _log_error(self, paper_id: str, message: str) -> None:
         """Append errors to the error log for transparency."""

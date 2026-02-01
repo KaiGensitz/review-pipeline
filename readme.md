@@ -1,17 +1,6 @@
 
 # Smartphone AI PA Screening Tool
 
-## Backup to GitHub (for non-coders)
-After running the pipeline, you will be prompted in the terminal:
-   "Do you want to back up your changes to GitHub now? (y/n):"
-If you type `y`, the tool will automatically commit and push all your changes to GitHub for you.
-
-You can also run the backup manually anytime by running:
-```
-python backup_to_github.py
-```
-This ensures your work is always safely backed up online.
-
 End-to-end study screening for a scoping review. Built for fast LLM decisions, reproducible sampling, and transparent logs.
 
 ### Advanced Explanation (short)
@@ -74,6 +63,17 @@ cd "C:\Users\gensitz\OneDrive - Universitaet Bern\Desktop\my_new_project\review-
    - python -m pipeline.additions.stats_engine
 
 Details for each stage are at the end of this file.
+
+## Backup to GitHub (for non-coders)
+After running the pipeline, you will be prompted in the terminal:
+   "Do you want to back up your changes to GitHub now? (y/n):"
+If you type `y`, the tool will automatically commit and push all your changes to GitHub for you.
+
+You can also run the backup manually anytime by running:
+```
+python backup_to_github.py
+```
+This ensures your work is always safely backed up online.
 
 ## What the system does
 - Human researchers run the upstream JBI + PRISMA-ScR search. Raw citation exports are hashed and archived (e.g., BORIS Portal) to preserve static inputs.
@@ -176,24 +176,16 @@ python main.py
    - On Windows, run `.venv\Scripts\python main.py` to build [input/per_paper_data_extraction/](input/per_paper_data_extraction/) and stop if PDFs are missing. On macOS/Linux, use `python main.py`. Add PDFs if prompted, then rerun with the same interpreter.
 
 ## Outputs (what to look for)
-- All primary outputs are prefixed with the stage (CURRENT_STAGE) to avoid cross-stage overwrites.
-- Eligibility decisions: output/<stage>/<stage>_eligibility_<qc_sample|remaining_sample>_YYYYMMDD_HH-MM.jsonl (title_abstract + full_text only).
-- Evidence chunks: output/<stage>/<stage>_selected_chunks_<qc_sample|remaining_sample>_YYYYMMDD_HH-MM.jsonl (title_abstract only).
-- Human-friendly summary: output/<stage>/<stage>_screening_results_readable_<qc_sample|remaining_sample>_YYYYMMDD_HH-MM.txt.
-- QC sample: [output/<stage>/](output/) holds stage-prefixed qc_sample_batch_YYYYMMDD_HH-MM.csv and qc_sample_batch_readable_YYYYMMDD_HH-MM.txt (new rounds create new timestamps).
-- Resource log (token counts + CodeCarbon totals + per‑token rates): output/<stage>/<stage>_resource_usage_<qc_sample|remaining_sample>_YYYYMMDD_HH-MM.log includes prompt/response/embedding/pdf token counts (API exact when available; otherwise estimates) and per-run CodeCarbon totals. Time-savings uses the QC sample size read from the QC CSV; if reviewer minutes stay at 0, the log will add a hint that time-savings was skipped.
-- CodeCarbon summary is appended to the same resource log when enabled (see config/user_orchestrator.py).
-- Validation outputs are also stage-prefixed: validation_stats_report.txt, discrepancy_log.csv, and validation_matrix.png are emitted as title_abstract_*/full_text_*/data_extraction_* depending on CURRENT_STAGE.
-- Full_text selected chunks are stored per paper in input/per_paper_full_text/<paper_folder>/full_text_selected_chunks.jsonl.
-- Data_extraction selected chunks are stored per paper in input/per_paper_data_extraction/<paper_folder>/data_extraction_selected_chunks.jsonl (reused if copied from full_text).
-- Data_extraction outputs live in output/data_extraction/<paper_folder>/:
    - data_extraction_extraction_results.jsonl
    - data_extraction_extraction_results.csv
    - data_extraction_evidence.json
    Aggregated run artifacts (QC + resource usage) are stored in output/data_extraction/.
 
-
-
+   - `title_abstract_eligibility_<qc_sample|remaining_sample>_*.jsonl` (summary: count, % of run, p50/p95/max seconds, exclusion reasons if present)
+   - Split eligibility files (each also ends with the same summary fields):
+      - `title_abstract_eligibility_select_<qc_sample|remaining_sample>_*.jsonl` (is_eligible=True)
+      - `title_abstract_eligibility_irrelevant_<qc_sample|remaining_sample>_*.jsonl` (is_eligible=False)
+   - Eligibility index for non-coders: `output/title_abstract/title_abstract_eligibility_index.csv` (paths, counts, %, p50/p95/max).
 ### Validate AI vs human labels (optional, non-coder steps)
 ## Screening validation (title/abstract)
 1) Set CURRENT_STAGE = "title_abstract" in [config/user_orchestrator.py](config/user_orchestrator.py).

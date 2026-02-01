@@ -33,6 +33,7 @@ class ResourceUsageConfig:
 		enable_codecarbon: If True, track emissions via CodeCarbon (if installed).
 		stage: Current pipeline stage (title_abstract | full_text | data_extraction).
 		qc_sample_path: Optional QC sample CSV path to derive actual QC counts.
+		run_label: Run label suffix (qc_sample or remaining_sample) for file naming.
 	"""
 
 	resource_log_path: Path
@@ -40,6 +41,7 @@ class ResourceUsageConfig:
 	enable_codecarbon: bool = True
 	stage: str = "title_abstract"
 	qc_sample_path: Path | None = None
+	run_label: str = "run"
 
 
 class CarbonTrackerManager:
@@ -114,7 +116,7 @@ class CarbonTrackerManager:
 		finally:
 			self._started = False
 
-	def rename_emissions_csv(self, timestamp_label: str | None = None) -> Path | None:
+	def rename_emissions_csv(self, timestamp_label: str | None = None, run_label: str | None = None) -> Path | None:
 		"""Rename CodeCarbon's emissions.csv to a stage-scoped, timestamped filename."""
 
 		output_dir = Path(CARBON_CONFIG["output_dir"])
@@ -125,7 +127,8 @@ class CarbonTrackerManager:
 		stage = output_dir.name
 		tracking_mode = CARBON_CONFIG.get("tracking_mode", "machine")
 		stamp = timestamp_label or datetime.now().strftime("%Y%m%d_%H-%M")
-		target = output_dir / f"{stage}_codecarbon_emissions_{tracking_mode}_{stamp}.csv"
+		run_part = run_label or "run"
+		target = output_dir / f"{stage}_codecarbon_emissions_{run_part}_{tracking_mode}_{stamp}.csv"
 
 		if target.exists():
 			for idx in range(1, 1000):
@@ -195,7 +198,7 @@ class ResourceUsageTracker:
 			self._carbon_tracker = CarbonTrackerManager(enabled=True)
 		self._carbon_tracker.start()
 
-	def stop_run(self, run_wall_seconds: float, paper_count: int) -> None:
+	def stop_run(self, total_runtime_seconds: float, paper_count: int) -> None:
 		"""Stop CodeCarbon tracking and append per-run totals."""
 
 		if not self.config.enable_tracking:
@@ -205,8 +208,8 @@ class ResourceUsageTracker:
 		if self._carbon_tracker is not None:
 			emissions_kg = self._carbon_tracker.stop()
 			energy_kwh = self._carbon_tracker.energy_kwh()
-			self._carbon_tracker.rename_emissions_csv()
-		self._write_totals(run_wall_seconds, paper_count, emissions_kg, energy_kwh)
+			self._carbon_tracker.rename_emissions_csv(run_label=self.config.run_label)
+		self._write_totals(total_runtime_seconds, paper_count, emissions_kg, energy_kwh)
 
 	def log_paper(
 		self,
@@ -261,7 +264,7 @@ class ResourceUsageTracker:
 
 	def _write_totals(
 		self,
-		run_wall_seconds: float,
+		total_runtime_seconds: float,
 		paper_count: int,
 		emissions_kg: float | None,
 		energy_kwh: float | None,
@@ -269,7 +272,7 @@ class ResourceUsageTracker:
 		"""Append per-run totals (including CodeCarbon, if available)."""
 
 		timestamp = datetime.utcnow().isoformat()
-		avg_time = (run_wall_seconds / paper_count) if paper_count else 0.0
+		total_runtime_avg_seconds_per_paper = (total_runtime_seconds / paper_count) if paper_count else 0.0
 		human_rate_min_per_paper = None
 		human_minutes_estimate = None
 		time_saved_minutes = None
@@ -295,7 +298,7 @@ class ResourceUsageTracker:
 		if per_reviewer_rates:
 			human_rate_min_per_paper = sum(per_reviewer_rates) / len(per_reviewer_rates)
 			human_minutes_estimate = human_rate_min_per_paper * paper_count
-			pipeline_minutes = run_wall_seconds / 60.0
+			pipeline_minutes = total_runtime_seconds / 60.0
 			time_saved_minutes = human_minutes_estimate - pipeline_minutes
 			if human_minutes_estimate > 0:
 				time_saved_percent = 1.0 - (pipeline_minutes / human_minutes_estimate)
@@ -329,11 +332,11 @@ class ResourceUsageTracker:
 						"codecarbon_energy_kwh_per_1k_tokens": cc_energy_per_1k_tokens,
 						"codecarbon_carbon_g_per_1k_tokens": cc_carbon_g_per_1k_tokens,
 						"codecarbon_carbon_intensity_g_per_kwh": cc_intensity,
-						"run_wall_seconds": run_wall_seconds,
-						"avg_seconds_per_paper": avg_time,
+						"total_runtime_seconds": total_runtime_seconds,
+						"total_runtime_avg_seconds_per_paper": total_runtime_avg_seconds_per_paper,
 						"paper_count": paper_count,
 						"paper_seconds_total": self._resource_totals.get("paper_seconds", 0.0),
-						"paper_seconds_avg": (self._resource_totals.get("paper_seconds", 0.0) / paper_count)
+						"llm_decision_avg_seconds_per_paper": (self._resource_totals.get("paper_seconds", 0.0) / paper_count)
 						if paper_count
 						else 0.0,
 						"human_rate_min_per_paper": human_rate_min_per_paper,

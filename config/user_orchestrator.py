@@ -22,7 +22,7 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY", "")  # API key loaded from .env
 LLM_MODEL = "gpt-oss-120b"  # screening model name on your endpoint
 EMBED_MODEL = "qwen3-embedding-0.6b"  # embedding model name on your endpoint
 CSV_DIR = REPO_ROOT / "input"  # folder where you place Covidence exports
-QC_ENABLED = False  # False = skip QC sampling and go straight to full screening
+QC_ENABLED = True  # False = skip QC sampling and go straight to full screening
 QC_SAMPLE_RATE = 0.10  # percentage of papers to include in QC sample
 
 # STAGE_RULES defines what each phase needs (read this like a checklist):
@@ -138,10 +138,10 @@ PATH_SETTINGS = {
 HUMAN_TIME_CONFIG = {
 	"title_abstract": {
 		"reviewers": [
-			{"id": "human_1", "total_minutes": 0},
-			{"id": "human_2", "total_minutes": 0},
-			{"id": "human_3", "total_minutes": 0},
-			{"id": "human_4", "total_minutes": 0},
+			{"id": "human_1", "total_minutes": 15},
+			{"id": "human_2", "total_minutes": 11},
+			{"id": "human_3", "total_minutes": 3},
+			{"id": "human_4", "total_minutes": 6},
 		],
 	},
 	"full_text": {

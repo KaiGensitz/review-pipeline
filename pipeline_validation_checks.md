@@ -39,7 +39,11 @@ Use this checklist after running `python main.py` (or `.venv\Scripts\python main
   3) Confirm the new QC files have a new timestamp suffix
 - No PDF folder checks appear.
 - Outputs include (output/title_abstract/):
-  - `title_abstract_eligibility_<qc_sample|remaining_sample>_*.jsonl`
+  - `title_abstract_eligibility_<qc_sample|remaining_sample>_*.jsonl` (summary: count, % of run, p50/p95/max seconds, exclusion reasons if present)
+  - Split eligibility (each ends with same summary fields):
+    - `title_abstract_eligibility_select_<qc_sample|remaining_sample>_*.jsonl` (is_eligible=True)
+    - `title_abstract_eligibility_irrelevant_<qc_sample|remaining_sample>_*.jsonl` (is_eligible=False)
+    - Eligibility index: output/title_abstract/title_abstract_eligibility_index.csv (paths, counts, %, p50/p95/max)
   - `title_abstract_selected_chunks_<qc_sample|remaining_sample>_*.jsonl`
   - `title_abstract_screening_results_readable_<qc_sample|remaining_sample>_*.txt`
   - `title_abstract_resource_usage_<qc_sample|remaining_sample>_*.log`
@@ -64,7 +68,10 @@ Use this checklist after running `python main.py` (or `.venv\Scripts\python main
 - If PDFs are missing, you see a list of missing folders.
 - After adding one PDF per folder, screening proceeds and logs missing PDFs (if any).
 - Outputs include (output/full_text/):
-  - `full_text_eligibility_<qc_sample|remaining_sample>_*.jsonl`
+  - `full_text_eligibility_<qc_sample|remaining_sample>_*.jsonl` (summary: count, % of run, p50/p95/max seconds, exclusion reasons if present)
+  - `full_text_eligibility_included_<qc_sample|remaining_sample>_*.jsonl` (is_eligible=True, same summary fields)
+  - `full_text_eligibility_excluded_<qc_sample|remaining_sample>_*.jsonl` (is_eligible=False, same summary fields)
+  - Eligibility index: output/full_text/full_text_eligibility_index.csv (paths, counts, %, p50/p95/max)
   - `full_text_screening_results_readable_<qc_sample|remaining_sample>_*.txt`
   - `full_text_resource_usage_<qc_sample|remaining_sample>_*.log`
   - `full_text_qc_sample_batch_YYYYMMDD_HH-MM.csv`

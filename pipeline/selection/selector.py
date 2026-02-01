@@ -5,7 +5,8 @@ import json
 import os
 import typing
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import cast
 
 import numpy as np
 from dotenv import load_dotenv
@@ -14,7 +15,9 @@ from openai import OpenAI
 from config.user_orchestrator import EMBEDDING_SETTINGS, require_setting
 
 
-gpustack_embedding_model = require_setting(EMBEDDING_SETTINGS, "gpustack_embedding_model", "EMBEDDING_SETTINGS")
+gpustack_embedding_model: str = str(
+	require_setting(EMBEDDING_SETTINGS, "gpustack_embedding_model", "EMBEDDING_SETTINGS")
+)
 gpustack_base_url = require_setting(EMBEDDING_SETTINGS, "gpustack_base_url", "EMBEDDING_SETTINGS")
 embedding_cache_size = require_setting(EMBEDDING_SETTINGS, "embedding_cache_size", "EMBEDDING_SETTINGS")
 
@@ -70,19 +73,17 @@ class EmbeddingBackend:
 	"""Fetch embeddings from the API and cache them for reuse."""
 
 	batch_size: int = 32
-	cache: "OrderedDict[str, np.ndarray]" | None = None
-	cache_size: int | None = None
+	cache: OrderedDict[str, np.ndarray] = field(default_factory=OrderedDict)
+	cache_size: int | None = cast(int | None, embedding_cache_size)
 
 	def __post_init__(self) -> None:
 		load_dotenv()
-		self.cache = OrderedDict() if self.cache is None else self.cache
-		self.cache_size = embedding_cache_size if self.cache_size is None else self.cache_size
-		self._client = OpenAI(api_key=os.environ.get("LLM_API_KEY"), base_url=gpustack_base_url)
+		self._client = OpenAI(api_key=os.environ.get("LLM_API_KEY"), base_url=str(gpustack_base_url))
 
 	def embed_texts(self, texts: list[str]) -> tuple[list[np.ndarray], dict | None]:
 		"""Return embeddings for texts plus usage metadata when the API provides it."""
 
-		results: list[np.ndarray] = [None] * len(texts)
+		results: list[np.ndarray | None] = [None] * len(texts)
 		missing: list[str] = []
 		missing_idx: list[int] = []
 		usage_totals: dict | None = None
@@ -107,7 +108,10 @@ class EmbeddingBackend:
 			for idx, embedding in zip(missing_idx, normalized_batches):
 				results[idx] = embedding
 
-		return results, usage_totals
+		if any(embedding is None for embedding in results):
+			raise RuntimeError("Failed to populate all embeddings")
+
+		return [cast(np.ndarray, embedding) for embedding in results], usage_totals
 
 	def _maybe_evict_cache(self) -> None:
 		"""Evict oldest cached embeddings to cap memory usage."""
@@ -125,7 +129,7 @@ class EmbeddingBackend:
 
 		for start in range(0, len(texts), self.batch_size):
 			batch = texts[start : start + self.batch_size]
-			response = self._client.embeddings.create(model=gpustack_embedding_model, input=batch)
+			response = self._client.embeddings.create(model=str(gpustack_embedding_model), input=batch)
 			batch_embeddings = [item.embedding for item in response.data]
 			embeddings.extend(batch_embeddings)
 
