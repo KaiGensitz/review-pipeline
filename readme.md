@@ -185,7 +185,18 @@ python main.py
    - Split eligibility files (each also ends with the same summary fields):
       - `title_abstract_eligibility_select_<qc_sample|remaining_sample>_*.jsonl` (is_eligible=True)
       - `title_abstract_eligibility_irrelevant_<qc_sample|remaining_sample>_*.jsonl` (is_eligible=False)
-   - Eligibility index for non-coders: `output/title_abstract/title_abstract_eligibility_index.csv` (paths, counts, %, p50/p95/max).
+   - Eligibility index: output/title_abstract/title_abstract_eligibility_index.csv (one row per eligibility file). Column definitions:
+      - sample_selection: stage + run segment + decision split (e.g., title_abstract_qc_sample_irrelevant).
+      - stage: pipeline stage (title_abstract, full_text, data_extraction).
+      - decision_split: which slice the file holds (all, select/included, irrelevant/excluded).
+      - paper_count: number of papers in that file.
+      - percent_of_stage: share of that split relative to all papers processed in the stage (%).
+      - p50_seconds: median per-paper processing time for this split.
+      - p95_seconds: 95th-percentile per-paper processing time (tail/near-worst typical case).
+      - max_seconds: slowest single paper in the split.
+      - timestamp: when the summary row was written (UTC).
+      - file_path: absolute path to the eligibility JSONL file (placed last for easy copy/open).
+
 ### Validate AI vs human labels (optional, non-coder steps)
 ## Screening validation (title/abstract)
 1) Set CURRENT_STAGE = "title_abstract" in [config/user_orchestrator.py](config/user_orchestrator.py).
