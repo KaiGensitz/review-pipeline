@@ -7,7 +7,7 @@ Critical requirement: Use the provided full-text PDF content for this study. Ass
 Task description: Assess eligibility and return a single JSON object. The eligibility flag must be strictly boolean (true or false); no neutral/maybe state is allowed.
 
 Decision frame (apply in this order):
-- Return is_eligible = true only when all inclusion signals are clearly present in the PDF: adults (18+), smartphone/mHealth interface, explicit AI/ML, PA assessment/promotion, empirical/protocol/system design, and urban or unspecified/mixed context (not explicitly rural/remote).
+- Return is_eligible = true only when inclusion signals are present in the PDF: adults (18+), smartphone/mHealth interface, explicit AI/ML, PA assessment/promotion, empirical/protocol/system design, and urban or unspecified/mixed context (not explicitly rural/remote).
 - Return is_eligible = false when any exclusion is clearly supported by the PDF (e.g., children-only, no smartphone path, no AI/ML, no PA focus, purely editorial/review, explicitly rural/remote context).
 - If critical elements remain unclear after reviewing the PDF, err on the side of is_eligible = false (no neutral option).
 

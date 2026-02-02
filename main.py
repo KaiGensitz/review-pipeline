@@ -15,6 +15,17 @@ from config.user_orchestrator import (
 )
 from pipeline.core.run_screening import run_pipeline
 
+# Track whether every interactive prompt in this run received a "yes" response.
+_PROMPT_STATE: dict[str, bool] = {"all_yes": True}
+
+
+def _run_pipeline_guarded(*, mark_failure: bool = True, **kwargs) -> bool:
+    """Run the pipeline and mark prompts as not-all-yes when it returns False."""
+    result = run_pipeline(**kwargs)
+    if mark_failure and not result:
+        _PROMPT_STATE["all_yes"] = False
+    return bool(result)
+
 
 def _ensure_csv_inputs(csv_dir: Path) -> bool:
     """Check that the input folder exists and has at least one CSV file.
@@ -105,12 +116,16 @@ def _prompt_yes_no(message: str) -> bool:
     """
     if not sys.stdin.isatty():
         print("[error] This workflow requires an interactive terminal.")
+        _PROMPT_STATE["all_yes"] = False
         return False
     while True:
         resp = input(message).strip().lower()
         if resp in {"y", "yes"}:
+            # Keep the all-yes flag true when the user affirms.
+            _PROMPT_STATE["all_yes"] = _PROMPT_STATE.get("all_yes", True)
             return True
         if resp in {"n", "no"}:
+            _PROMPT_STATE["all_yes"] = False
             return False
         print("Please answer 'y' or 'n'.")
 
@@ -123,15 +138,15 @@ def _run_validation() -> bool:
 
     Note: compares AI decisions to human QC exports.
     """
-    if not _prompt_yes_no("[qc] Have Covidence study tags changed since the last run? Update STUDY_TAGS_INCLUDE/STUDY_TAGS_IGNORE in config/user_orchestrator.py before continuing. Proceed with validation? [y/n]: "):
-        print("[qc] Validation skipped so you can update study tags.")
-        return False
     if not _prompt_yes_no("[qc] Run validation now? [y/n]: "):
         return False
 
     print("[qc] Running validation using auto-detected CSVs in input/. If files are missing, a warning will appear.")
     result = subprocess.run([sys.executable, "-m", "pipeline.additions.stats_engine"], check=False)
-    return result.returncode == 0
+    if result.returncode != 0:
+        _PROMPT_STATE["all_yes"] = False
+        return False
+    return True
 
 
 def _run_qc_loop(stage: str, sample_rate: float, quiet: bool = False) -> bool:
@@ -149,7 +164,7 @@ def _run_qc_loop(stage: str, sample_rate: float, quiet: bool = False) -> bool:
     """
     force_new_qc = False
     while True:
-        ran = run_pipeline(
+        ran = _run_pipeline_guarded(
             stage=stage,
             confirm_sampling=False,
             sample_rate=sample_rate,
@@ -165,16 +180,15 @@ def _run_qc_loop(stage: str, sample_rate: float, quiet: bool = False) -> bool:
 
         if not _run_validation():
             print("[qc] Validation skipped or failed. Rerun main.py to continue.")
+            _PROMPT_STATE["all_yes"] = False
             return False
 
         if _prompt_yes_no("[qc] Are you satisfied with validation results and do you want to continue with screening of the remaining papers? [y/n]: "):
             return True
 
-        if not _prompt_yes_no("[qc] Start a new QC round with a fresh sample? [y/n]: "):
-            return False
-
-        # Start a new QC round without deleting prior QC files.
-        force_new_qc = True
+        # If not satisfied, stop and let the operator refine prompts/config before rerun.
+        _PROMPT_STATE["all_yes"] = False
+        return False
 
 
 def main() -> None:
@@ -204,6 +218,11 @@ def main() -> None:
         print("[error] QC confirmation requires an interactive terminal. Rerun in an interactive session.")
         return
 
+    # Study tags must be confirmed once before any screening or validation.
+    if not _prompt_yes_no("[qc] Are Covidence study tags the same since the last run? [y/n]: "):
+        print("[qc] Update STUDY_TAGS_INCLUDE/STUDY_TAGS_IGNORE in config/user_orchestrator.py.")
+        return
+
     rule = STAGE_RULES[stage]
     for pattern in rule["screen_patterns"]:
         if not _require_pattern(csv_dir, pattern, f"{stage} required CSV export"):
@@ -212,14 +231,14 @@ def main() -> None:
     if stage == "title_abstract":
         if QC_ENABLED:
             if _run_qc_loop(stage, sample_rate, quiet=False):
-                run_pipeline(stage=stage, confirm_sampling=True, sample_rate=sample_rate, qc_only=False, qc_enabled=False)
+                _run_pipeline_guarded(stage=stage, confirm_sampling=True, sample_rate=sample_rate, qc_only=False, qc_enabled=False)
             return
-        run_pipeline(stage=stage, confirm_sampling=True, sample_rate=sample_rate, qc_only=False, qc_enabled=False)
+        _run_pipeline_guarded(stage=stage, confirm_sampling=True, sample_rate=sample_rate, qc_only=False, qc_enabled=False)
         return
 
     if QC_ENABLED:
         print(f"[main] Preparing per-paper folders for {stage} (no screening in this step)...")
-        run_pipeline(stage=stage, split_only=True, quiet=True)
+        _run_pipeline_guarded(stage=stage, split_only=True, quiet=True, mark_failure=False)
 
         if stage == "data_extraction":
             full_text_dir = csv_dir / "per_paper_full_text"
@@ -245,22 +264,23 @@ def main() -> None:
                 print(f"  - {name}")
 
         if _run_qc_loop(stage, sample_rate, quiet=False):
-            run_pipeline(stage=stage, quiet=False, confirm_sampling=True, sample_rate=sample_rate, qc_only=False, qc_enabled=False)
+            _run_pipeline_guarded(stage=stage, quiet=False, confirm_sampling=True, sample_rate=sample_rate, qc_only=False, qc_enabled=False)
         return
 
     # QC disabled: single screening pass, no pre-run split_only call
-    run_pipeline(stage=stage, quiet=False, confirm_sampling=True, sample_rate=sample_rate, qc_only=False, qc_enabled=False)
+    _run_pipeline_guarded(stage=stage, quiet=False, confirm_sampling=True, sample_rate=sample_rate, qc_only=False, qc_enabled=False)
     return
 
 
 if __name__ == "__main__":
     main()
-    # Offer to trigger backup after pipeline run
+    # Offer to trigger backup after pipeline run only if every prompt was accepted.
     try:
-        resp = input("\nDo you want to back up your changes to GitHub now? (y/n): ").strip().lower()
-        if resp == "y":
-            import subprocess
-            import sys
-            subprocess.run([sys.executable, "backup_to_github.py"])
+        if _PROMPT_STATE.get("all_yes", False):
+            resp = input("\nDo you want to back up your changes to GitHub now? (y/n): ").strip().lower()
+            if resp == "y":
+                import subprocess
+                import sys
+                subprocess.run([sys.executable, "backup_to_github.py"])
     except Exception:
         print("[warning] Could not trigger backup script. Please run backup_to_github.py manually if needed.")

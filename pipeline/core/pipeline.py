@@ -296,6 +296,24 @@ class PaperScreeningPipeline:
                     return False
                 self.confirm_sampling = True
 
+            # Remaining run: skip QC papers to avoid re-screening the sample twice.
+            if self.confirm_sampling and not self.qc_only and self._qc_sample_ids:
+                planned_papers = [p for p in planned_papers if p.paper_id not in self._qc_sample_ids]
+                total_planned = len(planned_papers)
+                if not planned_papers:
+                    if not self.quiet:
+                        print("[qc] Remaining run has no papers after removing QC sample; nothing to do.")
+                    return False
+
+        # When QC is disabled for the remaining run, still skip any known QC sample IDs.
+        if not self.qc_enabled and self.confirm_sampling and self._qc_sample_ids:
+            planned_papers = [p for p in planned_papers if p.paper_id not in self._qc_sample_ids]
+            total_planned = len(planned_papers)
+            if not planned_papers:
+                if not self.quiet:
+                    print("[qc] Remaining run has no papers after removing QC sample; nothing to do.")
+                return False
+
         if self.sustainability_tracking:
             self.resource_tracker.start_run()
 
@@ -837,6 +855,7 @@ class PaperScreeningPipeline:
         selected: list[dict] = []
         llm_input = ""
         extraction_payload = None
+        language_used = str(EMBEDDING_SETTINGS.get("data_language", "en"))
 
         def _needs_retry(decision: str) -> bool:
             """Detect obviously incomplete JSON-like LLM outputs."""
@@ -880,7 +899,7 @@ class PaperScreeningPipeline:
                 estimated_input_tokens = prompt_tokens
 
         if not preselected:
-            chunks, pdf_text_tokens, pdf_visual_tokens = self._prepare_chunks(paper)
+            chunks, pdf_text_tokens, pdf_visual_tokens, language_used = self._prepare_chunks(paper)
             if self.stage in {"full_text", "data_extraction"} and not chunks:
                 llm_decision = "LLM skipped: PDF missing or unreadable; see error log."
                 estimated_input_tokens = pdf_text_tokens + pdf_visual_tokens
@@ -990,6 +1009,7 @@ class PaperScreeningPipeline:
                 "preselected_chunks": preselected,
                 "stage": self.stage,
                 "llm_decision_incomplete": llm_decision_incomplete,
+                "language_used": language_used,
             },
             "metadata": paper.metadata,
         }
@@ -1011,15 +1031,15 @@ class PaperScreeningPipeline:
 
         return record, token_stats, extraction_payload
 
-    def _prepare_chunks(self, paper: PaperRecord) -> Tuple[list[dict], int, int]:
-        """Create evidence chunks and token counts for one paper."""
+    def _prepare_chunks(self, paper: PaperRecord) -> Tuple[list[dict], int, int, str]:
+        """Create evidence chunks, token counts, and resolved language for one paper."""
 
         # Always import dynamic config for language (detect once per paper when requested)
         from config.user_orchestrator import EMBEDDING_SETTINGS
         from config.embedding_utils import detect_language
 
         language_setting = str(EMBEDDING_SETTINGS.get("data_language", "en"))
-        resolved_language = language_setting
+        resolved_language = language_setting or "en"
 
         if self.stage == "title_abstract":
             if language_setting in {"auto_first", "auto-first"}:
@@ -1028,13 +1048,13 @@ class PaperScreeningPipeline:
             elif language_setting == "auto":
                 resolved_language = "auto"
             chunks = chunk_paper_sentences(paper.paper_id, paper.title, paper.abstract, resolved_language)
-            return chunks, 0, 0
+            return chunks, 0, 0, resolved_language
 
         if self.stage in {"full_text", "data_extraction"}:
             resolved_path = self._resolve_pdf_path(paper)
             pdf_text, page_count, used_path = self._load_pdf_text(paper, resolved_path)
             if not pdf_text:
-                return [], 0, 0
+                return [], 0, 0, resolved_language
             if language_setting in {"auto_first", "auto-first"}:
                 sample_text = f"{paper.title}\n{pdf_text[:4000]}" if pdf_text else f"{paper.title}\n{paper.abstract}"
                 resolved_language = detect_language(sample_text)
@@ -1050,10 +1070,10 @@ class PaperScreeningPipeline:
             )
             pdf_text_tokens = self._estimate_text_tokens(pdf_text)
             pdf_visual_tokens = page_count * TOKENS_PER_PAGE_IMAGE
-            return chunks, pdf_text_tokens, pdf_visual_tokens
+            return chunks, pdf_text_tokens, pdf_visual_tokens, resolved_language
 
         chunks = chunk_paper_sentences(paper.paper_id, paper.title, paper.abstract, resolved_language)
-        return chunks, 0, 0
+        return chunks, 0, 0, resolved_language
 
     def _materialize_paper_folders_full_text(self) -> None:
         """Split select CSV rows into per-paper folders under csv_dir/per_paper_full_text."""

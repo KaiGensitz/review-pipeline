@@ -1,4 +1,5 @@
 ﻿import sys
+import json
 from pathlib import Path
 from datetime import datetime
 
@@ -152,6 +153,40 @@ def _load_negative_examples_from_csvs(csv_dir: Path, patterns: list[str]) -> lis
                 negatives.append({"label": "NEG", "text": text})
 
     return negatives
+
+
+def _append_qc_records_to_remaining(stage_root: Path, stage_prefix: str, remaining_path: Path) -> None:
+    """Append QC sample eligibility records to the remaining-sample output."""
+    qc_files = sorted(stage_root.glob(f"{stage_prefix}eligibility_qc_sample_*.jsonl"))
+    if not qc_files:
+        return
+    qc_path = max(qc_files, key=lambda p: p.stat().st_mtime)
+    lines_to_append: list[str] = []
+    try:
+        with open(qc_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(obj, dict) and obj.get("meta") in {"eligibility_records", "summary"}:
+                    continue
+                lines_to_append.append(json.dumps(obj))
+    except Exception:
+        return
+
+    if not lines_to_append:
+        return
+
+    try:
+        with open(remaining_path, "a", encoding="utf-8") as out:
+            for line in lines_to_append:
+                out.write(line + "\n")
+    except Exception:
+        return
 
 
 def run_pipeline(
@@ -312,6 +347,21 @@ def run_pipeline(
     # Cast examples to list[dict] for type safety
     from typing import cast
 
+    # Load QC sample IDs even when qc_enabled is False so we can skip them later.
+    qc_sample_ids: set[str] = set()
+    if confirm_sampling and qc_sample_path and Path(qc_sample_path).exists():
+        import csv
+
+        try:
+            with open(qc_sample_path, "r", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    pid = row.get("paper_id") or row.get("Covidence #") or row.get("Covidence#")
+                    if pid:
+                        qc_sample_ids.add(str(pid))
+        except Exception:
+            qc_sample_ids = set()
+
     pipeline = PaperScreeningPipeline(
         csv_dir=csv_dir,
         knowledge_base_path=kb_file,
@@ -343,6 +393,8 @@ def run_pipeline(
         summary_to_console=False,
         examples=cast(list[dict], examples),
     )
+    if qc_sample_ids:
+        pipeline._qc_sample_ids = qc_sample_ids  # reuse prior QC sample IDs to skip in remaining run
     ran = pipeline.run()
 
     # Split-only: folder prep only; do not print screening output statuses
@@ -353,6 +405,8 @@ def run_pipeline(
         return False
 
     elig_path = eligibility_output.resolve()
+    if qc_sample_ids and confirm_sampling and not qc_only:
+        _append_qc_records_to_remaining(stage_root, stage_prefix, elig_path)
     chunks_path = chunks_output.resolve()
     text_path = text_output.resolve()
     resource_log_resolved = resource_log_path.resolve()
