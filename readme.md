@@ -5,6 +5,18 @@ End-to-end study screening for a scoping review. Built for fast LLM decisions, r
 
 ### Advanced Explanation (short)
 
+## Quick start (3 steps)
+1) Edit config/user_orchestrator.py: set CURRENT_STAGE, LLM_MODEL, EMBED_MODEL; ensure .env has LLM_API_KEY.
+2) Drop the right CSVs into input/: *_screen_csv_* (title_abstract), *_select_csv_* (full_text), *_included_csv_* (data_extraction). Add PDFs when prompted for full_text/data_extraction.
+3) Run the tool (venv active): Windows: .venv\Scripts\python main.py; macOS/Linux: python main.py. Expect a quality control sample prompt (~10% by default) before full selection.
+
+## Common pitfalls (quick checks)
+- Missing PDFs: full_text/data_extraction stop and list folders; add one PDF per folder, then rerun.
+- Empty or missing knowledge base CSV: run stops; each stage needs POS/NEG examples in knowledge-base/.
+- LLM_API_KEY missing in .env: API calls fail immediately; add the key then rerun.
+- No connection to the University of Bern server: connect via eduroam, campus LAN, or VPN before running.
+- quality control disabled by accident: QC_ENABLED=False skips QC entirely; keep True unless you intentionally bypass QC.
+
 ## Before you start
 - Install Python 3.12.
 - Put a compatible API key in [.env](.env) as LLM_API_KEY.

@@ -9,21 +9,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(REPO_ROOT / ".env")
 
 # ---------------------------------------------------------------------------
-# One-line input needed everytime (edit the value before the comment)
+# Edit these each run (minimal inputs for non-coders)
 # ---------------------------------------------------------------------------
 
 CURRENT_STAGE = "full_text"  # title_abstract | full_text | data_extraction
-
-# ---------------------------------------------------------------------------
-# Setting input needed once (edit the value before the comment)
-# ---------------------------------------------------------------------------
-
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")  # API key loaded from .env
 LLM_MODEL = "gpt-oss-120b"  # screening model name on your endpoint
 EMBED_MODEL = "qwen3-embedding-0.6b"  # embedding model name on your endpoint
-CSV_DIR = REPO_ROOT / "input"  # folder where you place Covidence exports
+CSV_DIR = REPO_ROOT / "input"  # where you drop Covidence exports
 QC_ENABLED = True  # False = skip QC sampling and go straight to full screening
-QC_SAMPLE_RATE = 0.10  # percentage of papers to include in QC sample
+QC_SAMPLE_RATE = 0.10  # 0.0–1.0; 0.10 = ~10% QC sample
 
 # Covidence study tags used for validation (case-insensitive)
 STUDY_TAGS_INCLUDE = [
@@ -266,6 +261,8 @@ def load_user_config() -> UserConfig:
 		)
 	if not PROMPT_FILE.exists():
 		raise FileNotFoundError(f"Missing prompt script for CURRENT_STAGE='{CURRENT_STAGE}'. Expected file at: {PROMPT_FILE}.")
+	if QC_SAMPLE_RATE < 0 or QC_SAMPLE_RATE > 1:
+		raise ValueError("QC_SAMPLE_RATE must be between 0.0 and 1.0 (e.g., 0.10 for ~10%).")
 
 	return UserConfig(
 		current_stage=CURRENT_STAGE,

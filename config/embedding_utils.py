@@ -1,4 +1,8 @@
-﻿"""Helpers for reading PDFs and splitting text into sentences (moved from embedding/utils.py)."""
+﻿"""Helpers for reading PDFs and splitting text into sentences (moved from embedding/utils.py).
+
+Notes for setup: requires NLTK sentence tokenizer data (auto-downloaded on first run) and
+only distinguishes English vs German via simple stopword counts; other languages default to English splitting.
+"""
 
 from __future__ import annotations
 

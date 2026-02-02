@@ -7,6 +7,7 @@ Use this checklist after running `python main.py` (or `.venv\Scripts\python main
 - The terminal can run validation for you and prompt for required CSVs (press Enter to auto-detect).
 - LLM input per paper consists of a static stage prompt (prompt_script) plus dynamic evidence chunks; `prompt_tokens` from the API include both, so counts vary by paper.
 - If QC_ENABLED=False, QC-only and the prompt are skipped.
+- If a knowledge base CSV is empty or missing for the stage, the run stops until you add POS/NEG rows.
 - Validation compares only the QC sample list that matches the eligibility timestamp.
 - **QC sample files exist** in output/<stage>/
   - `qc_sample_batch_YYYYMMDD_HH-MM.csv` (new rounds create new timestamps)

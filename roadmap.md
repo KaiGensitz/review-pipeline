@@ -45,6 +45,7 @@ Proof-of-concept runs for title/abstract and full_text screening are complete. T
 
 ## Phase 7 — Documentation & handoff (ongoing)
 - README and pipeline_validation_checks reflect current outputs and workflows.
+- Quick-start + pitfalls added for non-coders; keep stage prompts and QC guardrails aligned with README updates.
 
 ## Milestones (updated)
 - M1: Gold‑standard validation for title_abstract and full_text (10% human sample).

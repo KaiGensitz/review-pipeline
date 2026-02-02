@@ -29,6 +29,7 @@ class OpenAIResponder:
 	def generate_response(self, retries: int = 1, backoff_seconds: float = 0.5) -> tuple[str, dict | None]:
 		"""Get one response from the model and return text plus usage metadata."""
 
+		last_error: Exception | None = None
 		for attempt in range(retries + 1):
 			try:
 				response = self.client.chat.completions.create(
@@ -60,10 +61,16 @@ class OpenAIResponder:
 					usage_dict = None
 				return text, usage_dict
 			except Exception as exc:  # pylint: disable=broad-except
-				print(f"[error] openai chat attempt {attempt + 1} failed: {exc}", file=sys.stderr)
+				last_error = exc
+				print(
+					f"[error] openai chat attempt {attempt + 1}/{retries + 1} failed for model='{self.model}': {exc}",
+					file=sys.stderr,
+				)
 				if attempt < retries:
 					time.sleep(backoff_seconds)
 					continue
-				raise RuntimeError(f"An error occurred during response generation: {exc}")
+			raise RuntimeError(
+				f"LLM response generation failed for model='{self.model}' after {retries + 1} attempt(s): {last_error}"
+			)
 
 		raise RuntimeError("LLM response generation failed without a response.")
