@@ -1,4 +1,6 @@
-﻿"""Validation utilities for screening and data extraction outputs.
+﻿"""Direct run: python -m pipeline.additions.stats_engine
+
+Validation utilities for screening and data extraction outputs.
 
 This module compares AI outputs to human labels (screening) and to the
 adjudicated consensus table (data extraction). Outputs include a
