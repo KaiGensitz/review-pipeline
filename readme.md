@@ -176,11 +176,6 @@ python main.py
    - On Windows, run `.venv\Scripts\python main.py` to build [input/per_paper_data_extraction/](input/per_paper_data_extraction/) and stop if PDFs are missing. On macOS/Linux, use `python main.py`. Add PDFs if prompted, then rerun with the same interpreter.
 
 ## Outputs (what to look for)
-   - data_extraction_extraction_results.jsonl
-   - data_extraction_extraction_results.csv
-   - data_extraction_evidence.json
-   Aggregated run artifacts (QC + resource usage) are stored in output/data_extraction/.
-
    - `title_abstract_eligibility_<qc_sample|remaining_sample>_*.jsonl` (summary: count, % of run, p50/p95/max seconds, exclusion reasons if present)
    - Split eligibility files (each also ends with the same summary fields):
       - `title_abstract_eligibility_select_<qc_sample|remaining_sample>_*.jsonl` (is_eligible=True)
@@ -196,8 +191,11 @@ python main.py
       - max_seconds: slowest single paper in the split.
       - timestamp: when the summary row was written (UTC).
       - file_path: absolute path to the eligibility JSONL file (placed last for easy copy/open).
-   - QC validation alignment (AI vs human decisions and reasons, including agreements): output/title_abstract/title_abstract_validation_alignment.csv and output/full_text/full_text_validation_alignment.csv. Columns: ID, human_decision, ai_decision, decision_match (bool), human_note (free-text Notes), human_tag (explicit Covidence tags), ai_reason (LLM tag), reason_match (bool, compares ai_reason to human_tag only), plus Title/Abstract/Authors/Year when present.
-
+   - QC validation alignment (AI vs human decisions and reasons, including agreements): 
+      - output/title_abstract/title_abstract_validation_alignment.csv and 
+      - output/full_text/full_text_validation_alignment.csv; 
+         Columns: ID, human_decision, ai_decision, decision_match (bool), human_note (free-text Notes), human_tag (explicit Covidence tags), ai_reason (LLM tag), reason_match (bool, compares ai_reason to human_tag), plus Title/Abstract/Authors/Year when present.
+   
 ### Validate AI vs human labels (optional, non-coder steps)
 ## Screening validation (title/abstract)
 1) Set CURRENT_STAGE = "title_abstract" in [config/user_orchestrator.py](config/user_orchestrator.py).
@@ -239,6 +237,3 @@ Use when you have AI extraction outputs and (Covidence) adjudicated consensus.
 - Before screening, the pipeline selects a deterministic QC sample of ceil(sample_rate * planned_papers) (default 10%).
 - It writes stage-scoped CSV + readable files, prompts before QC-only screening, and waits for your validation approval before full screening.
 - Validation uses only the QC sample list that matches the screening timestamp.
-
-## Optional utilities
-- Removed to keep the workflow lean. If you need chat, vector-DB tooling, or notebooks, add them back as separate tools.

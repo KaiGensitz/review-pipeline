@@ -135,12 +135,14 @@ class EmbeddingBackend:
 
 			usage = getattr(response, "usage", None)
 			if usage is not None:
-				usage_dict = usage.model_dump() if hasattr(usage, "model_dump") else dict(usage)
+				usage_dict_raw = usage.model_dump() if hasattr(usage, "model_dump") else dict(usage)
+				# Guard against None values returned by the provider; treat missing as zero to keep arithmetic safe.
+				usage_dict = {key: (usage_dict_raw.get(key) or 0) for key in usage_dict_raw}
 				if usage_totals is None:
-					usage_totals = {k: usage_dict.get(k, 0) for k in usage_dict}
+					usage_totals = dict(usage_dict)
 				else:
 					for key, value in usage_dict.items():
-						usage_totals[key] = usage_totals.get(key, 0) + value
+						usage_totals[key] = (usage_totals.get(key, 0) or 0) + (value or 0)
 
 		return embeddings, usage_totals
 

@@ -12,7 +12,7 @@ load_dotenv(REPO_ROOT / ".env")
 # One-line input needed everytime (edit the value before the comment)
 # ---------------------------------------------------------------------------
 
-CURRENT_STAGE = "title_abstract"  # title_abstract | full_text | data_extraction
+CURRENT_STAGE = "full_text"  # title_abstract | full_text | data_extraction
 
 # ---------------------------------------------------------------------------
 # Setting input needed once (edit the value before the comment)
@@ -110,7 +110,7 @@ EMBEDDING_SETTINGS = {
 	"gpustack_embedding_model": EMBED_MODEL,  # embedding model; affects relevance ranking in all stages
 	"use_api_embeddings": True,  # True = use API embeddings; False would disable embedding-based selection
 	"gpustack_base_url": "https://gpustack.unibe.ch/v1",  # embedding endpoint URL; must match your server
-	"data_language": "auto",  # "english" | "german" | "auto"; affects sentence splitting in all stages
+	"data_language": "auto_first",  # "english" | "german" | "auto" | "auto_first"; auto_first = detect once per paper, then reuse
 	"chunk_size": 20,  # sentences per chunk; larger = fewer chunks, cheaper but less granular evidence
 	"overlap_size": 2,  # sentences overlapped; higher = better continuity but more duplicate cost
 	"embedding_cache_size": 2048,  # cached embeddings in RAM; higher = faster, more memory

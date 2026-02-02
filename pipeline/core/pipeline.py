@@ -1014,12 +1014,20 @@ class PaperScreeningPipeline:
     def _prepare_chunks(self, paper: PaperRecord) -> Tuple[list[dict], int, int]:
         """Create evidence chunks and token counts for one paper."""
 
-        # Always import dynamic config for language
+        # Always import dynamic config for language (detect once per paper when requested)
         from config.user_orchestrator import EMBEDDING_SETTINGS
-        language = str(EMBEDDING_SETTINGS.get("data_language", "en"))
+        from config.embedding_utils import detect_language
+
+        language_setting = str(EMBEDDING_SETTINGS.get("data_language", "en"))
+        resolved_language = language_setting
 
         if self.stage == "title_abstract":
-            chunks = chunk_paper_sentences(paper.paper_id, paper.title, paper.abstract, language)
+            if language_setting in {"auto_first", "auto-first"}:
+                sample_text = f"{paper.title}\n{paper.abstract}"
+                resolved_language = detect_language(sample_text)
+            elif language_setting == "auto":
+                resolved_language = "auto"
+            chunks = chunk_paper_sentences(paper.paper_id, paper.title, paper.abstract, resolved_language)
             return chunks, 0, 0
 
         if self.stage in {"full_text", "data_extraction"}:
@@ -1027,19 +1035,24 @@ class PaperScreeningPipeline:
             pdf_text, page_count, used_path = self._load_pdf_text(paper, resolved_path)
             if not pdf_text:
                 return [], 0, 0
+            if language_setting in {"auto_first", "auto-first"}:
+                sample_text = f"{paper.title}\n{pdf_text[:4000]}" if pdf_text else f"{paper.title}\n{paper.abstract}"
+                resolved_language = detect_language(sample_text)
+            elif language_setting == "auto":
+                resolved_language = "auto"
             page_texts = self._load_pdf_pages(used_path)
             chunks = chunk_fulltext_sentences(
                 paper.paper_id,
                 paper.title,
                 pdf_text,
-                language,
+                resolved_language,
                 page_texts=page_texts,
             )
             pdf_text_tokens = self._estimate_text_tokens(pdf_text)
             pdf_visual_tokens = page_count * TOKENS_PER_PAGE_IMAGE
             return chunks, pdf_text_tokens, pdf_visual_tokens
 
-        chunks = chunk_paper_sentences(paper.paper_id, paper.title, paper.abstract, language)
+        chunks = chunk_paper_sentences(paper.paper_id, paper.title, paper.abstract, resolved_language)
         return chunks, 0, 0
 
     def _materialize_paper_folders_full_text(self) -> None:
