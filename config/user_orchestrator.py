@@ -12,7 +12,7 @@ load_dotenv(REPO_ROOT / ".env")
 # Edit these each run (minimal inputs for non-coders)
 # ---------------------------------------------------------------------------
 
-CURRENT_STAGE = "full_text"  # title_abstract | full_text | data_extraction
+CURRENT_STAGE = "title_abstract"  # title_abstract | full_text | data_extraction
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")  # API key loaded from .env
 LLM_MODEL = "gpt-oss-120b"  # screening model name on your endpoint
 EMBED_MODEL = "qwen3-embedding-0.6b"  # embedding model name on your endpoint
@@ -27,7 +27,7 @@ STUDY_TAGS_INCLUDE = [
     "no physical activity",       # Maps to Outcome
     "not adult population",       # Maps to Population
     "not urban context",          # Maps to Context
-    "wrong publication type",     # Protocol, Review, etc.
+    "wrong publication type",     # Commentary, Review, etc.
     "language not en/de",         # Specificity improves rigor
     "full text not available"     # Standard scoping review exclusion
 ]
@@ -134,7 +134,7 @@ SCREENING_DEFAULTS = {
 CARBON_CONFIG = {
 	"project_name": "review_pipeline",  # label used by CodeCarbon in all stages
 	"output_dir": str(REPO_ROOT / "output" / CURRENT_STAGE),  # where emissions logs are written
-	"measure_power_secs": 15,  # sampling interval in seconds; lower = more detail, more overhead
+	"measure_power_secs": 60,  # sampling interval in seconds; lower = more detail, more overhead
 	"tracking_mode": "process",  # "machine" = whole device; "process" = this run only
 	"on_csv_write": "append",  # "append" keeps a history; "update" overwrites totals
 	"save_to_file": True,  # False disables file output (still logs in memory)
@@ -156,10 +156,10 @@ PATH_SETTINGS = {
 HUMAN_TIME_CONFIG = {
 	"title_abstract": {
 		"reviewers": [
-			{"id": "human_1", "total_minutes": 15},
-			{"id": "human_2", "total_minutes": 11},
-			{"id": "human_3", "total_minutes": 3},
-			{"id": "human_4", "total_minutes": 6},
+			{"id": "human_1", "total_minutes": 0},
+			{"id": "human_2", "total_minutes": 0},
+			{"id": "human_3", "total_minutes": 0},
+			{"id": "human_4", "total_minutes": 0},
 		],
 	},
 	"full_text": {
