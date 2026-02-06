@@ -97,7 +97,7 @@ def _normalize_id_column(df: pd.DataFrame) -> pd.Series:
     candidates = ["Covidence #", "Covidence#", "paper_id", "id", "ID"]
     for col in candidates:
         if col in df.columns:
-            return df[col].astype(str)
+            return df[col].astype(str).str.strip().str.lstrip("#")
     raise KeyError("Could not find an ID column in Covidence export")
 
 
@@ -356,32 +356,54 @@ def _parse_ai_decision(val) -> Tuple[Optional[int], str]:
 
 
 def _load_ai() -> tuple[pd.DataFrame, Path]:
-    """Load AI screening decisions; require QC main eligibility (no split tags)."""
+    """Aggregate AI QC decisions across main and retry runs, keeping latest per paper."""
 
-    ai_path = _find_latest_match([f"{CURRENT_STAGE}_eligibility_qc_sample_*.jsonl"], [STAGE_OUTPUT_DIR])
-    if not ai_path:
+    # human readable hint: gather all QC eligibility JSONL files (main + retries) and prefer newest per paper_id.
+    stage_files: list[Path] = []
+    patterns = [
+        f"{CURRENT_STAGE}_qc_sample_*_eligibility_*.jsonl",  # catches main and retry naming
+        f"{CURRENT_STAGE}_eligibility_qc_sample_*.jsonl",    # legacy naming
+    ]
+    for pat in patterns:
+        stage_files.extend(STAGE_OUTPUT_DIR.glob(pat))
+
+    # Exclude split outputs to avoid double-counting per decision type.
+    stage_files = [p for p in stage_files if "eligibility_select" not in p.name and "eligibility_irrelevant" not in p.name]
+
+    if not stage_files:
         raise FileNotFoundError(
-            f"Missing QC AI eligibility file for {CURRENT_STAGE}. Expected {CURRENT_STAGE}_eligibility_qc_sample_*.jsonl in {STAGE_OUTPUT_DIR}."
+            "Missing QC AI eligibility file(s). Expected qc_sample eligibility JSONL in "
+            f"{STAGE_OUTPUT_DIR}."
         )
 
-    records = []
-    with open(ai_path, "r", encoding="utf-8") as handle:
-        for line in handle:
-            if not line.strip():
-                continue
-            payload = json.loads(line)
-            paper_id = str(payload.get("paper_id", ""))
-            decision_raw = payload.get("llm_decision")
-            ai_decision, ai_reason = _parse_ai_decision(decision_raw)
-            records.append(
-                {
-                    "paper_id": paper_id,
-                    "ai_decision": ai_decision,
-                    "ai_reason": ai_reason or str(payload.get("diagnostics", {})),
-                }
-            )
+    stage_files = sorted(stage_files, key=lambda p: p.stat().st_mtime)
 
-    return pd.DataFrame(records), ai_path
+    latest_by_paper: dict[str, dict] = {}
+    for path in stage_files:
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip() or '"meta":' in line:
+                        continue
+                    payload = json.loads(line)
+                    paper_id = str(payload.get("paper_id", "")).strip().lstrip("#")
+                    if not paper_id:
+                        continue
+                    decision_raw = payload.get("llm_decision")
+                    ai_decision, ai_reason = _parse_ai_decision(decision_raw)
+                    latest_by_paper[paper_id] = {
+                        "paper_id": paper_id,
+                        "ai_decision": ai_decision,
+                        "ai_reason": ai_reason or str(payload.get("diagnostics", {})),
+                        "source_path": path,
+                    }
+        except Exception:
+            continue
+
+    records = list(latest_by_paper.values())
+    if not records:
+        return pd.DataFrame(), stage_files[-1]
+    return pd.DataFrame(records), stage_files[-1]
 
 
 def _merge(ai: pd.DataFrame, human: pd.DataFrame) -> pd.DataFrame:

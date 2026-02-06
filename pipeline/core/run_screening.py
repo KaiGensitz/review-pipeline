@@ -198,6 +198,7 @@ def run_pipeline(
     chunks_output: Path | None = None,
     text_output: Path | None = None,
     error_log: Path | None = None,
+    resource_log: Path | None = None,
     top_k: int | None = None,
     score_threshold: float | None = None,
     sample_size: int | None = None,
@@ -211,7 +212,9 @@ def run_pipeline(
     qc_only: bool = False,
     qc_enabled: bool = True,
     force_new_qc: bool = False,
-) -> bool:
+    enable_time_savings: bool | None = None,
+    run_label_override: str | None = None,
+) -> object:
     """Run one pipeline stage with stage-specific defaults and outputs.
 
     Args:
@@ -259,13 +262,18 @@ def run_pipeline(
 
     csv_dir = csv_dir or PATH_SETTINGS.get("csv_dir")
     csv_dir_path = Path(csv_dir) if csv_dir else REPO_ROOT / "input"
-    run_label = "qc_sample" if qc_only else "remaining_sample"
-    eligibility_output = eligibility_output or stage_root / f"{stage_prefix}eligibility_{run_label}_{timestamp_label}.jsonl"
-    chunks_output = chunks_output or stage_root / f"{stage_prefix}selected_chunks_{run_label}_{timestamp_label}.jsonl"
-    text_output = text_output or stage_root / f"{stage_prefix}screening_results_readable_{run_label}_{timestamp_label}.txt"
-    error_log = error_log or stage_root / f"{stage_prefix}error_log_{timestamp_label}.txt"
+    run_label = run_label_override or ("qc_sample" if qc_only else "remaining_sample")
+    sample_tag = run_label.replace("_sample", "") if run_label.endswith("_sample") else run_label
+    base_prefix = f"{stage_prefix}{sample_tag}_sample_main"
+    eligibility_output = eligibility_output or stage_root / f"{base_prefix}_eligibility_{timestamp_label}.jsonl"
+    chunks_output = chunks_output or stage_root / f"{base_prefix}_selected_chunks_{timestamp_label}.jsonl"
+    text_output = text_output or stage_root / f"{base_prefix}_screening_results_readable_{timestamp_label}.txt"
+    error_log = error_log or stage_root / f"{base_prefix}_error_log_{timestamp_label}.txt"
     resource_log_path = _stage_prefixed(
-        Path(PATH_SETTINGS.get("resource_log_path", stage_root / f"{stage_prefix}resource_usage_{run_label}_{timestamp_label}.log")), stage
+        Path(resource_log)
+        if resource_log
+        else Path(stage_root / f"{base_prefix}_resource_usage_{timestamp_label}.log"),
+        stage,
     )
     existing_qc_path, existing_qc_readable = _existing_qc_files(stage_root, stage_prefix) if not force_new_qc else (None, None)
     qc_suffix = date_label if not existing_qc_path else existing_qc_path.stem.replace(f"{stage_prefix}qc_sample_batch_", "")
@@ -328,6 +336,7 @@ def run_pipeline(
         if sustainability_tracking is None
         else sustainability_tracking
     )
+    enable_time_savings = bool(enable_time_savings) if enable_time_savings is not None else False
     codecarbon_enabled = True
     pdf_root = pdf_root or PATH_SETTINGS.get("pdf_root")
 
@@ -386,6 +395,7 @@ def run_pipeline(
         sample_seed=sample_seed,
         batch_size=batch_size,
         sustainability_tracking=sustainability_tracking,
+        enable_time_savings=enable_time_savings,
         stage=stage,
         pdf_root=pdf_root,
         split_only=split_only,
@@ -393,6 +403,7 @@ def run_pipeline(
         summary_to_console=False,
         examples=cast(list[dict], examples),
     )
+    stage_csvs = [str(p) for p in pipeline._stage_csv_files()]
     if qc_sample_ids:
         pipeline._qc_sample_ids = qc_sample_ids  # reuse prior QC sample IDs to skip in remaining run
     ran = pipeline.run()
@@ -419,12 +430,53 @@ def run_pipeline(
         print("Chunk records:", "successfully done" if chunks_path.exists() else "see error log", chunks_path)
     print("Resource summary:", "successfully done" if resource_log_resolved.exists() else "see error log", resource_log_resolved)
 
+    error_ids: set[str] = set()
     if error_log_path.exists() and error_log_path.stat().st_size > 0:
         print("Errors occurred; see log:", error_log_path)
+        try:
+            with open(error_log_path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        pid = str(obj.get("paper_id", ""))
+                        if pid:
+                            error_ids.add(pid)
+                    except Exception:
+                        continue
+        except Exception:
+            error_ids = set()
     else:
         print("No errors recorded")
 
-    return True
+    # Derive split eligibility paths for downstream merging
+    split_paths: dict[str, str] = {}
+    if stage in {"title_abstract", "full_text"}:
+        base = str(elig_path.name)
+        if stage == "title_abstract":
+            split_paths["select"] = str(eligibility_output.with_name(base.replace("eligibility_", "eligibility_select_")))
+            split_paths["irrelevant"] = str(eligibility_output.with_name(base.replace("eligibility_", "eligibility_irrelevant_")))
+        else:
+            split_paths["included"] = str(eligibility_output.with_name(base.replace("eligibility_", "eligibility_included_")))
+            split_paths["excluded"] = str(eligibility_output.with_name(base.replace("eligibility_", "eligibility_excluded_")))
+
+    artifact = {
+        "success": bool(ran),
+        "error_log_path": str(error_log_path),
+        "eligibility_path": str(elig_path),
+        "chunks_path": str(chunks_path),
+        "text_path": str(text_path),
+        "resource_log_path": str(resource_log_resolved),
+        "run_label": run_label,
+        "stage": stage,
+        "qc_sample_path": str(qc_sample_path) if qc_sample_path else None,
+        "stage_csv_files": stage_csvs,
+        "error_ids": sorted(error_ids),
+        "split_paths": split_paths,
+    }
+
+    return artifact
 
 
 if __name__ == "__main__":

@@ -34,6 +34,7 @@ class ResourceUsageConfig:
 		stage: Current pipeline stage (title_abstract | full_text | data_extraction).
 		qc_sample_path: Optional QC sample CSV path to derive actual QC counts.
 		run_label: Run label suffix (qc_sample or remaining_sample) for file naming.
+		enable_time_savings: If True, compute human-time savings (only when validation ran).
 	"""
 
 	resource_log_path: Path
@@ -42,6 +43,7 @@ class ResourceUsageConfig:
 	stage: str = "title_abstract"
 	qc_sample_path: Path | None = None
 	run_label: str = "run"
+	enable_time_savings: bool = False
 
 
 class CarbonTrackerManager:
@@ -117,7 +119,7 @@ class CarbonTrackerManager:
 			self._started = False
 
 	def rename_emissions_csv(self, timestamp_label: str | None = None, run_label: str | None = None) -> Path | None:
-		"""Rename CodeCarbon's emissions.csv to a stage-scoped, timestamped filename."""
+		"""Rename CodeCarbon's emissions.csv to stage/sample naming: <stage>_<sample>_codecarbon_emissions_<timestamp>."""
 
 		output_dir = Path(CARBON_CONFIG["output_dir"])
 		source = output_dir / "emissions.csv"
@@ -125,14 +127,16 @@ class CarbonTrackerManager:
 			return None
 
 		stage = output_dir.name
-		tracking_mode = CARBON_CONFIG.get("tracking_mode", "machine")
 		stamp = timestamp_label or datetime.now().strftime("%Y%m%d_%H-%M")
-		run_part = run_label or "run"
-		target = output_dir / f"{stage}_codecarbon_emissions_{run_part}_{tracking_mode}_{stamp}.csv"
+		sample_tag = None
+		if run_label:
+			sample_tag = run_label.replace("_sample", "") if run_label.endswith("_sample") else run_label
+		sample_part = f"{sample_tag}_sample" if sample_tag else "run"
+		target = output_dir / f"{stage}_{sample_part}_codecarbon_emissions_{stamp}.csv"
 
 		if target.exists():
 			for idx in range(1, 1000):
-				candidate = output_dir / f"{stage}_codecarbon_emissions_{tracking_mode}_{stamp}_{idx}.csv"
+				candidate = output_dir / f"{stage}_{sample_part}_codecarbon_emissions_{stamp}_{idx}.csv"
 				if not candidate.exists():
 					target = candidate
 					break
@@ -273,38 +277,41 @@ class ResourceUsageTracker:
 
 		timestamp = datetime.utcnow().isoformat()
 		total_runtime_avg_seconds_per_paper = (total_runtime_seconds / paper_count) if paper_count else 0.0
+		self_enabled = getattr(self.config, "enable_time_savings", False)
 		human_rate_min_per_paper = None
 		human_minutes_estimate = None
 		time_saved_minutes = None
 		time_saved_percent = None
 		time_saved_note = None
 
-		stage_cfg = HUMAN_TIME_CONFIG.get(self.stage, {}) if isinstance(HUMAN_TIME_CONFIG, dict) else {}
-		qc_papers = self._resolve_qc_papers(stage_cfg)
-		reviewers = stage_cfg.get("reviewers") or []
-		per_reviewer_rates = []
-		if qc_papers > 0:
-			for reviewer in reviewers:
-				total_minutes = reviewer.get("total_minutes") if isinstance(reviewer, dict) else None
-				if total_minutes is None:
-					continue
-				try:
-					minutes_val = float(total_minutes)
-				except Exception:
-					continue
-				if minutes_val <= 0:
-					continue
-				per_reviewer_rates.append(minutes_val / qc_papers)
-		if per_reviewer_rates:
-			human_rate_min_per_paper = sum(per_reviewer_rates) / len(per_reviewer_rates)
-			human_minutes_estimate = human_rate_min_per_paper * paper_count
-			pipeline_minutes = total_runtime_seconds / 60.0
-			time_saved_minutes = human_minutes_estimate - pipeline_minutes
-			if human_minutes_estimate > 0:
-				time_saved_percent = 1.0 - (pipeline_minutes / human_minutes_estimate)
-		else:
+		if self_enabled:
+			stage_cfg = HUMAN_TIME_CONFIG.get(self.stage, {}) if isinstance(HUMAN_TIME_CONFIG, dict) else {}
+			qc_papers = self._resolve_qc_papers(stage_cfg)
+			reviewers = stage_cfg.get("reviewers") or []
+			per_reviewer_rates = []
 			if qc_papers > 0:
+				for reviewer in reviewers:
+					total_minutes = reviewer.get("total_minutes") if isinstance(reviewer, dict) else None
+					if total_minutes is None:
+						continue
+					try:
+						minutes_val = float(total_minutes)
+					except Exception:
+						continue
+					if minutes_val <= 0:
+						continue
+					per_reviewer_rates.append(minutes_val / qc_papers)
+			if per_reviewer_rates:
+				human_rate_min_per_paper = sum(per_reviewer_rates) / len(per_reviewer_rates)
+				human_minutes_estimate = human_rate_min_per_paper * paper_count
+				pipeline_minutes = total_runtime_seconds / 60.0
+				time_saved_minutes = human_minutes_estimate - pipeline_minutes
+				if human_minutes_estimate > 0:
+					time_saved_percent = 1.0 - (pipeline_minutes / human_minutes_estimate)
+			elif qc_papers > 0:
 				time_saved_note = "time-savings skipped (no reviewer minutes provided)"
+		else:
+			time_saved_note = "time-savings skipped (validation not run)"
 		total_energy_kwh = energy_kwh
 		total_carbon_g = (emissions_kg * 1000.0) if emissions_kg is not None else None
 		cc_intensity = (total_carbon_g / total_energy_kwh) if total_carbon_g and total_energy_kwh else None

@@ -119,6 +119,7 @@ class PaperScreeningPipeline:
         sample_seed: int | None = None,
         sustainability_tracking: bool | None = None,
         resource_log_path: str | None = None,
+        enable_time_savings: bool = False,
         run_label: str = "run",
         codecarbon_enabled: bool | None = None,
         qc_sample_path: str | None = None,
@@ -182,6 +183,8 @@ class PaperScreeningPipeline:
         self.summary_to_console = summary_to_console
         # human readable hint: tracking response times to surface p50/p95 for operators.
         self._paper_times: list[float] = []
+        # human readable hint: keep paper_ids that hit an error so outputs can be flagged inline.
+        self._error_ids: set[str] = set()
 
         self._row_counter = 0
         self._paper_folders: list[Path] = []
@@ -197,6 +200,7 @@ class PaperScreeningPipeline:
                 stage=self.stage,
                 qc_sample_path=self.qc_sample_path,
                 run_label=self.run_label,
+                enable_time_savings=enable_time_savings,
             )
         )
 
@@ -417,9 +421,12 @@ class PaperScreeningPipeline:
                 paper_elapsed = time.time() - paper_start_ts
                 self._paper_times.append(paper_elapsed)
 
+                error_flag = paper.paper_id in self._error_ids
+
                 if elig_writer:
                     payload = {
                         "paper_id": record["paper_id"],
+                        "error_flag": error_flag,
                         "llm_decision": record["llm_decision"],
                         "diagnostics": record["diagnostics"],
                         "metadata": record["metadata"],
@@ -448,6 +455,7 @@ class PaperScreeningPipeline:
                         json.dumps(
                             {
                                 "paper_id": record["paper_id"],
+                                "error_flag": error_flag,
                                 "selected_chunks": record["selected_chunks"],
                                 "stage": self.stage,
                             }
@@ -506,6 +514,22 @@ class PaperScreeningPipeline:
                     return reason_counts_split.get(key, {})
                 return {}
 
+            def _run_tag_from_path(path: Path | None, decision_label: str) -> str:
+                """human readable hint: derive a run tag that includes retry/main and timestamp."""
+
+                if path is None:
+                    return self.run_label or "run"
+                stem = path.stem
+                prefix = f"{self.stage}_"
+                if stem.startswith(prefix):
+                    stem = stem[len(prefix) :]
+                marker = f"eligibility_{decision_label}_"
+                if marker in stem:
+                    stem = stem.replace(marker, "", 1)
+                elif "eligibility_" in stem:
+                    stem = stem.replace("eligibility_", "", 1)
+                return stem
+
             def _write_summary(writer, count: int) -> None:
                 """human readable hint: append per-file totals with share and timing percentiles."""
 
@@ -524,7 +548,8 @@ class PaperScreeningPipeline:
                     summary["exclusion_reasons"] = reason_payload
                 writer.write(json.dumps(summary) + "\n")
                 decision_label = _decision_label(writer)
-                sample_selection = f"{self.stage}_{self.run_label}_{decision_label}"
+                run_tag = _run_tag_from_path(writer_paths.get(writer), decision_label)
+                sample_selection = f"{self.stage}_{run_tag}_{decision_label}"
                 index_entries.append(
                     {
                         "sample_selection": sample_selection,
@@ -550,24 +575,38 @@ class PaperScreeningPipeline:
             # human readable hint: index CSV makes it easy for non-coders to find the right eligibility file.
             if index_entries:
                 index_path = self.stage_output_dir / f"{self.stage}_eligibility_index.csv"
-                exists = index_path.exists()
-                with open(index_path, "a", newline="", encoding="utf-8") as handle:
-                    fieldnames = [
-                        "sample_selection",
-                        "stage",
-                        "decision_split",
-                        "paper_count",
-                        "percent_of_stage",
-                        "p50_seconds",
-                        "p95_seconds",
-                        "max_seconds",
-                        "timestamp",
-                        "file_path",
-                    ]
+                fieldnames = [
+                    "sample_selection",
+                    "stage",
+                    "decision_split",
+                    "paper_count",
+                    "percent_of_stage",
+                    "p50_seconds",
+                    "p95_seconds",
+                    "max_seconds",
+                    "timestamp",
+                    "file_path",
+                ]
+                existing_rows: list[dict[str, object]] = []
+                if index_path.exists() and index_path.stat().st_size > 0:
+                    try:
+                        with open(index_path, "r", newline="", encoding="utf-8") as handle:
+                            reader = csv.DictReader(handle)
+                            for row in reader:
+                                if row:
+                                    existing_rows.append(dict(row))
+                    except Exception:
+                        existing_rows = []
+
+                # Drop any rows that collide with the new sample selections to avoid duplicates.
+                replace_keys = {e["sample_selection"] for e in index_entries}
+                existing_rows = [r for r in existing_rows if r.get("sample_selection") not in replace_keys]
+                existing_rows.extend(index_entries)
+
+                with open(index_path, "w", newline="", encoding="utf-8") as handle:
                     writer = csv.DictWriter(handle, fieldnames=fieldnames)
-                    if not exists:
-                        writer.writeheader()
-                    for row in index_entries:
+                    writer.writeheader()
+                    for row in existing_rows:
                         writer.writerow(row)
             if text_writer:
                 text_writer.close()
@@ -582,10 +621,49 @@ class PaperScreeningPipeline:
         if self.sustainability_tracking:
             self.resource_tracker.stop_run(self._total_runtime_seconds, self._paper_count)
 
+        def _append_error_summary(total_planned: int) -> None:
+            """human readable hint: append a run-level summary row into the error log."""
+
+            if not self.error_log_path.exists() or self.error_log_path.stat().st_size == 0:
+                return
+            unique_ids: set[str] = set()
+            try:
+                with open(self.error_log_path, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        if not line.strip():
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except Exception:
+                            continue
+                        if isinstance(obj, dict) and not obj.get("meta"):
+                            pid = obj.get("paper_id")
+                            if pid:
+                                unique_ids.add(str(pid))
+            except Exception:
+                return
+
+            summary_payload = {
+                "meta": "error_summary",
+                "stage": self.stage,
+                "run_label": self.run_label,
+                "paper_errors": len(unique_ids),
+                "paper_total": total_planned,
+                "error_rate_percent": ((len(unique_ids) / total_planned) * 100.0) if total_planned else 0.0,
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+            try:
+                with open(self.error_log_path, "a", encoding="utf-8") as logf:
+                    logf.write(json.dumps(summary_payload) + "\n")
+            except Exception:
+                return
+
         if self.error_log_path.exists() and self.error_log_path.stat().st_size > 0 and (
             not self.quiet and self.summary_to_console
         ):
             print(f"[pipeline] errors occurred; see {self.error_log_path.resolve()}")
+
+        _append_error_summary(total_planned)
 
         return True
 
@@ -888,6 +966,10 @@ class PaperScreeningPipeline:
         response_tokens_source = "estimate"
         embed_tokens_source = "estimate"
         llm_decision_incomplete = False
+        attempt = 0
+        failure_reason: str | None = None
+        failure_type: str | None = None
+        failure_attempt = 0
 
         if self.stage == "data_extraction":
             preselected_chunks = self._load_selected_chunks_from_input(paper)
@@ -907,6 +989,10 @@ class PaperScreeningPipeline:
                 self._log_error(
                     paper.paper_id,
                     f"LLM skipped: no chunks produced (PDF missing or unreadable). folder={paper.metadata.get('folder_path')}",
+                    error_type="no_chunks",
+                    pdf_text_tokens=pdf_text_tokens,
+                    pdf_visual_tokens=pdf_visual_tokens,
+                    total_estimated_tokens=estimated_input_tokens,
                 )
             else:
                 selected, scores, embed_usage = self.selector.select(
@@ -934,6 +1020,7 @@ class PaperScreeningPipeline:
                 )
                 self._log_overflow(paper.paper_id, estimated_input_tokens)
             else:
+                attempt = 1
                 llm_decision, llm_usage = self._call_llm(llm_input)
                 if llm_usage:
                     prompt_tokens = int(
@@ -956,11 +1043,9 @@ class PaperScreeningPipeline:
                     prompt_tokens_source = "estimate"
                     response_tokens_source = "estimate"
 
-                if isinstance(llm_decision, str) and llm_decision.startswith("LLM error"):
-                    self._log_error(paper.paper_id, llm_decision)
-
                 if llm_decision and _needs_retry(llm_decision):
                     llm_decision_incomplete = True
+                    attempt = 2
                     retry_decision, retry_usage = self._call_llm(llm_input)
                     if retry_decision:
                         llm_decision = retry_decision
@@ -986,15 +1071,53 @@ class PaperScreeningPipeline:
                             prompt_tokens = len((llm_input or "").split())
 
                     if _needs_retry(llm_decision):
-                        self._log_error(
-                            paper.paper_id,
-                            "LLM decision incomplete after retry; output may be truncated.",
+                        llm_decision_incomplete = True
+                        failure_reason = "LLM decision incomplete after retry; output may be truncated."
+                        failure_type = "llm_incomplete"
+                        failure_attempt = attempt
+                        model_name = getattr(getattr(self, "llm_client", None), "model", None) or gpustack_model
+                        print(
+                            f"[error] chat attempt {attempt}/2 failed for model='{model_name}': output incomplete; logged and paper flagged for later re-screen",
+                            file=sys.stderr,
                         )
                     else:
                         llm_decision_incomplete = False
 
+                if failure_type is None and isinstance(llm_decision, str) and llm_decision.startswith("LLM error"):
+                    llm_decision_incomplete = True
+                    failure_reason = llm_decision
+                    failure_type = "llm_error"
+                    failure_attempt = max(attempt, 2)
+                    model_name = getattr(getattr(self, "llm_client", None), "model", None) or gpustack_model
+                    print(
+                        f"[error] chat attempt {failure_attempt}/2 failed for model='{model_name}': error is logged and paper flagged for later re-screen",
+                        file=sys.stderr,
+                    )
+
         if llm_decision and response_tokens == 0:
             response_tokens = len((llm_decision or "").split())
+
+        if failure_type is None and self._decision_missing_fields(llm_decision):
+            llm_decision_incomplete = True
+            failure_reason = (
+                "LLM decision missing justification or exclusion_reason_category after retries; flagged for re-screen."
+            )
+            failure_type = "llm_missing_fields"
+            failure_attempt = attempt or 2
+
+        if failure_type:
+            self._log_error(
+                paper.paper_id,
+                failure_reason or "LLM decision incomplete after retries.",
+                error_type=failure_type,
+                attempt=failure_attempt or None,
+                prompt_tokens=prompt_tokens,
+                response_tokens=response_tokens,
+                embedding_tokens=embed_tokens,
+                pdf_text_tokens=pdf_text_tokens,
+                pdf_visual_tokens=pdf_visual_tokens,
+                total_estimated_tokens=estimated_input_tokens,
+            )
 
         total_chunks = len(chunks) if chunks else len(selected)
         record = {
@@ -1175,7 +1298,11 @@ class PaperScreeningPipeline:
 
                 copied.append(dest)
             except Exception as exc:  # pylint: disable=broad-except
-                self._log_error(str(cov_id), f"data_extraction folder copy failed: {exc}")
+                self._log_error(
+                    str(cov_id),
+                    f"data_extraction folder copy failed: {exc}",
+                    error_type="data_extraction_copy_failed",
+                )
 
         self._paper_folders = copied
 
@@ -1211,6 +1338,8 @@ class PaperScreeningPipeline:
         files: list[Path] = []
         for pattern in patterns:
             files.extend(sorted(self.csv_dir.glob(pattern)))
+        if self.csv_dir.name == "retry_runs":
+            return [max(files, key=lambda p: p.stat().st_mtime)] if files else []
         return sorted(files)
 
     def _load_included_ids(self, csv_path: Path) -> set[str]:
@@ -1313,7 +1442,11 @@ class PaperScreeningPipeline:
 
         path = resolved_path or self._resolve_pdf_path(paper)
         if not path or not path.exists():
-            self._log_error(paper.paper_id, f"PDF not found or unreadable path for stage {self.stage}: {path}")
+            self._log_error(
+                paper.paper_id,
+                f"PDF not found or unreadable path for stage {self.stage}: {path}",
+                error_type="pdf_missing",
+            )
             return "", 0, None
 
         try:
@@ -1322,11 +1455,12 @@ class PaperScreeningPipeline:
                 self._log_error(
                     paper.paper_id,
                     f"PDF has no extractable text (likely scanned or empty). OCR is disabled; skipping: {path}",
+                    error_type="pdf_unreadable",
                 )
                 return "", 0, None
             return text, self._count_pdf_pages(path), path
         except Exception as exc:  # pylint: disable=broad-except
-            self._log_error(paper.paper_id, f"PDF read failed at {path}: {exc}")
+            self._log_error(paper.paper_id, f"PDF read failed at {path}: {exc}", error_type="pdf_read_error")
             return "", 0, None
 
     def _load_pdf_pages(self, path: Path | None) -> list[str]:
@@ -1344,12 +1478,16 @@ class PaperScreeningPipeline:
 
         folder = paper.metadata.get("folder_path")
         if not folder:
-            self._log_error(paper.paper_id, "PDF folder path missing in metadata")
+            self._log_error(paper.paper_id, "PDF folder path missing in metadata", error_type="pdf_folder_missing")
             return None
 
         folder_path = Path(folder)
         if not folder_path.exists():
-            self._log_error(paper.paper_id, f"PDF folder does not exist: {folder_path}")
+            self._log_error(
+                paper.paper_id,
+                f"PDF folder does not exist: {folder_path}",
+                error_type="pdf_folder_not_found",
+            )
             return None
 
         canonical = folder_path / PAPER_PDF_NAME
@@ -1358,7 +1496,11 @@ class PaperScreeningPipeline:
             pdfs = [canonical] + [p for p in pdfs if p != canonical]
 
         if not pdfs:
-            self._log_error(paper.paper_id, f"PDF not found in folder: {folder_path}")
+            self._log_error(
+                paper.paper_id,
+                f"PDF not found in folder: {folder_path}",
+                error_type="pdf_missing",
+            )
             return None
 
         pdf_path = pdfs[0]
@@ -1383,7 +1525,11 @@ class PaperScreeningPipeline:
 
         if not pdf_path.exists():
             detail = f"; rename_error={rename_error}" if rename_error else ""
-            self._log_error(paper.paper_id, f"PDF missing after rename attempt in {folder_path}{detail}")
+            self._log_error(
+                paper.paper_id,
+                f"PDF missing after rename attempt in {folder_path}{detail}",
+                error_type="pdf_missing_after_rename",
+            )
             return None
 
         return pdf_path
@@ -1417,7 +1563,9 @@ class PaperScreeningPipeline:
         handle.write("Key snippets:\n")
         for idx, chunk in enumerate(record["selected_chunks"], start=1):
             handle.write(f"  {idx}. {chunk.get('text','')[:500]} (score {chunk.get('score',0):.3f})\n")
-        handle.write("Model decision: " + str(record["llm_decision"]) + "\n")
+        decision_val = record.get("llm_decision")
+        decision_text = json.dumps(decision_val, ensure_ascii=False) if isinstance(decision_val, dict) else str(decision_val)
+        handle.write("Model decision: " + decision_text + "\n")
         handle.write(
             "Diagnostics: "
             f"total_chunks={record['diagnostics']['total_chunks']}, "
@@ -1480,9 +1628,8 @@ class PaperScreeningPipeline:
         p95 = vals[p95_idx]
         return {"p50": float(p50), "p95": float(p95), "max": float(vals[-1])}
 
-    @staticmethod
-    def _parse_is_eligible(decision: object) -> bool | None:
-        """Best-effort extraction of is_eligible from the LLM decision payload."""
+    def _parse_is_eligible(self, decision: object) -> bool | None:
+        """human readable hint: stage-aware extraction of is_eligible from the LLM decision payload."""
 
         payload = decision
         if isinstance(payload, str):
@@ -1497,7 +1644,10 @@ class PaperScreeningPipeline:
                 return val
             if isinstance(val, str):
                 val_low = val.lower()
-                if val_low in {"true", "yes", "eligible", "include", "maybe", "neutral"}:
+                allow_neutral = self.stage == "title_abstract"
+                if val_low in {"true", "yes", "eligible", "include"}:
+                    return True
+                if allow_neutral and val_low in {"maybe", "neutral"}:
                     return True
                 if val_low in {"false", "no", "ineligible", "exclude"}:
                     return False
@@ -1520,21 +1670,94 @@ class PaperScreeningPipeline:
                     return str(val)
         return None
 
-    def _log_error(self, paper_id: str, message: str) -> None:
-        """Append errors to the error log for transparency."""
+    def _decision_missing_fields(self, decision: object) -> bool:
+        """human readable hint: detect missing justification or exclusion_reason_category without altering the decision."""
+
+        if decision is None:
+            return True
+
+        payload = decision
+        if isinstance(decision, str):
+            try:
+                payload = json.loads(decision)
+            except Exception:
+                return True
+
+        if not isinstance(payload, dict):
+            return True
+
+        justification = payload.get("justification")
+        reason_val = self._parse_exclusion_reason(payload)
+        missing_just = not isinstance(justification, str) or not justification.strip()
+
+        is_eligible_val = self._parse_is_eligible(payload)
+        if is_eligible_val is False:
+            missing_reason = not isinstance(reason_val, str) or not reason_val.strip()
+        elif is_eligible_val is None:
+            missing_reason = True
+        else:
+            missing_reason = False
+
+        return bool(missing_just or missing_reason or is_eligible_val is None)
+
+    def _log_error(
+        self,
+        paper_id: str,
+        message: str,
+        context: dict | None = None,
+        error_type: str | None = None,
+        attempt: int | None = None,
+        prompt_tokens: int | None = None,
+        response_tokens: int | None = None,
+        embedding_tokens: int | None = None,
+        pdf_text_tokens: int | None = None,
+        pdf_visual_tokens: int | None = None,
+        total_estimated_tokens: int | None = None,
+        **extra: object,
+    ) -> None:
+        """Append errors to the error log with detailed context for transparency."""
+
+        llm_model = getattr(getattr(self, "llm_client", None), "model", None) or gpustack_model
+
+        payload = {
+            "paper_id": paper_id,
+            "error": message,
+            "stage": getattr(self, "stage", None),
+            "run_label": getattr(self, "run_label", None),
+            "llm_model": llm_model,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+        if error_type:
+            payload["error_type"] = error_type
+        if attempt is not None:
+            payload["attempt"] = attempt
+        if prompt_tokens is not None:
+            payload["prompt_tokens"] = prompt_tokens
+        if response_tokens is not None:
+            payload["response_tokens"] = response_tokens
+        if embedding_tokens is not None:
+            payload["embedding_tokens"] = embedding_tokens
+        if pdf_text_tokens is not None:
+            payload["pdf_text_tokens"] = pdf_text_tokens
+        if pdf_visual_tokens is not None:
+            payload["pdf_visual_tokens"] = pdf_visual_tokens
+        if total_estimated_tokens is not None:
+            payload["total_estimated_tokens"] = total_estimated_tokens
+
+        if context:
+            payload.update(context)
+        if extra:
+            payload.update(extra)
 
         self.error_log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.error_log_path, "a", encoding="utf-8") as logf:
-            logf.write(
-                json.dumps(
-                    {
-                        "paper_id": paper_id,
-                        "error": message,
-                        "timestamp": datetime.utcnow().isoformat(),
-                    }
-                )
-                + "\n"
-            )
+            logf.write(json.dumps(payload) + "\n")
+        try:
+            if paper_id:
+                self._error_ids.add(str(paper_id))
+        except Exception:
+            pass
 
     def _log_overflow(self, paper_id: str, estimated_tokens: int) -> None:
         """Record a context-window overflow event."""
@@ -1548,7 +1771,12 @@ class PaperScreeningPipeline:
         self.overflow_log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.overflow_log_path, "a", encoding="utf-8") as logf:
             logf.write(json.dumps(msg) + "\n")
-        self._log_error(paper_id, f"context overflow: {estimated_tokens} > {CONTEXT_WINDOW}")
+        self._log_error(
+            paper_id,
+            f"context overflow: {estimated_tokens} > {CONTEXT_WINDOW}",
+            error_type="context_overflow",
+            total_estimated_tokens=estimated_tokens,
+        )
 
     def _write_data_extraction_metadata(
         self,
@@ -1577,7 +1805,7 @@ class PaperScreeningPipeline:
             with open(meta_path, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, ensure_ascii=False, indent=2)
         except Exception as exc:  # pylint: disable=broad-except
-            self._log_error(paper.paper_id, f"failed to write evidence metadata: {exc}")
+            self._log_error(paper.paper_id, f"failed to write evidence metadata: {exc}", error_type="evidence_write_failed")
 
     def _data_extraction_output_dir(self, paper: PaperRecord) -> Path:
         """Return the output folder for this paper in data_extraction."""
@@ -1612,6 +1840,7 @@ class PaperScreeningPipeline:
                     json.dumps(
                         {
                             "paper_id": paper.paper_id,
+                            "error_flag": paper.paper_id in self._error_ids,
                             "selected_chunks": selected,
                             "stage": self.stage,
                         }
@@ -1619,7 +1848,11 @@ class PaperScreeningPipeline:
                     + "\n"
                 )
         except Exception as exc:  # pylint: disable=broad-except
-            self._log_error(paper.paper_id, f"failed to write selected chunks: {exc}")
+            self._log_error(
+                paper.paper_id,
+                f"failed to write selected chunks: {exc}",
+                error_type="selected_chunks_write_failed",
+            )
 
     def _load_selected_chunks_from_input(self, paper: PaperRecord) -> list[dict]:
         """Load preselected chunks from the input folder, if present."""
@@ -1641,7 +1874,11 @@ class PaperScreeningPipeline:
                     if payload.get("paper_id") == paper.paper_id and "selected_chunks" in payload:
                         return payload.get("selected_chunks") or []
         except Exception as exc:  # pylint: disable=broad-except
-            self._log_error(paper.paper_id, f"failed to read selected chunks: {exc}")
+            self._log_error(
+                paper.paper_id,
+                f"failed to read selected chunks: {exc}",
+                error_type="selected_chunks_read_failed",
+            )
         return []
 
     def _write_data_extraction_outputs(self, paper: PaperRecord, extraction_payload: dict) -> None:

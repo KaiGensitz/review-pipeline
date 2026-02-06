@@ -16,6 +16,12 @@ End-to-end study screening for a scoping review. Built for fast LLM decisions, r
 - LLM_API_KEY missing in .env: API calls fail immediately; add the key then rerun.
 - No connection to the University of Bern server: connect via eduroam, campus LAN, or VPN before running.
 - quality control disabled by accident: QC_ENABLED=False skips QC entirely; keep True unless you intentionally bypass QC.
+- Retry runs stay separate: filenames use `<stage>_<sample>_sample_retry_<attempt>_<output>_<yyyymmdd>_<hh-mm>`, nothing is merged into base eligibility/splits/chunks/readable/resource files. Each retry is logged in `output/<stage>/<stage>_retry_manifest.jsonl` with the paper IDs. CodeCarbon emissions are merged into a single file per sample with a `run` column (`main`, `retry_<attempt>`).
+- Retry runs: answering "y" to the retry prompt now re-screens the listed papers from [input/retry_runs](input/retry_runs) without filtering them out as prior QC IDs.
+- Every LLM decision is checked for justification plus exclusion_reason_category; if the model omits them, the gap is logged for retry (no placeholders are added).
+- Pending retry CSVs in [input/retry_runs](input/retry_runs) are detected right after study-tag confirmation; you’ll be prompted to run them before any new screening.
+- NEUTRAL/maybe decisions count as valid eligibility only for title_abstract; full_text must resolve to true/false, and neutral/ambiguous cases are logged for retry instead of being accepted.
+- If the model omits justification or exclusion_reason_category, the decision is logged for retry (no placeholders are injected) so the missing fields are surfaced explicitly.
 
 ## Before you start
 - Install Python 3.12.
@@ -203,6 +209,7 @@ python main.py
       - max_seconds: slowest single paper in the split.
       - timestamp: when the summary row was written (UTC).
       - file_path: absolute path to the eligibility JSONL file (placed last for easy copy/open).
+   - Resource usage logs (run-specific): `title_abstract_<sample>_sample_<main|retry_#>_resource_usage_<yyyymmdd>_<hh-mm>.log`
    - QC validation alignment (AI vs human decisions and reasons, including agreements): 
       - output/title_abstract/title_abstract_validation_alignment.csv and 
       - output/full_text/full_text_validation_alignment.csv; 
