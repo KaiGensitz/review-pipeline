@@ -12,7 +12,7 @@ from datetime import datetime
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from config.user_orchestrator import CARBON_CONFIG, HUMAN_TIME_CONFIG
 
@@ -36,8 +36,7 @@ def _count_qc_papers(qc_sample_path: Path | None) -> int:
 try:
 	from codecarbon import EmissionsTracker, OfflineEmissionsTracker  # type: ignore[import-not-found]
 except Exception:  # pragma: no cover - optional dependency
-	EmissionsTracker = None
-	OfflineEmissionsTracker = None
+	raise RuntimeError("CodeCarbon is required but not installed; install codecarbon before running the pipeline.")
 
 
 @dataclass
@@ -76,10 +75,7 @@ class CarbonTrackerManager:
 
 	def _init_tracker(self) -> None:
 		if not self._enabled:
-			return
-		if EmissionsTracker is None:
-			logging.warning("CodeCarbon is not installed; emissions tracking disabled.")
-			return
+			raise RuntimeError("CodeCarbon tracking was requested but disabled at construction time.")
 
 		try:
 			output_dir = Path(CARBON_CONFIG["output_dir"])
@@ -91,7 +87,7 @@ class CarbonTrackerManager:
 				"measure_power_secs": CARBON_CONFIG["measure_power_secs"],
 				"tracking_mode": CARBON_CONFIG["tracking_mode"],
 				"on_csv_write": CARBON_CONFIG["on_csv_write"],
-				"save_to_file": CARBON_CONFIG["save_to_file"],
+				"save_to_file": True,
 			}
 
 			pue = CARBON_CONFIG.get("pue")
@@ -111,19 +107,23 @@ class CarbonTrackerManager:
 			else:
 				self._tracker = EmissionsTracker(**tracker_kwargs)
 		except Exception as exc:  # pylint: disable=broad-except
-			logging.warning("CodeCarbon tracker initialization failed: %s", exc)
-			self._tracker = None
+			logging.error("CodeCarbon tracker initialization failed: %s", exc)
+			raise
 
 	def start(self) -> None:
 		"""Start the tracker (no-op if unavailable)."""
-		if not self._enabled or self._tracker is None or self._started:
+		if not self._enabled:
+			raise RuntimeError("CodeCarbon tracking disabled; cannot start tracker.")
+		if self._tracker is None:
+			raise RuntimeError("CodeCarbon tracker missing; initialization must succeed before start.")
+		if self._started:
 			return
 		try:
 			self._tracker.start()
 			self._started = True
 		except Exception as exc:  # pylint: disable=broad-except
-			logging.warning("CodeCarbon tracker start failed: %s", exc)
-			self._tracker = None
+			logging.error("CodeCarbon tracker start failed: %s", exc)
+			raise
 
 	def stop(self) -> float | None:
 		"""Stop the tracker and return emissions (kg CO2eq), if available."""
@@ -408,7 +408,7 @@ def backfill_time_savings(resource_log_path: Path, stage: str, qc_sample_path: P
 	except Exception:
 		return False
 
-	parsed: list[dict] = []
+	parsed: list[dict[str, Any] | str] = []
 	for line in lines:
 		try:
 			parsed.append(json.loads(line))

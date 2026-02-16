@@ -378,6 +378,8 @@ def run_pipeline(
         except Exception:
             qc_sample_ids = set()
 
+    qc_enabled_effective = False if quiet else qc_enabled
+
     pipeline = PaperScreeningPipeline(
         csv_dir=csv_dir,
         knowledge_base_path=kb_file,
@@ -393,7 +395,7 @@ def run_pipeline(
         confirm_sampling=confirm_sampling,
         sample_rate=sample_rate,
         qc_only=qc_only,
-        qc_enabled=qc_enabled,
+        qc_enabled=qc_enabled_effective,
         force_new_qc=force_new_qc,
         overflow_log_path=str(overflow_log_path),
         top_k=top_k,

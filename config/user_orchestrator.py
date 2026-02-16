@@ -138,7 +138,6 @@ CARBON_CONFIG = {
 	"measure_power_secs": 60,  # sampling interval in seconds; lower = more detail, more overhead
 	"tracking_mode": "process",  # "machine" = whole device; "process" = this run only
 	"on_csv_write": "append",  # "append" keeps a history; "update" overwrites totals
-	"save_to_file": True,  # False disables file output (still logs in memory)
 	"is_offline": False,  # True uses offline factors; requires country_iso_code
 	"country_iso_code": "CHE",  # used only when offline; impacts emissions factors
 }

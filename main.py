@@ -571,6 +571,15 @@ def _merge_emissions_with_run_column(stage: str, run_label: str, attempt_index: 
             return []
         return rewritten
 
+    def _ensure_base_run_labels(path: Path, run_value: str) -> None:
+        """human readable hint: make sure every existing row carries a run label before merges."""
+
+        if not path.exists():
+            return
+        _rewrite_with_run(path, run_value, override_existing=False)
+
+    _ensure_base_run_labels(base_file, "main")
+
     _rewrite_with_run(base_file, "main", override_existing=False)
     if latest_file == base_file:
         return {"emissions_path": base_file, "emissions_rows": []}
@@ -1255,8 +1264,25 @@ def _run_validation() -> bool:
     if artifact and isinstance(artifact, dict):
         res_path = artifact.get("resource_log_path") or artifact.get("resource")
         qc_path = artifact.get("qc_sample_path")
-        if res_path:
-            backfill_time_savings(Path(res_path), CURRENT_STAGE, Path(qc_path) if qc_path else None)
+
+        res_path_obj: Path | None
+        if isinstance(res_path, Path):
+            res_path_obj = res_path
+        elif isinstance(res_path, (str, os.PathLike)):
+            res_path_obj = Path(res_path)
+        else:
+            res_path_obj = None
+
+        qc_path_obj: Path | None
+        if isinstance(qc_path, Path):
+            qc_path_obj = qc_path
+        elif isinstance(qc_path, (str, os.PathLike)):
+            qc_path_obj = Path(qc_path)
+        else:
+            qc_path_obj = None
+
+        if res_path_obj:
+            backfill_time_savings(res_path_obj, CURRENT_STAGE, qc_path_obj)
 
     if not _prompt_yes_no("[qc] Run validation now? [y/n]: "):
         _PROMPT_STATE["validation_ran"] = False

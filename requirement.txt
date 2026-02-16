@@ -1,4 +1,5 @@
 pdfplumber==0.11.8 # Extract text from PDFs for screening
+PyPDF2 # PDF page counting fallback
 nltk==3.9.2 # Tokenization/sentence splitting utilities
 openai==2.8.1 # OpenAI-compatible LLM client
 python-dotenv==1.0.1 # Load environment variables from .env

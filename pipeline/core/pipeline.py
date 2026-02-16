@@ -406,7 +406,6 @@ class PaperScreeningPipeline:
 
                 if progress is not None:
                     progress.update(1)
-                    progress.set_postfix({"paper": paper.paper_id})
                 elif not self.quiet:
                     denom = total_planned if total_planned is not None else (
                         self.sample_size if self.sample_size else idx
@@ -416,7 +415,7 @@ class PaperScreeningPipeline:
                     filled = int(bar_len * min(percent, 1.0))
                     bar = "#" * filled + "-" * (bar_len - filled)
                     print(
-                        f"\r[progress] {idx}/{denom} papers [{bar}] {percent*100:5.1f}% {paper.paper_id}",
+                        f"\r[progress] {idx}/{denom} papers [{bar}] {percent*100:5.1f}%",
                         end="",
                         flush=True,
                     )
@@ -427,6 +426,11 @@ class PaperScreeningPipeline:
                 self._paper_times.append(paper_elapsed)
 
                 error_flag = paper.paper_id in self._error_ids
+                if error_flag and not self.quiet:
+                    print(
+                        f"\n[warn] LLM could not finalize a decision for paper {paper.paper_id}; see {self.error_log_path}",
+                        flush=True,
+                    )
 
                 if elig_writer:
                     payload = {
@@ -967,6 +971,7 @@ class PaperScreeningPipeline:
             return False
 
         preselected = False
+        api_disabled = not use_api
         chunks: list[dict] = []
         pdf_text_tokens = 0
         pdf_visual_tokens = 0
@@ -1053,85 +1058,92 @@ class PaperScreeningPipeline:
                     f"LLM skipped: estimated input {estimated_input_tokens} tokens exceeds context window {CONTEXT_WINDOW}."
                 )
                 self._log_overflow(paper.paper_id, estimated_input_tokens)
+            elif api_disabled:
+                llm_decision = "LLM disabled: use_api=False; no API call made."
+                prompt_tokens = len((llm_input or "").split())
+                response_tokens = 0
+                prompt_tokens_source = "estimate"
+                response_tokens_source = "estimate"
+                llm_decision_incomplete = False
             else:
-                attempt = 1
-                llm_decision, llm_usage = self._call_llm(llm_input)
-                if llm_usage:
-                    prompt_tokens = int(
-                        llm_usage.get("prompt_tokens")
-                        or llm_usage.get("input_tokens")
-                        or llm_usage.get("total_tokens")
-                        or prompt_tokens
+                max_attempts = 2
+                model_name = getattr(getattr(self, "llm_client", None), "model", None) or gpustack_model
+                for attempt in range(1, max_attempts + 1):
+                    print(
+                        f"[llm] attempt {attempt}/{max_attempts} for paper {paper.paper_id} using model='{model_name}'"
                     )
-                    response_tokens = int(
-                        llm_usage.get("completion_tokens")
-                        or llm_usage.get("output_tokens")
-                        or llm_usage.get("response_tokens")
-                        or 0
-                    )
-                    prompt_tokens_source = "api"
-                    response_tokens_source = "api"
-                elif llm_decision:
-                    prompt_tokens = len((llm_input or "").split())
-                    response_tokens = len((llm_decision or "").split())
-                    prompt_tokens_source = "estimate"
-                    response_tokens_source = "estimate"
+                    current_decision, llm_usage = self._call_llm(llm_input)
 
-                if llm_decision and _needs_retry(llm_decision):
-                    llm_decision_incomplete = True
-                    attempt = 2
-                    retry_decision, retry_usage = self._call_llm(llm_input)
-                    if retry_decision:
-                        llm_decision = retry_decision
-                    if retry_usage:
+                    if llm_usage:
                         prompt_tokens = int(
-                            retry_usage.get("prompt_tokens")
-                            or retry_usage.get("input_tokens")
-                            or retry_usage.get("total_tokens")
+                            llm_usage.get("prompt_tokens")
+                            or llm_usage.get("input_tokens")
+                            or llm_usage.get("total_tokens")
                             or prompt_tokens
                         )
                         response_tokens = int(
-                            retry_usage.get("completion_tokens")
-                            or retry_usage.get("output_tokens")
-                            or retry_usage.get("response_tokens")
-                            or response_tokens
+                            llm_usage.get("completion_tokens")
+                            or llm_usage.get("output_tokens")
+                            or llm_usage.get("response_tokens")
+                            or 0
                         )
                         prompt_tokens_source = "api"
                         response_tokens_source = "api"
-                    else:
-                        if response_tokens == 0:
-                            response_tokens = len((llm_decision or "").split())
-                        if prompt_tokens == 0:
-                            prompt_tokens = len((llm_input or "").split())
+
+                    if not current_decision:
+                        if attempt == max_attempts:
+                            failure_reason = "LLM returned no decision after retries."
+                            failure_type = "llm_no_response"
+                            failure_attempt = attempt
+                        continue
+
+                    llm_decision = current_decision
+
+                    if isinstance(llm_decision, str) and llm_decision.startswith("LLM error"):
+                        llm_decision_incomplete = True
+                        failure_reason = llm_decision
+                        failure_type = "llm_error"
+                        failure_attempt = attempt
+                        print(
+                            f"[error] chat attempt {attempt}/{max_attempts} failed for model='{model_name}': {llm_decision}",
+                            file=sys.stderr,
+                        )
+                        if attempt == max_attempts:
+                            break
+                        llm_decision = None
+                        continue
 
                     if _needs_retry(llm_decision):
                         llm_decision_incomplete = True
+                        if attempt < max_attempts:
+                            print(
+                                f"[warn] chat attempt {attempt}/{max_attempts} incomplete; retrying for paper {paper.paper_id}"
+                            )
+                            llm_decision = None
+                            continue
                         failure_reason = "LLM decision incomplete after retry; output may be truncated."
                         failure_type = "llm_incomplete"
                         failure_attempt = attempt
-                        model_name = getattr(getattr(self, "llm_client", None), "model", None) or gpustack_model
                         print(
-                            f"[error] chat attempt {attempt}/2 failed for model='{model_name}': output incomplete; logged and paper flagged for later re-screen",
+                            f"[error] chat attempt {attempt}/{max_attempts} failed for model='{model_name}': output incomplete; logged for re-screen",
                             file=sys.stderr,
                         )
                     else:
                         llm_decision_incomplete = False
+                        failure_type = None
+                        failure_reason = None
+                        failure_attempt = attempt
+                        break
 
-                if failure_type is None and isinstance(llm_decision, str) and llm_decision.startswith("LLM error"):
-                    llm_decision_incomplete = True
-                    failure_reason = llm_decision
-                    failure_type = "llm_error"
-                    failure_attempt = max(attempt, 2)
-                    model_name = getattr(getattr(self, "llm_client", None), "model", None) or gpustack_model
-                    print(
-                        f"[error] chat attempt {failure_attempt}/2 failed for model='{model_name}': error is logged and paper flagged for later re-screen",
-                        file=sys.stderr,
-                    )
+                if failure_type is None and llm_decision and response_tokens == 0:
+                    response_tokens = len((llm_decision or "").split())
+                if failure_type is None and llm_decision and prompt_tokens == 0:
+                    prompt_tokens = len((llm_input or "").split())
 
         if llm_decision and response_tokens == 0:
             response_tokens = len((llm_decision or "").split())
 
-        if failure_type is None and self._decision_missing_fields(llm_decision):
+        if failure_type is None and not api_disabled and self._decision_missing_fields(llm_decision):
             llm_decision_incomplete = True
             failure_reason = (
                 "LLM decision missing justification or exclusion_reason_category after retries; flagged for re-screen."
@@ -1188,6 +1200,55 @@ class PaperScreeningPipeline:
 
         return record, token_stats, extraction_payload
 
+    def _format_chunks_for_prompt(self, paper: PaperRecord, chunks: list[dict]) -> str:
+        """Format selected chunks into a readable prompt section."""
+
+        if not chunks:
+            return ""
+
+        parts: list[str] = [f"Paper ID: {paper.paper_id}", f"Title: {paper.title}".strip()]
+        for idx, chunk in enumerate(chunks, start=1):
+            text = str(chunk.get("text", "")).strip()
+            page = chunk.get("page")
+            prefix = f"[Chunk {idx}" + (f", page {page}]" if page is not None else "]")
+            parts.append(f"{prefix}\n{text}")
+        return "\n\n".join(parts)
+
+    def _write_plain_text_summary(self, writer: TextIO, record: dict) -> None:
+        """Write a simple per-paper summary for manual review text files."""
+
+        meta = record.get("metadata", {}) or {}
+        title = meta.get("Title") or meta.get("title") or ""
+        abstract = meta.get("Abstract") or meta.get("abstract") or ""
+        decision = record.get("llm_decision", "") or ""
+
+        writer.write(f"Paper ID: {record.get('paper_id', '')}\n")
+        if title:
+            writer.write(f"Title: {title}\n")
+        if abstract:
+            writer.write(f"Abstract: {abstract[:1000]}\n")
+        writer.write(f"LLM Decision: {decision}\n\n")
+
+    @staticmethod
+    def _estimate_text_tokens(text: str) -> int:
+        """Estimate token count using a simple whitespace split heuristic."""
+
+        if not text:
+            return 0
+        return len(text.split())
+
+    @staticmethod
+    def _count_pdf_pages(pdf_path: Path | str) -> int:
+        """Return number of pages in a PDF; fall back to 0 on failure."""
+
+        try:
+            from PyPDF2 import PdfReader
+
+            reader = PdfReader(str(pdf_path))
+            return len(reader.pages)
+        except Exception:
+            return 0
+
     def _prepare_chunks(self, paper: PaperRecord) -> Tuple[list[dict], int, int, str]:
         """Create evidence chunks, token counts, and resolved language for one paper."""
 
@@ -1205,7 +1266,7 @@ class PaperScreeningPipeline:
 
         if self.stage in {"full_text", "data_extraction"}:
             resolved_path = self._resolve_pdf_path(paper)
-            pdf_text, page_count, used_path = self._load_pdf_text(paper, resolved_path)
+            pdf_text, page_count, used_path, page_texts = self._load_pdf_text(paper, resolved_path, include_pages=True)
             if not pdf_text:
                 return [], 0, 0, resolved_language
             if language_setting in {"auto_first", "auto-first"}:
@@ -1213,7 +1274,6 @@ class PaperScreeningPipeline:
                 resolved_language = self._detect_language(sample_text)
             elif language_setting == "auto":
                 resolved_language = "auto"
-            page_texts = self._load_pdf_pages(used_path)
             chunks = chunk_fulltext_sentences(
                 paper.paper_id,
                 paper.title,
@@ -1467,8 +1527,14 @@ class PaperScreeningPipeline:
             name = name.replace("__", "_")
         return name or "paper"
 
-    def _load_pdf_text(self, paper: PaperRecord, resolved_path: Path | None = None) -> tuple[str, int, Path | None]:
-        """Read PDF text and count pages; returns the path used."""
+    def _load_pdf_text(
+        self,
+        paper: PaperRecord,
+        resolved_path: Path | None = None,
+        *,
+        include_pages: bool = False,
+    ) -> tuple[str, int, Path | None, list[str]]:
+        """Read PDF text once (optionally page-level) and count pages; returns the path used."""
 
         path = resolved_path or self._resolve_pdf_path(paper)
         if not path or not path.exists():
@@ -1477,31 +1543,31 @@ class PaperScreeningPipeline:
                 f"PDF not found or unreadable path for stage {self.stage}: {path}",
                 error_type="pdf_missing",
             )
-            return "", 0, None
+            return "", 0, None, []
 
         try:
-            text = read_pdf_file(str(path))
+            if include_pages:
+                pages = read_pdf_pages(str(path))
+                text = "\n".join(pages)
+            else:
+                pages = []
+                text = read_pdf_file(str(path))
+
             if not text or not text.strip():
                 self._log_error(
                     paper.paper_id,
                     f"PDF has no extractable text (likely scanned or empty). OCR is disabled; skipping: {path}",
                     error_type="pdf_unreadable",
                 )
-                return "", 0, None
-            return text, self._count_pdf_pages(path), path
+                return "", 0, None, []
+
+            if include_pages and not pages:
+                pages = [text]
+
+            return text, self._count_pdf_pages(path), path, pages
         except Exception as exc:  # pylint: disable=broad-except
             self._log_error(paper.paper_id, f"PDF read failed at {path}: {exc}", error_type="pdf_read_error")
-            return "", 0, None
-
-    def _load_pdf_pages(self, path: Path | None) -> list[str]:
-        """Read PDF text page-by-page for approximate provenance."""
-
-        if not path or not path.exists():
-            return []
-        try:
-            return read_pdf_pages(str(path))
-        except Exception:
-            return []
+            return "", 0, None, []
 
     def _resolve_pdf_path(self, paper: PaperRecord) -> Path | None:
         """Find the PDF inside the per-paper folder and normalize its filename."""
@@ -1563,59 +1629,6 @@ class PaperScreeningPipeline:
             return None
 
         return pdf_path
-
-    def _count_pdf_pages(self, path: Path) -> int:
-        """Count pages in a PDF (used for approximate input sizing)."""
-
-        try:
-            import pdfplumber
-
-            with pdfplumber.open(str(path)) as pdf:
-                return len(pdf.pages)
-        except Exception:
-            return 0
-
-    def _estimate_text_tokens(self, text: str) -> int:
-        """Estimate tokens from text length (rough approximation)."""
-
-        words = len(text.split())
-        return int(words * TOKENS_PER_WORD)
-
-    def _write_plain_text_summary(self, handle, record: dict) -> None:
-        """Write a human-readable summary for each paper (screening stages only)."""
-
-        handle.write(f"Paper {record['paper_id']}\n")
-        handle.write(
-            "Title: "
-            + next((c["text"] for c in record["selected_chunks"] if c.get("kind") == "title"), "")
-            + "\n"
-        )
-        handle.write("Key snippets:\n")
-        for idx, chunk in enumerate(record["selected_chunks"], start=1):
-            handle.write(f"  {idx}. {chunk.get('text','')[:500]} (score {chunk.get('score',0):.3f})\n")
-        decision_val = record.get("llm_decision")
-        decision_text = json.dumps(decision_val, ensure_ascii=False) if isinstance(decision_val, dict) else str(decision_val)
-        handle.write("Model decision: " + decision_text + "\n")
-        handle.write(
-            "Diagnostics: "
-            f"total_chunks={record['diagnostics']['total_chunks']}, "
-            f"selected={record['diagnostics']['selected_count']}, "
-            f"top_k={record['diagnostics']['top_k']}, "
-            f"threshold={record['diagnostics']['score_threshold']}\n"
-        )
-        handle.write("Metadata: " + json.dumps(record["metadata"]) + "\n\n")
-
-    def _format_chunks_for_prompt(self, paper: PaperRecord, selected: list[dict]) -> str:
-        """Format selected chunks into the LLM prompt body."""
-
-        lines = [f"Paper ID: {paper.paper_id}"]
-        lines.append(f"Title: {paper.title.strip()}")
-        lines.append("Selected evidence:")
-        for chunk in selected:
-            lines.append(
-                f"- {chunk['chunk_id']} ({chunk.get('kind','?')}, score={chunk.get('score', 0):.3f}): {chunk['text']}"
-            )
-        return "\n".join(lines)
 
     def _call_llm(self, context: str) -> tuple[str | None, dict | None]:
         """Call the LLM and return both text and usage (if provided by the API)."""

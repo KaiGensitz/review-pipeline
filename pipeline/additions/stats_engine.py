@@ -13,6 +13,7 @@ import argparse
 import json
 import math
 import re
+from numbers import Real
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -439,15 +440,24 @@ def _confusion(df: pd.DataFrame) -> tuple[int, int, int, int]:
     return tp, tn, fp, fn
 
 
-def _prop_ci(k: int | float, n: int | float, alpha: float = 0.05) -> Tuple[float, float]:
+def _prop_ci(k: float, n: float, alpha: float = 0.05) -> Tuple[float, float]:
     """human readable hint: exact (Clopper-Pearson) CI via statsmodels (Seabold & Perktold, 2010)."""
 
-    if not isinstance(k, (int, float)) or not isinstance(n, (int, float)):
-        raise TypeError("k and n must be scalar numbers")
-    if n == 0:
+    # Guard against array/Series/DataFrame inputs so type checkers see scalars only.
+    if (
+        not isinstance(k, Real)
+        or isinstance(k, bool)
+        or not isinstance(n, Real)
+        or isinstance(n, bool)
+    ):
+        raise TypeError("k and n must be real scalar numbers")
+
+    k_val = float(k)
+    n_val = float(n)
+    if n_val == 0:
         return (math.nan, math.nan)
-    lower, upper = proportion_confint(count=float(k), nobs=float(n), alpha=alpha, method="beta")
-    return float(lower), float(upper)
+    lower, upper = proportion_confint(count=k_val, nobs=n_val, alpha=alpha, method="beta")
+    return float(lower), float(upper) # type: ignore
 
 
 def _metrics(tp: int, tn: int, fp: int, fn: int) -> dict:
@@ -776,10 +786,9 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
             matches=per_field["matches"].astype(float),
             total=per_field["total"].astype(float),
         )
-        ci_pairs = [
-            _prop_ci(float(row.matches), float(row.total))
-            for row in per_field.itertuples(index=False)
-        ]
+        matches: list[float] = per_field["matches"].to_list()
+        totals: list[float] = per_field["total"].to_list()
+        ci_pairs = [_prop_ci(m, n) for m, n in zip(matches, totals)]
         if ci_pairs:
             per_field["ci_lower"], per_field["ci_upper"] = zip(*ci_pairs)
         else:
