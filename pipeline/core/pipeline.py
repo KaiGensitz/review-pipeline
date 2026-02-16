@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
 from dotenv import load_dotenv
 
-from config.embedding_utils import read_pdf_file, read_pdf_pages
+from config.embedding_utils import read_pdf_file, read_pdf_pages, detect_language
 from config.llm_client import OpenAIResponder
 from config.user_orchestrator import (
     CURRENT_STAGE,
@@ -181,6 +181,8 @@ class PaperScreeningPipeline:
         self.split_only = split_only
         self.quiet = quiet
         self.summary_to_console = summary_to_console
+        self.language_setting = str(EMBEDDING_SETTINGS.get("data_language", "en")) or "en"
+        self._detect_language = detect_language
         # human readable hint: tracking response times to surface p50/p95 for operators.
         self._paper_times: list[float] = []
         # human readable hint: keep paper_ids that hit an error so outputs can be flagged inline.
@@ -279,10 +281,13 @@ class PaperScreeningPipeline:
                 print("[progress] No papers to process")
             return False
 
+        total_input_rows = len(planned_papers)
         total_planned = len(planned_papers)
 
         if not self.split_only and self.qc_enabled:
             created_sample = self._ensure_qc_sample(planned_papers, force_new=self.force_new_qc)
+            if hasattr(self, "resource_tracker") and self.resource_tracker:
+                self.resource_tracker.set_qc_count(len(self._qc_sample_ids))
             if self.qc_only:
                 planned_papers = [paper for paper in planned_papers if paper.paper_id in self._qc_sample_ids]
                 if not planned_papers:
@@ -534,6 +539,7 @@ class PaperScreeningPipeline:
                 """human readable hint: append per-file totals with share and timing percentiles."""
 
                 percent = (count / total_planned * 100.0) if total_planned else 0.0
+                percent_of_input_file = (count / total_input_rows * 100.0) if total_input_rows else 0.0
                 decision_key = _reverse_lookup_writer(writer)
                 decision_times = times_by_decision.get(decision_key, []) if isinstance(decision_key, bool) else []
                 time_stats = self._percentiles(self._paper_times if writer is elig_writer else decision_times)
@@ -541,6 +547,8 @@ class PaperScreeningPipeline:
                     "meta": "summary",
                     "paper_count": count,
                     "percent_of_stage": percent,
+                    "total_paper_count": total_input_rows,
+                    "percent_of_input_file": percent_of_input_file,
                     "response_time_seconds": time_stats,
                 }
                 reason_payload = _reason_lookup(writer)
@@ -557,6 +565,8 @@ class PaperScreeningPipeline:
                         "decision_split": decision_label,
                         "paper_count": count,
                         "percent_of_stage": percent,
+                        "total_paper_count": total_input_rows,
+                        "percent_of_input_file": percent_of_input_file,
                         "p50_seconds": time_stats.get("p50", 0.0),
                         "p95_seconds": time_stats.get("p95", 0.0),
                         "max_seconds": time_stats.get("max", 0.0),
@@ -581,6 +591,8 @@ class PaperScreeningPipeline:
                     "decision_split",
                     "paper_count",
                     "percent_of_stage",
+                    "total_paper_count",
+                    "percent_of_input_file",
                     "p50_seconds",
                     "p95_seconds",
                     "max_seconds",
@@ -1179,17 +1191,13 @@ class PaperScreeningPipeline:
     def _prepare_chunks(self, paper: PaperRecord) -> Tuple[list[dict], int, int, str]:
         """Create evidence chunks, token counts, and resolved language for one paper."""
 
-        # Always import dynamic config for language (detect once per paper when requested)
-        from config.user_orchestrator import EMBEDDING_SETTINGS
-        from config.embedding_utils import detect_language
-
-        language_setting = str(EMBEDDING_SETTINGS.get("data_language", "en"))
+        language_setting = self.language_setting
         resolved_language = language_setting or "en"
 
         if self.stage == "title_abstract":
             if language_setting in {"auto_first", "auto-first"}:
                 sample_text = f"{paper.title}\n{paper.abstract}"
-                resolved_language = detect_language(sample_text)
+                resolved_language = self._detect_language(sample_text)
             elif language_setting == "auto":
                 resolved_language = "auto"
             chunks = chunk_paper_sentences(paper.paper_id, paper.title, paper.abstract, resolved_language)
@@ -1202,7 +1210,7 @@ class PaperScreeningPipeline:
                 return [], 0, 0, resolved_language
             if language_setting in {"auto_first", "auto-first"}:
                 sample_text = f"{paper.title}\n{pdf_text[:4000]}" if pdf_text else f"{paper.title}\n{paper.abstract}"
-                resolved_language = detect_language(sample_text)
+                resolved_language = self._detect_language(sample_text)
             elif language_setting == "auto":
                 resolved_language = "auto"
             page_texts = self._load_pdf_pages(used_path)

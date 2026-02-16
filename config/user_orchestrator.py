@@ -128,6 +128,7 @@ SCREENING_DEFAULTS = {
 	"sample_seed": None,  # fixed seed for deterministic sampling when sample_size is set
 	"batch_size": 32,  # embedding batch size; higher = faster, more memory
 	"sustainability_tracking": True,  # True = write resource logs; False = no tracking
+	"enable_time_savings": True,  # True = compute human-time savings when QC minutes exist; set False to skip
 }
 
 # CodeCarbon configuration (all tunable parameters live here)

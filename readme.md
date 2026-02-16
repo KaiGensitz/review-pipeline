@@ -10,6 +10,11 @@ End-to-end study screening for a scoping review. Built for fast LLM decisions, r
 2) Drop the right CSVs into input/: *_screen_csv_* (title_abstract), *_select_csv_* (full_text), *_included_csv_* (data_extraction). Add PDFs when prompted for full_text/data_extraction.
 3) Run the tool (venv active): Windows: .venv\Scripts\python main.py; macOS/Linux: python main.py. Expect a quality control sample prompt (~10% by default) before full selection.
 
+### QC confirmation (non-coders)
+- Run main.py; it writes a QC CSV + readable TXT with a timestamp in output/<stage>/.
+- Review both files; if they look good, rerun and answer yes to continue (or set CONFIRM_QC_SAMPLE=1).
+- If they do not look good, rerun main.py to generate a fresh QC sample (a new timestamp).
+
 ## Common pitfalls (quick checks)
 - Missing PDFs: full_text/data_extraction stop and list folders; add one PDF per folder, then rerun.
 - Empty or missing knowledge base CSV: run stops; each stage needs POS/NEG examples in knowledge-base/.

@@ -19,9 +19,15 @@ from config.user_orchestrator import (
     STAGE_RULES,
 )
 from pipeline.core.run_screening import run_pipeline
+from pipeline.additions.resource_usage import backfill_time_savings
 
 # Track whether every interactive prompt in this run received a "yes" response.
-_PROMPT_STATE: dict[str, object] = {"all_yes": True, "last_artifact": None, "validation_ran": False}
+_PROMPT_STATE: dict[str, object] = {
+    "all_yes": True,
+    "last_artifact": None,
+    "validation_ran": False,
+    "time_savings_ok": False,  # set when the user confirmed reviewer minutes are provided
+}
 
 
 def _last_artifact_dict() -> dict[str, object] | None:
@@ -59,7 +65,8 @@ def _qc_screened_already(stage: str) -> bool:
 def _run_pipeline_guarded(*, mark_failure: bool = True, **kwargs) -> bool:
     """Run the pipeline and store artifacts; mark prompts as not-all-yes on failure."""
     if "enable_time_savings" not in kwargs:
-        kwargs["enable_time_savings"] = bool(_PROMPT_STATE.get("validation_ran", False))
+        # Enable time-savings from the start so resource_usage captures human-rate fields before prompts.
+        kwargs["enable_time_savings"] = True
 
     result = run_pipeline(**kwargs)
 
@@ -242,13 +249,19 @@ def _latest_base_outputs(stage: str, run_label: str) -> dict[str, Path | None]:
     seen: set[str] = set()
     suffix_candidates = [s for s in suffix_candidates if s and not (s in seen or seen.add(s))]
 
-    def _latest(pattern: str) -> Path | None:
+    def _latest(pattern: str, *, prefer_all: bool = False) -> Path | None:
         matches = [p for p in stage_root.glob(pattern) if "_retry_" not in p.name]
+        if prefer_all:
+            matches = [
+                p
+                for p in matches
+                if not any(tag in p.name for tag in ("eligibility_select_", "eligibility_irrelevant_", "eligibility_included_", "eligibility_excluded_"))
+            ]
         return max(matches, key=lambda p: p.stat().st_mtime) if matches else None
 
     def _latest_for(token: str, ext: str) -> Path | None:
         for suffix in suffix_candidates:
-            path = _latest(f"{stage}_{suffix}_{token}_*.{ext}")
+            path = _latest(f"{stage}_{suffix}_{token}_*.{ext}", prefer_all=(token == "eligibility"))
             if path:
                 return path
         return None
@@ -633,10 +646,19 @@ def _run_tag_for_path(path: Path, stage: str, output_token: str) -> str:
     return stem
 
 
-def _append_index_row(idx_path: Path, sample_selection: str, stage: str, decision_split: str, path: Path, stats: tuple[int, float, float, float, float]) -> None:
+def _append_index_row(
+    idx_path: Path,
+    sample_selection: str,
+    stage: str,
+    decision_split: str,
+    path: Path,
+    stats: tuple[int, float, float, float, float],
+    total_paper_count: int | None = None,
+) -> None:
     """human readable hint: write/update one row in eligibility index for a decision split."""
 
     count, percent, p50, p95, pmax = stats
+    percent_of_input = (count / total_paper_count * 100.0) if total_paper_count else 0.0
     fieldnames = [
         "sample_selection",
         "stage",
@@ -648,6 +670,8 @@ def _append_index_row(idx_path: Path, sample_selection: str, stage: str, decisio
         "max_seconds",
         "timestamp",
         "file_path",
+        "total_paper_count",
+        "percent_of_input_file",
     ]
 
     rows: list[dict[str, object]] = []
@@ -672,6 +696,8 @@ def _append_index_row(idx_path: Path, sample_selection: str, stage: str, decisio
         "max_seconds": pmax,
         "timestamp": datetime.utcnow().isoformat(),
         "file_path": str(path),
+        "total_paper_count": total_paper_count or 0,
+        "percent_of_input_file": percent_of_input,
     }
 
     rows = [r for r in rows if r.get("sample_selection") != new_row["sample_selection"]]
@@ -714,9 +740,34 @@ def _update_index_from_artifact(stage: str, artifact: dict | None, attempt_index
             return 0
         return total
 
+    def _count_input_rows(paths: list[Path]) -> int:
+        total = 0
+        seen: set[Path] = set()
+        for p in paths:
+            if not p or not p.exists() or p in seen:
+                continue
+            seen.add(p)
+            try:
+                with p.open("r", encoding="utf-8") as handle:
+                    reader = csv.reader(handle)
+                    # subtract header row if present
+                    row_count = sum(1 for _ in reader)
+                    if row_count > 0:
+                        row_count -= 1
+                    if row_count > 0:
+                        total += row_count
+            except Exception:
+                continue
+        return total
+
     elig_path = _to_path(artifact.get("eligibility_path") or artifact.get("eligibility"))
     split_paths_raw = artifact.get("split_paths") if isinstance(artifact.get("split_paths"), dict) else {}
     split_paths: dict[str, object] = dict(split_paths_raw) if isinstance(split_paths_raw, dict) else {}
+
+    stage_csvs = [Path(p) for p in artifact.get("stage_csv_files", []) if p]
+    qc_csv = _to_path(artifact.get("qc_sample_path"))
+    input_paths = stage_csvs if stage_csvs else ([qc_csv] if qc_csv else [])
+    total_input_rows = _count_input_rows(input_paths)
 
     base_outputs = _latest_base_outputs(stage, run_label)
     baseline_total = _count_records(base_outputs.get("eligibility"))
@@ -740,7 +791,15 @@ def _update_index_from_artifact(stage: str, artifact: dict | None, attempt_index
         stats = (count, percent, p50, p95, pmax)
         run_tag = _run_tag_for_path(path_obj, stage, token)
         sample_selection = f"{stage}_{run_tag}_{decision_label}"
-        _append_index_row(idx_path, sample_selection, stage, decision_label, path_obj, stats)
+        _append_index_row(
+            idx_path,
+            sample_selection,
+            stage,
+            decision_label,
+            path_obj,
+            stats,
+            total_paper_count=total_input_rows,
+        )
 
 
 def _post_run_updates(stage: str, artifact: dict | None, attempt_index: int) -> dict[str, object] | None:
@@ -1051,6 +1110,9 @@ def _prompt_retry_if_needed(stage: str, artifact: dict | None) -> None:
 
     if success:
         retry_artifact_dict = retry_artifact if isinstance(retry_artifact, dict) else _last_artifact_dict()
+        if not isinstance(retry_artifact_dict, dict):
+            print("[retry] No retry artifact available; manifest not updated.")
+            return
         emissions_info = _post_run_updates(stage, retry_artifact_dict, attempt_for_run)
 
         stage_root = Path(PATH_SETTINGS.get("output_root", "output")) / stage
@@ -1178,13 +1240,23 @@ def _prompt_yes_no(message: str) -> bool:
 def _run_validation() -> bool:
     """human readable hint: run validation and return True on success."""
 
-    if not _prompt_yes_no(
+    has_times = _prompt_yes_no(
         f"[qc] Have estimated reviewer times (minutes) been inserted for human reviewers at CURRENT_STAGE='{CURRENT_STAGE}'? [y/n]: "
-    ):
+    )
+    _PROMPT_STATE["time_savings_ok"] = bool(has_times)
+    if not has_times:
         print("[qc] Please add estimated reviewer times before running validation.")
         _PROMPT_STATE["all_yes"] = False
         _PROMPT_STATE["validation_ran"] = False
         return False
+
+    # After the user confirms minutes, backfill the latest resource_usage log with time-savings fields.
+    artifact = _last_artifact_dict()
+    if artifact and isinstance(artifact, dict):
+        res_path = artifact.get("resource_log_path") or artifact.get("resource")
+        qc_path = artifact.get("qc_sample_path")
+        if res_path:
+            backfill_time_savings(Path(res_path), CURRENT_STAGE, Path(qc_path) if qc_path else None)
 
     if not _prompt_yes_no("[qc] Run validation now? [y/n]: "):
         _PROMPT_STATE["validation_ran"] = False

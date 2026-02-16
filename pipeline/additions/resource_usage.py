@@ -16,6 +16,23 @@ from typing import Optional
 
 from config.user_orchestrator import CARBON_CONFIG, HUMAN_TIME_CONFIG
 
+
+def _count_qc_papers(qc_sample_path: Path | None) -> int:
+	"""Count QC sample rows (header excluded)."""
+
+	if not qc_sample_path:
+		return 0
+	path = Path(qc_sample_path)
+	if not path.exists():
+		return 0
+	try:
+		with path.open("r", encoding="utf-8") as handle:
+			reader = csv.DictReader(handle)
+			return sum(1 for _ in reader)
+	except Exception as exc:  # pylint: disable=broad-except
+		logging.warning("Failed to read QC sample at %s: %s", path, exc)
+		return 0
+
 try:
 	from codecarbon import EmissionsTracker, OfflineEmissionsTracker  # type: ignore[import-not-found]
 except Exception:  # pragma: no cover - optional dependency
@@ -33,6 +50,7 @@ class ResourceUsageConfig:
 		enable_codecarbon: If True, track emissions via CodeCarbon (if installed).
 		stage: Current pipeline stage (title_abstract | full_text | data_extraction).
 		qc_sample_path: Optional QC sample CSV path to derive actual QC counts.
+		qc_paper_count: Optional precomputed QC size to avoid re-reading the QC CSV.
 		run_label: Run label suffix (qc_sample or remaining_sample) for file naming.
 		enable_time_savings: If True, compute human-time savings (only when validation ran).
 	"""
@@ -42,6 +60,7 @@ class ResourceUsageConfig:
 	enable_codecarbon: bool = True
 	stage: str = "title_abstract"
 	qc_sample_path: Path | None = None
+	qc_paper_count: int | None = None
 	run_label: str = "run"
 	enable_time_savings: bool = False
 
@@ -182,6 +201,7 @@ class ResourceUsageTracker:
 		self.config = config
 		self.stage = config.stage
 		self.qc_sample_path = config.qc_sample_path
+		self._qc_paper_count: int | None = getattr(config, "qc_paper_count", None)
 		self._resource_totals = {
 			"tokens_total": 0,
 			"prompt_tokens": 0,
@@ -191,6 +211,7 @@ class ResourceUsageTracker:
 			"pdf_visual_tokens": 0,
 			"paper_seconds": 0.0,
 		}
+		self._paper_records: list[dict] = []
 		self._carbon_tracker: Optional[CarbonTrackerManager] = None
 
 	def start_run(self) -> None:
@@ -201,6 +222,16 @@ class ResourceUsageTracker:
 		if self._carbon_tracker is None:
 			self._carbon_tracker = CarbonTrackerManager(enabled=True)
 		self._carbon_tracker.start()
+
+	def set_qc_count(self, qc_count: int) -> None:
+		"""Allow callers to set QC paper count without re-reading the QC CSV."""
+
+		if qc_count is None:
+			return
+		try:
+			self._qc_paper_count = int(qc_count)
+		except Exception:
+			self._qc_paper_count = None
 
 	def stop_run(self, total_runtime_seconds: float, paper_count: int) -> None:
 		"""Stop CodeCarbon tracking and append per-run totals."""
@@ -235,27 +266,21 @@ class ResourceUsageTracker:
 
 		total_tokens = max(prompt_tokens + response_tokens + embedding_tokens + pdf_text_tokens + pdf_visual_tokens, 0)
 
-		self.config.resource_log_path.parent.mkdir(parents=True, exist_ok=True)
-		with open(self.config.resource_log_path, "a", encoding="utf-8") as logf:
-			logf.write(
-				json.dumps(
-					{
-						"paper_id": paper_id,
-						"tokens_total": total_tokens,
-						"prompt_tokens": prompt_tokens,
-						"response_tokens": response_tokens,
-						"embedding_tokens": embedding_tokens,
-						"prompt_tokens_source": prompt_tokens_source,
-						"response_tokens_source": response_tokens_source,
-						"embedding_tokens_source": embedding_tokens_source,
-						"pdf_text_tokens": pdf_text_tokens,
-						"pdf_visual_tokens": pdf_visual_tokens,
-						"timestamp": datetime.utcnow().isoformat(),
-						"paper_seconds": paper_seconds,
-					}
-				)
-				+ "\n"
-			)
+		record = {
+			"paper_id": paper_id,
+			"tokens_total": total_tokens,
+			"prompt_tokens": prompt_tokens,
+			"response_tokens": response_tokens,
+			"embedding_tokens": embedding_tokens,
+			"prompt_tokens_source": prompt_tokens_source,
+			"response_tokens_source": response_tokens_source,
+			"embedding_tokens_source": embedding_tokens_source,
+			"pdf_text_tokens": pdf_text_tokens,
+			"pdf_visual_tokens": pdf_visual_tokens,
+			"timestamp": datetime.utcnow().isoformat(),
+			"paper_seconds": paper_seconds,
+		}
+		self._paper_records.append(record)
 
 		self._resource_totals["tokens_total"] += total_tokens
 		self._resource_totals["prompt_tokens"] += prompt_tokens
@@ -273,7 +298,7 @@ class ResourceUsageTracker:
 		emissions_kg: float | None,
 		energy_kwh: float | None,
 	) -> None:
-		"""Append per-run totals (including CodeCarbon, if available)."""
+		"""Append buffered per-paper entries plus per-run totals in one write."""
 
 		timestamp = datetime.utcnow().isoformat()
 		total_runtime_avg_seconds_per_paper = (total_runtime_seconds / paper_count) if paper_count else 0.0
@@ -323,53 +348,147 @@ class ResourceUsageTracker:
 			cc_carbon_g_per_1k_tokens = ((emissions_kg * 1000.0) / tokens_total) * 1000.0
 
 		self.config.resource_log_path.parent.mkdir(parents=True, exist_ok=True)
-		with open(self.config.resource_log_path, "a", encoding="utf-8") as logf:
-			logf.write(
-				json.dumps(
-					{
-						"paper_id": "TOTAL",
-						"tokens_total": self._resource_totals["tokens_total"],
-						"prompt_tokens": self._resource_totals["prompt_tokens"],
-						"response_tokens": self._resource_totals["response_tokens"],
-						"embedding_tokens": self._resource_totals["embedding_tokens"],
-						"pdf_text_tokens": self._resource_totals["pdf_text_tokens"],
-						"pdf_visual_tokens": self._resource_totals["pdf_visual_tokens"],
-						"codecarbon_emissions_kg": emissions_kg,
-						"codecarbon_energy_kwh": energy_kwh,
-						"codecarbon_energy_kwh_per_1k_tokens": cc_energy_per_1k_tokens,
-						"codecarbon_carbon_g_per_1k_tokens": cc_carbon_g_per_1k_tokens,
-						"codecarbon_carbon_intensity_g_per_kwh": cc_intensity,
-						"total_runtime_seconds": total_runtime_seconds,
-						"total_runtime_avg_seconds_per_paper": total_runtime_avg_seconds_per_paper,
-						"paper_count": paper_count,
-						"paper_seconds_total": self._resource_totals.get("paper_seconds", 0.0),
-						"llm_decision_avg_seconds_per_paper": (self._resource_totals.get("paper_seconds", 0.0) / paper_count)
-						if paper_count
-						else 0.0,
-						"human_rate_min_per_paper": human_rate_min_per_paper,
-						"human_minutes_estimate": human_minutes_estimate,
-						"time_saved_minutes": time_saved_minutes,
-						"time_saved_percent": time_saved_percent,
-						"time_saved_note": time_saved_note,
-						"timestamp": timestamp,
-					}
-				)
-				+ "\n"
+		entries: list[str] = []
+		for record in self._paper_records:
+			entries.append(json.dumps(record) + "\n")
+		entries.append(
+			json.dumps(
+				{
+					"paper_id": "TOTAL",
+					"tokens_total": self._resource_totals["tokens_total"],
+					"prompt_tokens": self._resource_totals["prompt_tokens"],
+					"response_tokens": self._resource_totals["response_tokens"],
+					"embedding_tokens": self._resource_totals["embedding_tokens"],
+					"pdf_text_tokens": self._resource_totals["pdf_text_tokens"],
+					"pdf_visual_tokens": self._resource_totals["pdf_visual_tokens"],
+					"codecarbon_emissions_kg": emissions_kg,
+					"codecarbon_energy_kwh": energy_kwh,
+					"codecarbon_energy_kwh_per_1k_tokens": cc_energy_per_1k_tokens,
+					"codecarbon_carbon_g_per_1k_tokens": cc_carbon_g_per_1k_tokens,
+					"codecarbon_carbon_intensity_g_per_kwh": cc_intensity,
+					"total_runtime_seconds": total_runtime_seconds,
+					"total_runtime_avg_seconds_per_paper": total_runtime_avg_seconds_per_paper,
+					"paper_count": paper_count,
+					"paper_seconds_total": self._resource_totals.get("paper_seconds", 0.0),
+					"llm_decision_avg_seconds_per_paper": (self._resource_totals.get("paper_seconds", 0.0) / paper_count)
+					if paper_count
+					else 0.0,
+					"human_rate_min_per_paper": human_rate_min_per_paper,
+					"human_minutes_estimate": human_minutes_estimate,
+					"time_saved_minutes": time_saved_minutes,
+					"time_saved_percent": time_saved_percent,
+					"time_saved_note": time_saved_note,
+					"timestamp": timestamp,
+				}
 			)
+			+ "\n"
+		)
+		with open(self.config.resource_log_path, "w", encoding="utf-8") as logf:
+			logf.writelines(entries)
 
 	def _resolve_qc_papers(self, stage_cfg: dict) -> int:
 		"""Determine QC paper count from the QC sample file; falls back to zero if unavailable."""
 
-		qc_path = self.qc_sample_path
-		if qc_path:
-			path = Path(qc_path)
-			if path.exists():
-				try:
-					with open(path, "r", encoding="utf-8") as handle:
-						reader = csv.DictReader(handle)
-						return sum(1 for _ in reader)
-				except Exception as exc:  # pylint: disable=broad-except
-					logging.warning("Failed to read QC sample at %s: %s", path, exc)
+		if self._qc_paper_count is not None:
+			return self._qc_paper_count
+		return _count_qc_papers(self.qc_sample_path)
 
-		# No QC file or unreadable: treat as zero so time-savings is skipped with a clear note.
-		return 0
+
+def backfill_time_savings(resource_log_path: Path, stage: str, qc_sample_path: Path | None) -> bool:
+	"""Recompute human-time fields in an existing resource_usage log after minutes are confirmed.
+
+	Returns True if the log was updated.
+	"""
+
+	if not resource_log_path or not Path(resource_log_path).exists():
+		return False
+
+	try:
+		lines = Path(resource_log_path).read_text(encoding="utf-8").splitlines()
+	except Exception:
+		return False
+
+	parsed: list[dict] = []
+	for line in lines:
+		try:
+			parsed.append(json.loads(line))
+		except Exception:
+			parsed.append(line)
+
+	last_total_idx = None
+	for idx, obj in enumerate(parsed):
+		if isinstance(obj, dict) and obj.get("paper_id") == "TOTAL":
+			last_total_idx = idx
+	if last_total_idx is None:
+		return False
+
+	total_entry = parsed[last_total_idx]
+	if not isinstance(total_entry, dict):
+		return False
+
+	paper_count = total_entry.get("paper_count")
+	total_runtime_seconds = total_entry.get("total_runtime_seconds")
+	if not isinstance(paper_count, (int, float)) or not isinstance(total_runtime_seconds, (int, float)):
+		return False
+
+	stage_cfg = HUMAN_TIME_CONFIG.get(stage, {}) if isinstance(HUMAN_TIME_CONFIG, dict) else {}
+	qc_papers = _count_qc_papers(qc_sample_path)
+	reviewers = stage_cfg.get("reviewers") or []
+	per_reviewer_rates: list[float] = []
+	if qc_papers > 0:
+		for reviewer in reviewers:
+			total_minutes = reviewer.get("total_minutes") if isinstance(reviewer, dict) else None
+			if total_minutes is None:
+				continue
+			try:
+				minutes_val = float(total_minutes)
+			except Exception:
+				continue
+			if minutes_val <= 0:
+				continue
+			per_reviewer_rates.append(minutes_val / qc_papers)
+
+	human_rate_min_per_paper = None
+	human_minutes_estimate = None
+	time_saved_minutes = None
+	time_saved_percent = None
+	time_saved_note = None
+
+	if per_reviewer_rates:
+		human_rate_min_per_paper = sum(per_reviewer_rates) / len(per_reviewer_rates)
+		human_minutes_estimate = human_rate_min_per_paper * paper_count
+		pipeline_minutes = total_runtime_seconds / 60.0
+		time_saved_minutes = human_minutes_estimate - pipeline_minutes
+		if human_minutes_estimate > 0:
+			time_saved_percent = 1.0 - (pipeline_minutes / human_minutes_estimate)
+	elif qc_papers > 0:
+		time_saved_note = "time-savings skipped (no reviewer minutes provided)"
+	else:
+		time_saved_note = "time-savings skipped (no QC sample detected)"
+
+	total_entry.update(
+		{
+			"human_rate_min_per_paper": human_rate_min_per_paper,
+			"human_minutes_estimate": human_minutes_estimate,
+			"time_saved_minutes": time_saved_minutes,
+			"time_saved_percent": time_saved_percent,
+			"time_saved_note": time_saved_note,
+		}
+	)
+
+	out_lines: list[str] = []
+	for obj in parsed:
+		if isinstance(obj, dict):
+			out_lines.append(json.dumps(obj) + "\n")
+		elif isinstance(obj, str):
+			out_lines.append(obj + "\n")
+		else:
+			continue
+
+	try:
+		with Path(resource_log_path).open("w", encoding="utf-8") as handle:
+			handle.writelines(out_lines)
+	except Exception:
+		return False
+
+	return True

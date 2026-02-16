@@ -771,9 +771,20 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
         per_field["ci_lower"] = []
         per_field["ci_upper"] = []
     else:
-        per_field["ci_lower"], per_field["ci_upper"] = zip(
-            *(_prop_ci(float(row.matches), float(row.total)) for row in per_field.itertuples(index=False))
+        # Make pandas dtypes explicit for type checkers and then compute Clopper-Pearson CIs.
+        per_field = per_field.assign(
+            matches=per_field["matches"].astype(float),
+            total=per_field["total"].astype(float),
         )
+        ci_pairs = [
+            _prop_ci(float(row.matches), float(row.total))
+            for row in per_field.itertuples(index=False)
+        ]
+        if ci_pairs:
+            per_field["ci_lower"], per_field["ci_upper"] = zip(*ci_pairs)
+        else:
+            per_field["ci_lower"] = []
+            per_field["ci_upper"] = []
 
     total_matches = int(merged_eval["match"].sum())
     total_items = int(len(merged_eval))

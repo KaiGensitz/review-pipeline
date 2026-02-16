@@ -155,6 +155,48 @@ def _load_negative_examples_from_csvs(csv_dir: Path, patterns: list[str]) -> lis
     return negatives
 
 
+def _safe_int(val, default=None):
+    if val is None:
+        return default
+    if isinstance(val, int):
+        return val
+    if isinstance(val, float):
+        return int(val)
+    if isinstance(val, str):
+        try:
+            return int(val)
+        except Exception:
+            pass
+    raise ValueError(f"Cannot convert {val!r} to int")
+
+
+def _safe_float(val, default=None):
+    if val is None:
+        return default
+    if isinstance(val, float):
+        return val
+    if isinstance(val, int):
+        return float(val)
+    if isinstance(val, str):
+        try:
+            return float(val)
+        except Exception:
+            pass
+    raise ValueError(f"Cannot convert {val!r} to float")
+
+
+def _safe_bool(val, default=None):
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    if isinstance(val, str):
+        return val.lower() in ("1", "true", "yes", "on")
+    raise ValueError(f"Cannot convert {val!r} to bool")
+
+
 def _append_qc_records_to_remaining(stage_root: Path, stage_prefix: str, remaining_path: Path) -> None:
     """Append QC sample eligibility records to the remaining-sample output."""
     qc_files = sorted(stage_root.glob(f"{stage_prefix}eligibility_qc_sample_*.jsonl"))
@@ -290,45 +332,6 @@ def run_pipeline(
         Path(PATH_SETTINGS.get("overflow_log", stage_root / f"{stage_prefix}overflow_log_{timestamp_label}.txt")), stage
     )
 
-    def _safe_int(val, default=None):
-        if val is None:
-            return default
-        if isinstance(val, int):
-            return val
-        if isinstance(val, float):
-            return int(val)
-        if isinstance(val, str):
-            try:
-                return int(val)
-            except Exception:
-                pass
-        raise ValueError(f"Cannot convert {val!r} to int")
-
-    def _safe_float(val, default=None):
-        if val is None:
-            return default
-        if isinstance(val, float):
-            return val
-        if isinstance(val, int):
-            return float(val)
-        if isinstance(val, str):
-            try:
-                return float(val)
-            except Exception:
-                pass
-        raise ValueError(f"Cannot convert {val!r} to float")
-
-    def _safe_bool(val, default=None):
-        if val is None:
-            return default
-        if isinstance(val, bool):
-            return val
-        if isinstance(val, (int, float)):
-            return bool(val)
-        if isinstance(val, str):
-            return val.lower() in ("1", "true", "yes", "on")
-        raise ValueError(f"Cannot convert {val!r} to bool")
-
     top_k = top_k if top_k is not None else _safe_int(require_setting(SCREENING_DEFAULTS, "top_k", "SCREENING_DEFAULTS"))
     score_threshold = score_threshold if score_threshold is not None else _safe_float(require_setting(SCREENING_DEFAULTS, "score_threshold", "SCREENING_DEFAULTS"))
     sample_size = sample_size if sample_size is not None else _safe_int(require_setting(SCREENING_DEFAULTS, "sample_size", "SCREENING_DEFAULTS"))
@@ -339,7 +342,8 @@ def run_pipeline(
         if sustainability_tracking is None
         else sustainability_tracking
     )
-    enable_time_savings = bool(enable_time_savings) if enable_time_savings is not None else False
+    default_time_savings = _safe_bool(SCREENING_DEFAULTS.get("enable_time_savings"), False)
+    enable_time_savings = bool(enable_time_savings) if enable_time_savings is not None else bool(default_time_savings)
     codecarbon_enabled = True
     pdf_root = pdf_root or PATH_SETTINGS.get("pdf_root")
 
