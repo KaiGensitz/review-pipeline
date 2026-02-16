@@ -63,24 +63,26 @@ def detect_language(text: str) -> str:
 	return "german" if de_hits > en_hits else "english"
 
 
-def read_pdf_file(file_path: str) -> str:
-	"""Read PDF text and return a single combined string."""
+def read_pdf_file(file_path: str, max_pages: int | None = None) -> str:
+	"""Read PDF text and return a single combined string (optionally capped by max_pages)."""
 
 	text_content = []
 	with pdfplumber.open(file_path) as pdf:
-		for page in pdf.pages:
+		pages_iter = pdf.pages if max_pages is None else pdf.pages[:max_pages]
+		for page in pages_iter:
 			page_text = page.extract_text()
 			if page_text:
 				text_content.append(page_text)
 	return "\n".join(text_content)
 
 
-def read_pdf_pages(file_path: str) -> list[str]:
-	"""Read PDF text and return a list of page-level strings."""
+def read_pdf_pages(file_path: str, max_pages: int | None = None) -> list[str]:
+	"""Read PDF text and return a list of page-level strings (optionally capped)."""
 
 	pages: list[str] = []
 	with pdfplumber.open(file_path) as pdf:
-		for page in pdf.pages:
+		pages_iter = pdf.pages if max_pages is None else pdf.pages[:max_pages]
+		for page in pages_iter:
 			page_text = page.extract_text() or ""
 			pages.append(page_text)
 	return pages
@@ -89,6 +91,8 @@ def read_pdf_pages(file_path: str) -> list[str]:
 def split_text_into_sentences(text: str, language: str) -> list[str]:
 	"""Split text into sentences using NLTK."""
 
+	if not text or not text.strip():
+		return []
 	selected_language = detect_language(text) if language == "auto" else language
 	sentences = nltk.sent_tokenize(text, language=selected_language)
 	return sentences

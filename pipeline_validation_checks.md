@@ -11,19 +11,21 @@ Use this checklist after running `python main.py` (or `.venv\Scripts\python main
 - Ensure you are connected to the University of Bern server (eduroam, campus LAN, or VPN) so API calls succeed.
 - Validation compares only the QC sample list that matches the eligibility timestamp.
 - Retry re-screens stay separate: retry outputs keep their own filenames (`<stage>_<sample>_sample_retry_<attempt>_*`), and nothing is merged back into the base eligibility/splits/chunks/readable/resource files. The retry manifest (`output/<stage>/<stage>_retry_manifest.jsonl`) records each retry attempt with its artifacts. Eligibility index rows include the run tag (main vs retry) from the filenames, and only CodeCarbon emissions are merged into a single CSV with a `run` column (`main`, `retry_<attempt>`). Retries are blocked if the matching base eligibility or CodeCarbon file is missing to avoid orphan retry files.
+- QC append is one-time per remaining run; QC files are not re-scanned for duplication.
 - **QC sample files exist** in output/<stage>/
   - `qc_sample_batch_YYYYMMDD_HH-MM.csv` (new rounds create new timestamps)
   - `qc_sample_batch_readable_YYYYMMDD_HH-MM.txt`
 - **Suggestion (QC-only validation pass)**: run a QC-only pass (LLM screens only the QC sample), have humans screen the same QC CSV, then run validation before a full run.
 - **QC-only check** (if enabled): only QC papers should appear in eligibility outputs.
 - **Human QC option** (optional): you can add a file named `<stage>_human_validation_qc_sample_batch_YYYYMMDD.csv` to use instead of select/irrelevant or included/excluded exports.
-- **Outputs are written** in output/<stage>/ (screening stages):
+**Outputs are written** in output/<stage>/ (screening stages):
   - `*_eligibility_<qc_sample|remaining_sample>_*.jsonl`
   - `*_selected_chunks_<qc_sample|remaining_sample>_*.jsonl`
   - `*_screening_results_readable_<qc_sample|remaining_sample>_*.txt`
   - `*_<sample>_sample_<main|retry_#>_resource_usage_<yyyymmdd>_<hh-mm>.log` (records API token usage when available; falls back to estimates)
-- **Error log empty**: the console should say “No errors recorded.”
-
+  - `*_qc_sample_validation_alignment_*.csv`, `*_qc_sample_validation_stats_report_*.txt`, `*_qc_sample_validation_matrix_*.png`
+  - `title_abstract_qc_sample_batch_YYYYMMDD_HH-MM.csv`
+  - `title_abstract_qc_sample_batch_readable_YYYYMMDD_HH-MM.txt`
 ---
 
 ## Stage: title_abstract
@@ -52,6 +54,7 @@ Use this checklist after running `python main.py` (or `.venv\Scripts\python main
   - `title_abstract_<sample>_sample_<main|retry_#>_resource_usage_<yyyymmdd>_<hh-mm>.log`
   - `title_abstract_qc_sample_batch_YYYYMMDD_HH-MM.csv`
   - `title_abstract_qc_sample_batch_readable_YYYYMMDD_HH-MM.txt`
+  - `title_abstract_qc_sample_validation_alignment_*.csv`, `title_abstract_qc_sample_validation_stats_report_*.txt`, `title_abstract_qc_sample_validation_matrix_*.png`
 - stats_engine check: run `python -m pipeline.additions.stats_engine --select <path_to_select_csv> --irrelevant <path_to_irrelevant_csv>` and confirm outputs in output/title_abstract/ with the same timestamp as the eligibility file used.
 
 ---
@@ -79,6 +82,7 @@ Use this checklist after running `python main.py` (or `.venv\Scripts\python main
   - `full_text_<sample>_sample_<main|retry_#>_resource_usage_<yyyymmdd>_<hh-mm>.log`
   - `full_text_qc_sample_batch_YYYYMMDD_HH-MM.csv`
   - `full_text_qc_sample_batch_readable_YYYYMMDD_HH-MM.txt`
+  - `full_text_qc_sample_validation_alignment_*.csv`, `full_text_qc_sample_validation_stats_report_*.txt`, `full_text_qc_sample_validation_matrix_*.png`
 - Selected chunks are stored per paper in input/per_paper_full_text/<paper_folder>/full_text_selected_chunks.jsonl
 - stats_engine check: run `python -m pipeline.additions.stats_engine --included <path_to_included_csv> --excluded <path_to_excluded_csv>` and confirm outputs in output/full_text/.
 

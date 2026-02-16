@@ -19,7 +19,9 @@ from typing import Optional, Tuple
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
-from scipy.stats import norm
+from statsmodels.stats.proportion import proportion_confint
+
+# human readable hint: proportion_confint supplies exact (Clopper-Pearson) binomial CIs (Seabold, S., & Perktold, J., 2010).
 
 from config.user_orchestrator import CURRENT_STAGE, STUDY_TAGS_IGNORE, STUDY_TAGS_INCLUDE
 
@@ -36,13 +38,17 @@ IGNORE_TAGS = {t.lower() for t in STUDY_TAGS_IGNORE}
 
 
 def _stage_file(name: str, suffix: str | None = None) -> Path:
-    """Build a stage-prefixed output path under output/<stage>/."""
+    """Build a stage-prefixed output path under output/<stage>/.
 
-    if suffix:
-        base = Path(name)
-        filename = f"{base.stem}_{suffix}{base.suffix}"
-        return OUTPUT_DIR / f"{STAGE_PREFIX}{filename}"
-    return OUTPUT_DIR / f"{STAGE_PREFIX}{name}"
+    Validation outputs must include `qc_sample` in the filename to match the QC-only comparison scope.
+    """
+
+    base = Path(name)
+    needs_qc_token = base.stem.startswith("validation_")
+    qc_token = "qc_sample_" if needs_qc_token else ""
+    stem_with_suffix = f"{base.stem}_{suffix}" if suffix else base.stem
+    filename = f"{STAGE_PREFIX}{qc_token}{stem_with_suffix}{base.suffix}"
+    return OUTPUT_DIR / filename
 
 
 def _find_latest_match(patterns: list[str], search_dirs: list[Path]) -> Optional[Path]:
@@ -433,30 +439,32 @@ def _confusion(df: pd.DataFrame) -> tuple[int, int, int, int]:
     return tp, tn, fp, fn
 
 
-def _prop_ci(k: int, n: int, alpha: float = 0.05) -> Tuple[float, float]:
-    """Compute a simple proportion confidence interval."""
+def _prop_ci(k: int | float, n: int | float, alpha: float = 0.05) -> Tuple[float, float]:
+    """human readable hint: exact (Clopper-Pearson) CI via statsmodels (Seabold & Perktold, 2010)."""
 
+    if not isinstance(k, (int, float)) or not isinstance(n, (int, float)):
+        raise TypeError("k and n must be scalar numbers")
     if n == 0:
         return (math.nan, math.nan)
-    p = k / n
-    z = float(norm.ppf(1 - alpha / 2))  # Ensure z is a Python float
-    se = math.sqrt(max(p * (1 - p), 0) / n)
-    lower = max(0.0, p - z * se)
-    upper = min(1.0, p + z * se)
-    return lower, upper
+    lower, upper = proportion_confint(count=float(k), nobs=float(n), alpha=alpha, method="beta")
+    return float(lower), float(upper)
 
 
 def _metrics(tp: int, tn: int, fp: int, fn: int) -> dict:
     """Compute agreement metrics for screening."""
 
+    # human readable hint: PABAK follows Byrt, T., Bishop, J., & Carlin, J. B. (1993). Bias, prevalence and kappa. Journal of Clinical Epidemiology, 46(5), 423–429.
+
     total = tp + tn + fp + fn
     po = (tp + tn) / total if total else math.nan
     pabak = 2 * po - 1 if total else math.nan
+    accuracy = (tp + tn) / total if total else math.nan
 
     sens_n = tp + fn
     spec_n = tn + fp
     ppv_n = tp + fp
     npv_n = tn + fn
+    acc_n = total
 
     sens = tp / sens_n if sens_n else math.nan
     spec = tn / spec_n if spec_n else math.nan
@@ -467,6 +475,7 @@ def _metrics(tp: int, tn: int, fp: int, fn: int) -> dict:
         "total": total,
         "po": po,
         "pabak": pabak,
+        "accuracy": accuracy,
         "sensitivity": sens,
         "specificity": spec,
         "ppv": ppv,
@@ -475,6 +484,7 @@ def _metrics(tp: int, tn: int, fp: int, fn: int) -> dict:
         "spec_ci": _prop_ci(tn, spec_n),
         "ppv_ci": _prop_ci(tp, ppv_n),
         "npv_ci": _prop_ci(tn, npv_n),
+        "acc_ci": _prop_ci(tp + tn, acc_n),
     }
 
 
@@ -540,6 +550,10 @@ def _write_report(stats: dict, tp: int, tn: int, fp: int, fn: int, stage: str, s
     lines.append("")
     lines.append(f"Total papers analyzed (QC sample only): {stats['total']}")
     lines.append(f"Confusion matrix (Human rows, AI columns): TP={tp}, TN={tn}, FP={fp}, FN={fn}")
+    lines.append(
+        f"Accuracy (overall correct decisions): {stats['accuracy']*100:.1f}% "
+        f"(95% CI {stats['acc_ci'][0]*100:.1f}-{stats['acc_ci'][1]*100:.1f}%)"
+    )
     lines.append(f"Observed agreement (Po): {stats['po']:.3f}")
     lines.append(f"PABAK: {stats['pabak']:.3f} (PABAK = 2*Po - 1)")
     lines.append(
@@ -752,23 +766,40 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
         )
     ).reset_index()
 
+    # human readable hint: compute exact binomial CI per field (Clopper-Pearson) for concordance (matches/total).
+    if per_field.empty:
+        per_field["ci_lower"] = []
+        per_field["ci_upper"] = []
+    else:
+        per_field["ci_lower"], per_field["ci_upper"] = zip(
+            *(_prop_ci(float(row.matches), float(row.total)) for row in per_field.itertuples(index=False))
+        )
+
     total_matches = int(merged_eval["match"].sum())
     total_items = int(len(merged_eval))
     overall_accuracy = (total_matches / total_items) if total_items else math.nan
+    overall_ci = _prop_ci(total_matches, total_items)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
     lines.append("Extraction accuracy report (AI vs adjudicated consensus)")
     lines.append(f"Total items evaluated: {total_items}")
     lines.append(
-        f"Overall accuracy: {overall_accuracy*100:.2f}%" if not math.isnan(overall_accuracy) else "Overall accuracy: n/a"
+        f"Overall concordance/accuracy: {overall_accuracy*100:.2f}% (95% CI {overall_ci[0]*100:.2f}-{overall_ci[1]*100:.2f}%)"
+        if not math.isnan(overall_accuracy)
+        else "Overall concordance/accuracy: n/a"
     )
     lines.append("")
-    lines.append("Per-field accuracy:")
+    lines.append("Per-field accuracy (Clopper-Pearson 95% CI):")
     for _, row in per_field.iterrows():
         acc = row["accuracy"]
-        acc_str = f"{acc*100:.2f}%" if not math.isnan(acc) else "n/a"
-        lines.append(f"- {row['field']}: {acc_str} (n={row['total']}, matches={row['matches']})")
+        if math.isnan(acc):
+            lines.append(f"- {row['field']}: n/a (n={row['total']}, matches={row['matches']})")
+        else:
+            lines.append(
+                f"- {row['field']}: {acc*100:.2f}% (95% CI {row['ci_lower']*100:.2f}-{row['ci_upper']*100:.2f}%)"
+                f" (n={row['total']}, matches={row['matches']})"
+            )
 
     _stage_file("extraction_accuracy_report.txt").write_text("\n".join(lines), encoding="utf-8")
 
@@ -785,7 +816,10 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
         },
         inplace=True,
     )
-    discrep_out_cols = ["PaperID", "Field_Name", "AI_Value", "Human_Consensus_Value"]
+    # human readable hint: scaffold columns for manual error typing per Gartlehner et al. (missed/fabricated/misallocated/etc.).
+    discrep["Error_Type"] = "unspecified"
+    discrep["Error_Impact"] = "unspecified"
+    discrep_out_cols = ["PaperID", "Field_Name", "AI_Value", "Human_Consensus_Value", "Error_Type", "Error_Impact"]
     discrep[discrep_out_cols].to_csv(_stage_file("extraction_discrepancies.csv"), index=False, encoding="utf-8")
 
     print("Validation complete (data extraction stage). Outputs:")

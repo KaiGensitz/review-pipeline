@@ -45,6 +45,7 @@ Milestones (state)
 - QC-only pass: keep LLM on the QC list first so humans and the model judge the same 10% before the 90% run.
 - Optional: use <stage>_human_validation_qc_sample_batch_YYYYMMDD.csv for validation when provided.
 - Validation binds to the QC sample matching the screening timestamp.
+- Throughput guardrails: single-pass QC append, newest CSV auto-selection per stage, and GPUStack-ready data extraction prompt in config/prompt_script_data_extraction.txt.
 
 ## Phase 6 — Robustness and ergonomics (next)
 - Confirm OCR stays disabled; scanned PDFs are skipped with clear warnings.

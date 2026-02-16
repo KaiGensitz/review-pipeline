@@ -95,3 +95,4 @@ The pipeline uses a stage-specific knowledge base (KB) to select the most releva
 - CodeCarbon prints INFO/WARNING lines periodically (every tracking interval, default 15s) and once per run; Windows shows estimation warnings unless Intel Power Gadget is installed.
 - LLM input per paper combines a static stage prompt (prompt_script) and dynamic evidence (selected chunks). API `prompt_tokens` reflect both; prompt size varies with evidence length.
 - Result files are versioned by timestamp in output/<stage>/.
+- Throughput tips: use QC-only first, keep `top_k` modest, and rely on newest CSV detection. Data extraction uses the GPUStack-friendly prompt at config/prompt_script_data_extraction.txt.

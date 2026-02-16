@@ -962,6 +962,7 @@ class PaperScreeningPipeline:
         prompt_tokens = 0
         response_tokens = 0
         embed_tokens = 0
+        embed_usage = None
         prompt_tokens_source = "estimate"
         response_tokens_source = "estimate"
         embed_tokens_source = "estimate"
@@ -995,9 +996,21 @@ class PaperScreeningPipeline:
                     total_estimated_tokens=estimated_input_tokens,
                 )
             else:
-                selected, scores, embed_usage = self.selector.select(
-                    chunks, top_k=self.top_k, score_threshold=self.score_threshold
-                )
+                if not chunks:
+                    llm_decision = "LLM skipped: no evidence chunks available."
+                    self._log_error(
+                        paper.paper_id,
+                        "LLM skipped: no evidence chunks available after preprocessing.",
+                        error_type="no_chunks",
+                        pdf_text_tokens=pdf_text_tokens,
+                        pdf_visual_tokens=pdf_visual_tokens,
+                        total_estimated_tokens=estimated_input_tokens,
+                    )
+                    selected = []
+                else:
+                    selected, scores, embed_usage = self.selector.select(
+                        chunks, top_k=self.top_k, score_threshold=self.score_threshold
+                    )
                 if embed_usage:
                     embed_tokens = int(
                         embed_usage.get("prompt_tokens")
@@ -1012,6 +1025,15 @@ class PaperScreeningPipeline:
                 llm_input = self._format_chunks_for_prompt(paper, selected)
                 prompt_tokens = len((llm_input or "").split())
                 estimated_input_tokens = prompt_tokens + pdf_text_tokens + pdf_visual_tokens
+
+        if llm_decision is None and not selected:
+            llm_decision = "LLM skipped: no evidence available after selection."
+            self._log_error(
+                paper.paper_id,
+                "LLM skipped: empty evidence set (title/abstract or PDF missing).",
+                error_type="no_evidence",
+                total_estimated_tokens=estimated_input_tokens,
+            )
 
         if llm_decision is None:
             if estimated_input_tokens > CONTEXT_WINDOW:

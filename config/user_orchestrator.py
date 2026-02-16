@@ -106,7 +106,7 @@ EMBEDDING_SETTINGS = {
 	"use_api_embeddings": True,  # True = use API embeddings; False would disable embedding-based selection
 	"gpustack_base_url": "https://gpustack.unibe.ch/v1",  # embedding endpoint URL; must match your server
 	"data_language": "auto_first",  # "english" | "german" | "auto" | "auto_first"; auto_first = detect once per paper, then reuse
-	"chunk_size": 20,  # sentences per chunk; larger = fewer chunks, cheaper but less granular evidence
+	"chunk_size": 20,  # sentences per chunk; larger = fewer chunks, cheaper but less granular evidence (increase slightly for throughput)
 	"overlap_size": 2,  # sentences overlapped; higher = better continuity but more duplicate cost
 	"embedding_cache_size": 2048,  # cached embeddings in RAM; higher = faster, more memory
 }
@@ -122,7 +122,7 @@ LLM_SETTINGS = {
 
 # Screening knobs (advanced; keep defaults unless you know why to change)
 SCREENING_DEFAULTS = {
-	"top_k": 10,  # non-title chunks kept; higher = more evidence, higher cost
+	"top_k": 10,  # non-title chunks kept; higher = more evidence, higher cost (lower top_k for faster runs)
 	"score_threshold": 0.005,  # minimum relevance score; higher = stricter filtering
 	"sample_size": None,  # limit papers per run; set for pilots in any stage
 	"sample_seed": None,  # fixed seed for deterministic sampling when sample_size is set
@@ -156,7 +156,7 @@ PATH_SETTINGS = {
 HUMAN_TIME_CONFIG = {
 	"title_abstract": {
 		"reviewers": [
-			{"id": "human_1", "total_minutes": 0},
+			{"id": "human_1", "total_minutes": 110}, # Marc (Email 12.02.2026): 1h 50 min = 110 min
 			{"id": "human_2", "total_minutes": 0},
 			{"id": "human_3", "total_minutes": 0},
 			{"id": "human_4", "total_minutes": 0},
@@ -263,6 +263,8 @@ def load_user_config() -> UserConfig:
 		raise FileNotFoundError(f"Missing prompt script for CURRENT_STAGE='{CURRENT_STAGE}'. Expected file at: {PROMPT_FILE}.")
 	if QC_SAMPLE_RATE < 0 or QC_SAMPLE_RATE > 1:
 		raise ValueError("QC_SAMPLE_RATE must be between 0.0 and 1.0 (e.g., 0.10 for ~10%).")
+	if not LLM_API_KEY:
+		raise RuntimeError("LLM_API_KEY is empty. Add it to .env or set it before running the pipeline.")
 
 	return UserConfig(
 		current_stage=CURRENT_STAGE,

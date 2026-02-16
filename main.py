@@ -160,11 +160,14 @@ def _collect_missing_is_eligible(error_log_path: Path, eligibility_path: Path, s
     return missing
 
 
-def _write_retry_csv(source_csv: Path, target_dir: Path, paper_ids: set[str], stage: str) -> Path | None:
-    """Create a stage-valid screen CSV containing only specified paper_ids."""
+def _write_retry_csv(source_csv: Path, target_dir: Path, paper_ids: set[str], stage: str, run_label: str) -> Path | None:
+    """Create a stage-valid retry CSV using run_label and stage-specific token (screen/select)."""
+
     target_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H-%M")
-    filename = f"{stage}_screen_csv_retry_{timestamp}.csv"
+    sample_tag = run_label.replace("_sample", "") if run_label.endswith("_sample") else run_label
+    token = "screen" if stage == "title_abstract" else "select" if stage == "full_text" else "screen"
+    filename = f"{stage}_{sample_tag}_sample_{token}_csv_retry_{timestamp}.csv"
     target_path = target_dir / filename
 
     if not source_csv.exists():
@@ -499,10 +502,17 @@ def _merge_emissions_with_run_column(stage: str, run_label: str, attempt_index: 
                 continue
             cols = row.rstrip("\n").split(",")
             run_value = "main" if idx == 0 else f"retry_{attempt_index}"
+            current = cols[run_idx] if len(cols) > run_idx else ""
             if len(cols) <= run_idx:
                 cols.append(run_value)
+            elif idx == 0:
+                # Keep existing labels on the first row; only fill if empty.
+                if not current:
+                    cols[run_idx] = run_value
             else:
-                cols[run_idx] = run_value
+                # For retry rows, overwrite "main"/empty with the retry attempt but preserve any prior retry labels.
+                if not current or current == "main":
+                    cols[run_idx] = run_value
             rewritten.append(",".join(cols) + "\n")
         try:
             with base_file.open("w", encoding="utf-8") as handle:
@@ -512,7 +522,7 @@ def _merge_emissions_with_run_column(stage: str, run_label: str, attempt_index: 
         rows = [idx + 1 for idx, row in enumerate(rewritten[1:]) if row.strip() and row.split(",")[run_idx] == f"retry_{attempt_index}"]
         return {"emissions_path": base_file, "emissions_rows": rows}
 
-    def _rewrite_with_run(path: Path, run_value: str) -> list[str]:
+    def _rewrite_with_run(path: Path, run_value: str, *, override_existing: bool) -> list[str]:
         try:
             with path.open("r", encoding="utf-8") as handle:
                 lines = handle.readlines()
@@ -534,9 +544,10 @@ def _merge_emissions_with_run_column(stage: str, run_label: str, attempt_index: 
             if not row.strip():
                 continue
             cols = row.rstrip("\n").split(",")
+            current = cols[run_idx] if len(cols) > run_idx else ""
             if len(cols) <= run_idx:
                 cols.append(run_value)
-            else:
+            elif override_existing or not current:
                 cols[run_idx] = run_value
             rewritten.append(",".join(cols) + "\n")
 
@@ -547,12 +558,12 @@ def _merge_emissions_with_run_column(stage: str, run_label: str, attempt_index: 
             return []
         return rewritten
 
-    _rewrite_with_run(base_file, "main")
+    _rewrite_with_run(base_file, "main", override_existing=False)
     if latest_file == base_file:
         return {"emissions_path": base_file, "emissions_rows": []}
 
     run_value = "main" if attempt_index in {None, 0} else f"retry_{attempt_index}"
-    latest_lines = _rewrite_with_run(latest_file, run_value)
+    latest_lines = _rewrite_with_run(latest_file, run_value, override_existing=True)
     if not latest_lines:
         return None
 
@@ -890,11 +901,16 @@ def _archive_retry_csv(retry_csv: Path) -> None:
 
 
 def _latest_retry_csv(stage: str) -> Path | None:
-    """Locate the most recent retry CSV under input/retry_runs for this stage."""
+    """Locate the most recent retry CSV under input/retry_runs for this stage (any sample, screen/select)."""
 
     retry_dir = Path(PATH_SETTINGS["csv_dir"]) / "retry_runs"
-    pattern = f"{stage}_screen_csv_retry_*.csv"
-    candidates = sorted(retry_dir.glob(pattern))
+    patterns = [
+        f"{stage}_*_sample_*_csv_retry_*.csv",  # new naming
+        f"{stage}_screen_csv_retry_*.csv",      # legacy naming
+    ]
+    candidates: list[Path] = []
+    for pat in patterns:
+        candidates.extend(retry_dir.glob(pat))
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_mtime)
@@ -1005,7 +1021,7 @@ def _prompt_retry_if_needed(stage: str, artifact: dict | None) -> None:
         return
 
     target_dir = Path(PATH_SETTINGS["csv_dir"]) / "retry_runs"
-    retry_csv = _write_retry_csv(source_csv, target_dir, candidates, stage)
+    retry_csv = _write_retry_csv(source_csv, target_dir, candidates, stage, run_label)
     if not retry_csv:
         return
 
@@ -1041,6 +1057,10 @@ def _prompt_retry_if_needed(stage: str, artifact: dict | None) -> None:
         manifest_path = stage_root / f"{stage}_retry_manifest.jsonl"
         _record_retry_manifest(retry_artifact_dict, stage, attempt_map, retry_csv, emissions_info)
         print(f"[retry] Re-screen completed. Outputs kept separate; manifest updated at {manifest_path}.")
+
+        # human readable hint: if the retry still has errors, offer another retry prompt instead of stopping silently.
+        if retry_artifact_dict.get("error_log_path"):
+            _prompt_retry_if_needed(stage, retry_artifact_dict)
     else:
         print("[retry] Re-screen failed. Check the retry error log for details.")
 
@@ -1066,24 +1086,31 @@ def _ensure_csv_inputs(csv_dir: Path) -> bool:
     return True
 
 
-def _require_pattern(csv_dir: Path, pattern: str, description: str) -> list[Path]:
-    """Ensure required CSVs exist for the current stage.
+def _require_pattern(csv_dir: Path, pattern: str, description: str, stage: str | None = None) -> list[Path]:
+    """Ensure required CSVs exist for the current stage (pick latest when multiple).
 
     Args:
         csv_dir: Path to the input/ folder.
         pattern: Glob pattern for required CSV files.
         description: Human-readable description of the required export.
+        stage: Optional stage label for extra sanity checks.
 
     Returns:
-        A list of matching CSV paths (empty if none found).
+        A list containing the latest matching CSV path (empty if none found).
 
-    Note: each stage needs a specific Covidence export.
+    Note: deterministic choice avoids ambiguity when several exports are present.
     """
     matches = sorted(csv_dir.glob(pattern))
-    if matches:
-        return matches
-    print(f"[setup] Missing {description}. Expected a file matching '{pattern}' in {csv_dir}.")
-    return []
+    if not matches:
+        print(f"[setup] Missing {description}. Expected a file matching '{pattern}' in {csv_dir}.")
+        return []
+
+    chosen = max(matches, key=lambda p: p.stat().st_mtime)
+    if stage and stage not in chosen.name:
+        print(f"[warning] Using {chosen.name} for stage '{stage}'. Confirm this is intentional.")
+    if len(matches) > 1:
+        print(f"[info] Multiple matches for {description}; using most recent: {chosen.name}")
+    return [chosen]
 
 
 def _missing_pdf_folders(base_dir: Path) -> list[str]:
@@ -1226,14 +1253,17 @@ def main() -> None:
 
     Note: this is the main entry point; it handles QC → validation → full run.
     """
+    # human readable hint: stop immediately if the API key is missing to avoid wasted setup time.
+    if not LLM_API_KEY:
+        print("[error] LLM_API_KEY is empty. Set it in .env or config/user_orchestrator.py before running.")
+        return
+
     # Note: QC is always required for screening; this script guides the QC → validation → full run loop.
     stage = CURRENT_STAGE
     csv_dir = Path(PATH_SETTINGS["csv_dir"])
     sample_rate = QC_SAMPLE_RATE
 
     print(f"[main] Stage: {stage} | Model: {LLM_MODEL}")
-    if not LLM_API_KEY:
-        print("[warning] LLM_API_KEY is empty. Set it in config/user_orchestrator.py or as an environment variable.")
 
     if stage not in STAGE_RULES:
         print(f"[error] Unknown CURRENT_STAGE='{stage}'. Choose from {sorted(STAGE_RULES)}.")
@@ -1271,6 +1301,12 @@ def main() -> None:
                     attempt_for_run = _next_retry_attempt(stage, run_label)
                     for pid in pending_ids:
                         attempt_map[pid] = attempt_for_run
+                    # human readable hint: narrow the retry CSV to only the pending IDs so we do not re-screen resolved papers.
+                    filtered_retry_csv = _write_retry_csv(retry_csv, retry_csv.parent, pending_ids, stage, run_label)
+                    if not filtered_retry_csv:
+                        print("[retry] Could not build a filtered retry CSV; aborting retry step.")
+                        return
+                    retry_csv = filtered_retry_csv
                     retry_out = _retry_output_paths(stage, run_label, attempt_for_run)
                     _run_pipeline_guarded(
                         stage=stage,
@@ -1297,7 +1333,7 @@ def main() -> None:
 
     rule = STAGE_RULES[stage]
     for pattern in rule["screen_patterns"]:
-        if not _require_pattern(csv_dir, pattern, f"{stage} required CSV export"):
+        if not _require_pattern(csv_dir, pattern, f"{stage} required CSV export", stage=stage):
             return
 
     if stage == "title_abstract":

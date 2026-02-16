@@ -259,6 +259,9 @@ def run_pipeline(
             raise FileNotFoundError(
                 f"Missing stage-specific knowledge base for '{stage}'. Expected file at {stage_kb_default}."
             )
+    else:
+        if not Path(kb_file).exists():
+            raise FileNotFoundError(f"Missing knowledge base override at {kb_file} for stage '{stage}'.")
 
     csv_dir = csv_dir or PATH_SETTINGS.get("csv_dir")
     csv_dir_path = Path(csv_dir) if csv_dir else REPO_ROOT / "input"
@@ -417,6 +420,7 @@ def run_pipeline(
 
     elig_path = eligibility_output.resolve()
     if qc_sample_ids and confirm_sampling and not qc_only:
+        # human readable hint: QC records are appended once into the remaining file to avoid re-screening the sample.
         _append_qc_records_to_remaining(stage_root, stage_prefix, elig_path)
     chunks_path = chunks_output.resolve()
     text_path = text_output.resolve()

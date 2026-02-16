@@ -22,9 +22,17 @@ End-to-end study screening for a scoping review. Built for fast LLM decisions, r
 - Pending retry CSVs in [input/retry_runs](input/retry_runs) are detected right after study-tag confirmation; you’ll be prompted to run them before any new screening.
 - NEUTRAL/maybe decisions count as valid eligibility only for title_abstract; full_text must resolve to true/false, and neutral/ambiguous cases are logged for retry instead of being accepted.
 - If the model omits justification or exclusion_reason_category, the decision is logged for retry (no placeholders are injected) so the missing fields are surfaced explicitly.
+- QC append is single-pass: remaining runs get QC records once; retries stay isolated.
+- Data extraction uses the prompt at [config/prompt_script_data_extraction.txt](config/prompt_script_data_extraction.txt) (GPUStack-ready JSON output).
+
+### Throughput tips (thousands of papers)
+- Keep `top_k` modest (e.g., 6–10) and `chunk_size` moderately sized to cut embedding/LLM load.
+- Use QC-only first, then full run; each run writes new timestamped outputs—no need to merge manually.
+- Large PDFs: keep under a practical size budget; the reader now supports optional page caps (configurable in code if needed).
+- Ensure the latest CSV per stage is present; the tool auto-picks the newest match per pattern.
 
 ## Before you start
-- Install Python 3.12.
+- Install Python (≧ 3.12.)
 - Put a compatible API key in [.env](.env) as LLM_API_KEY.
 - Terminals: on Windows you can use Command Prompt, PowerShell, or the VS Code terminal. On macOS/Linux, any shell works.
 - If your prompt shows a folder like C:\>, move into the project folder:
@@ -76,6 +84,7 @@ cd "C:\Users\gensitz\OneDrive - Universitaet Bern\Desktop\my_new_project\review-
    - macOS/Linux: python main.py
    - The pipeline creates a ~10% QC sample (unless QC_ENABLED=False), prompts before QC-only screening, and then asks whether to run validation and proceed to full screening.
    - Validation now compares only the QC sample list that matches the QC screening timestamp.
+   - Validation stats now list accuracy with Clopper-Pearson 95% CIs alongside sensitivity, specificity, PPV, NPV, and PABAK.
    - Suggestion (QC-only validation): do one run where the LLM screens only the QC sample, compare against human reviewers, run validation, then run the full stage if metrics look good. This keeps costs low and gives confidence early.
 5) Validation (any stage):
    - python -m pipeline.additions.stats_engine
@@ -211,9 +220,10 @@ python main.py
       - file_path: absolute path to the eligibility JSONL file (placed last for easy copy/open).
    - Resource usage logs (run-specific): `title_abstract_<sample>_sample_<main|retry_#>_resource_usage_<yyyymmdd>_<hh-mm>.log`
    - QC validation alignment (AI vs human decisions and reasons, including agreements): 
-      - output/title_abstract/title_abstract_validation_alignment.csv and 
-      - output/full_text/full_text_validation_alignment.csv; 
+      - output/title_abstract/title_abstract_qc_sample_validation_alignment.csv and 
+      - output/full_text/full_text_qc_sample_validation_alignment.csv; 
          Columns: ID, human_decision, ai_decision, decision_match (bool), human_note (free-text Notes), human_tag (explicit Covidence tags), ai_reason (LLM tag), reason_match (bool, compares ai_reason to human_tag), plus Title/Abstract/Authors/Year when present.
+   - Data extraction validation: extraction_accuracy_report now shows overall concordance/accuracy with Clopper-Pearson 95% CIs and per-field CIs; extraction_discrepancies.csv includes Error_Type and Error_Impact columns for manual Gartlehner-style classification.
    
 ### Validate AI vs human labels (optional, non-coder steps)
 ## Screening validation (title/abstract)
@@ -226,9 +236,9 @@ python main.py
 python -m pipeline.additions.stats_engine --select <path_to_select_csv> --irrelevant <path_to_irrelevant_csv>
 ~~~
 5) Outputs in [output/title_abstract/](output/title_abstract/):
-   - title_abstract_validation_stats_report_YYYYMMDD_HH-MM.txt
+   - title_abstract_qc_sample_validation_stats_report_YYYYMMDD_HH-MM.txt
    - title_abstract_discrepancy_log_YYYYMMDD_HH-MM.csv
-   - title_abstract_validation_matrix_YYYYMMDD_HH-MM.png
+   - title_abstract_qc_sample_validation_matrix_YYYYMMDD_HH-MM.png
 
 ## Screening validation (full_text)
 1) Set CURRENT_STAGE = "full_text" in [config/user_orchestrator.py](config/user_orchestrator.py).
@@ -239,9 +249,9 @@ python -m pipeline.additions.stats_engine --select <path_to_select_csv> --irrele
 python -m pipeline.additions.stats_engine --included <path_to_included_csv> --excluded <path_to_excluded_csv>
 ~~~
 4) Outputs in [output/full_text/](output/full_text/):
-   - full_text_validation_stats_report_YYYYMMDD_HH-MM.txt
+   - full_text_qc_sample_validation_stats_report_YYYYMMDD_HH-MM.txt
    - full_text_discrepancy_log_YYYYMMDD_HH-MM.csv
-   - full_text_validation_matrix_YYYYMMDD_HH-MM.png
+   - full_text_qc_sample_validation_matrix_YYYYMMDD_HH-MM.png
 
 ## Data extraction validation
 Use when you have AI extraction outputs and (Covidence) adjudicated consensus.

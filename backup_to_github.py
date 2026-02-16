@@ -14,9 +14,10 @@ def run(cmd):
         sys.exit(result.returncode)
 
 def main():
+    # human readable hint: pulling first reduces push conflicts when multiple users work on the repo.
+    run("git pull")
     run("git add .")
     run(f'git commit -m "{BACKUP_MSG}"')
-    run("git pull")
     run("git push")
     print("Backup complete! Your changes are now on GitHub.")
 

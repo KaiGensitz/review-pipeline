@@ -7,5 +7,6 @@ pandas # CSV/structured data handling
 seaborn # Visualization utilities (validation)
 matplotlib # Plotting utilities (validation)
 scipy # Scientific helpers (stats/processing)
+statsmodels # Exact binomial confidence intervals and GEE/GLM utilities
 codecarbon # Emissions tracking (CodeCarbon)
 tqdm # Progress bars for screening runs
