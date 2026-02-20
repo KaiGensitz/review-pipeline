@@ -1,4 +1,4 @@
-%% https://mermaid.live/edit to execute below code #
+%% https://mermaid.live/edit to execute below code
 
 graph LR
     %% Define Styling
@@ -25,7 +25,7 @@ graph LR
     I3 -.-> DataStaging
 
     %% The Sampling Loop
-    DataStaging --> Sampler{Select Random 10% Sample}:::decision
+    DataStaging --> Sampler{Select Deterministic 10% QC Sample}:::decision
     
     Sampler -- Sample Batch --> AISampleProc(AI Assistant Screening\nSample Batch):::process
     I4 -.-> AISampleProc

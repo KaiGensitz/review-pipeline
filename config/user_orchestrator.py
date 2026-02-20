@@ -157,7 +157,7 @@ HUMAN_TIME_CONFIG = {
 	"title_abstract": {
 		"reviewers": [
 			{"id": "human_1", "total_minutes": 110}, # Marc (Email 12.02.2026): 1h 50 min = 110 min
-			{"id": "human_2", "total_minutes": 0},
+			{"id": "human_2", "total_minutes": 240}, # Shawan (Slack 19.02.2026): 4h = 240 min
 			{"id": "human_3", "total_minutes": 0},
 			{"id": "human_4", "total_minutes": 0},
 		],

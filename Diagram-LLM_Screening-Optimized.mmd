@@ -20,7 +20,7 @@ flowchart TD
   subgraph TA["Step 1"]
     direction LR
     TA_stage["Load CSV + examples"]:::proc
-    TA_qc{Take stratified 10% QC sample}:::dec
+    TA_qc{Take deterministic 10% QC sample}:::dec
     TA_ai["AI screens QC list"]:::proc
     TA_hum["4 blinded humans in Covidence\nDropdown study tags; Notes ignored"]:::human
     TA_val{Compare to human gold\nSens>0.95; Spec 0.40-0.80; PABAK>0.80}:::metric
@@ -32,7 +32,7 @@ flowchart TD
   subgraph FT["Step 2"]
     direction LR
     FT_stage["Load next CSVs + PDFs"]:::proc
-    FT_qc{Take stratified 10% QC sample}:::dec
+    FT_qc{Take deterministic 10% QC sample}:::dec
     FT_ai["AI screens QC list"]:::proc
     FT_hum["4 blinded humans in Covidence\nDropdown study tags; Notes ignored"]:::human
     FT_val{Compare to human gold\nSens>0.95; Spec 0.40-0.80; PABAK>0.80}:::metric
@@ -44,7 +44,7 @@ flowchart TD
   subgraph DE["Step 3"]
     direction LR
     DE_stage["Load final CSVs + PDFs"]:::proc
-    DE_qc{Take stratified 10% QC sample}:::dec
+    DE_qc{Take deterministic 10% QC sample}:::dec
     DE_ai["AI extracts QC list"]:::proc
     DE_hum["4 blinded humans in Covidence\nExtraction gold standard"]:::human
     DE_val{Compare to human gold\nConcordance>0.80; Accuracy>0.90}:::metric
@@ -109,6 +109,6 @@ flowchart TD
   
 
   class TA_stage,TA_ai,TA_refine,TA_full,FT_stage,FT_ai,FT_refine,FT_full,DE_stage,DE_ai,DE_refine,DE_full,Agg proc;
-  class TA_qc,TA_val,FT_qc,FT_val,DE_qc,DE_val dec;
+  class TA_qc,FT_qc,DE_qc dec;
   class TA_hum,FT_hum,DE_hum human;
   class TA_val,FT_val,DE_val metric;
