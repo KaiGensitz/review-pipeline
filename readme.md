@@ -18,16 +18,16 @@ Stage-based pipeline for title/abstract screening, full-text screening, and data
 ## Workflow summary diagram
 
 ```mermaid
-flowchart TD
-  A[Set CURRENT_STAGE + models + API key] --> B[Place stage CSV and KB]
-  B --> C[Run main.py]
-  C --> D[Create deterministic QC sample]
-  D --> E[QC-only AI run + human review]
-  E --> F{Validation acceptable?}
-  F -- No --> G[Refine prompt/KB and rerun QC]
-  G --> D
-  F -- Yes --> H[Run remaining papers]
-  H --> I[Write outputs + validation + resource logs]
+flowchart LR
+    A[Set CURRENT_STAGE + models + API key] --> B[Place stage CSV and KB]
+    B --> C[Run main.py]
+    C --> D[Create deterministic QC sample]
+    D --> E[QC-only AI run + human review]
+    E --> F{Validation acceptable?}
+    F -- No --> G[Refine prompt/KB and rerun QC]
+    G --> D
+    F -- Yes --> H[Run remaining papers]
+    H --> I[Write outputs + validation + resource logs]
 ```
 
 ## Quick start
@@ -48,6 +48,7 @@ flowchart TD
 - `title_abstract`
   - input CSV: `*_screen_csv_*.csv`
   - Knowledge-base: [knowledge-base/title_abstract_pos-neg_examples.csv](knowledge-base/title_abstract_pos-neg_examples.csv)
+  - LLM input behavior: full `Title + Abstract` is passed directly to `{data}` (no chunking/top-k filtering in this stage)
 - `full_text`
   - input CSV: `*_select_csv_*.csv`
   - Knowledge-base: [knowledge-base/full_text_pos-neg_examples.csv](knowledge-base/full_text_pos-neg_examples.csv)
@@ -67,6 +68,7 @@ Knowledge-base format for all stages: CSV with columns `label` (`POS`/`NEG`) and
   - `<stage>_qc_sample_batch_readable_<yyyymmdd>_<hh-mm>.txt`
 - Full run starts only after QC confirmation.
 - Retries stay isolated and are never merged into base eligibility/chunks/readable/resource files.
+- Deterministic token-limit/context-overflow failures are not auto-retried; adjust payload or token limit first.
 - Retry metadata is appended to `output/<stage>/<stage>_retry_manifest.jsonl`.
 
 ## Validation commands

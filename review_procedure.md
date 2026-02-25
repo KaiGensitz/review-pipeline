@@ -111,6 +111,7 @@ START -> run main.py
 	|       \- n -> STOP (refine prompt/KB, then rerun)
 	|
 	+-- During/after any run with unresolved errors:
+	|     Note: papers with deterministic token-limit/context-overflow errors are filtered out from auto-retry prompts
 	|     Prompt: [retry] Re-screen these papers now? [y/n]:
 	|       |- y -> retry run executes for listed papers, outputs kept separate, retry manifest updated
 	|       \- n -> continue without retry (errors remain logged)

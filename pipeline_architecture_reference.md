@@ -16,8 +16,8 @@ Advanced technical reference for operators and maintainers.
 
 ## Pipeline behavior by stage
 
-- `title_abstract`: sentence chunking from title/abstract, relevance selection, eligibility JSONL outputs.
-- `full_text`: per-paper folder/PDF workflow, page-line chunking, eligibility JSONL outputs.
+- `title_abstract`: full `Title + Abstract` is injected directly into prompt `{data}` (no chunking/top-k filtering), eligibility JSONL outputs.
+- `full_text`: per-paper folder/PDF workflow, page-line chunking with relevance selection (`top_k`/threshold), eligibility JSONL outputs.
 - `data_extraction`: extraction-focused prompt, per-paper extraction JSONL/CSV outputs, evidence JSON.
 
 ## Deterministic QC model
@@ -36,12 +36,14 @@ Advanced technical reference for operators and maintainers.
 - Retry manifest:
   - `output/<stage>/<stage>_retry_manifest.jsonl`
 - Pending retry CSVs in `input/retry_runs/` are detected before new screening and can be executed first.
+- Deterministic failures (`llm_output_token_limit`, `context_overflow`) are filtered out from automatic retry prompts.
 
 ## LLM decision quality gates
 
 - Every response is checked for parseability and completion.
 - `justification` and `exclusion_reason_category` are required for accepted decisions.
 - Missing/invalid decisions are logged and queued for retry.
+- Token-limit truncation is explicitly labeled as `llm_output_token_limit` to avoid masked retry loops.
 - Neutral/maybe is accepted only in `title_abstract`; ambiguous full-text decisions are retried.
 
 ## Knowledge-base (KB) and evidence selection
@@ -51,7 +53,7 @@ Advanced technical reference for operators and maintainers.
   - `knowledge-base/full_text_pos-neg_examples.csv`
   - `knowledge-base/data_extraction_pos-neg_examples.csv`
 - Required KB columns: `label` (`POS`/`NEG`) and `text`.
-- Relevance selection uses embedding centroids (POS vs NEG) and keeps title chunks.
+- Relevance selection uses embedding centroids (POS vs NEG) for `full_text`/`data_extraction`; `title_abstract` uses full text input directly.
 
 ## Validation engine behavior
 

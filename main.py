@@ -881,29 +881,6 @@ def _latest_eligibility_map(stage: str) -> dict[str, object]:
     return records
 
 
-def _decisions_from_file(path: Path) -> dict[str, object]:
-    """human readable hint: parse an eligibility JSONL into paper_id->decision map."""
-
-    if not path or not path.exists():
-        return {}
-    records: dict[str, object] = {}
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip() or '"meta": "' in line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except Exception:
-                    continue
-                pid = str(obj.get("paper_id", ""))
-                if pid:
-                    records[pid] = obj.get("llm_decision")
-    except Exception:
-        return {}
-    return records
-
-
 def _decision_is_complete(decision: object, stage: str) -> bool:
     """human readable hint: validate presence of is_eligible and required justification/reason."""
 
@@ -984,42 +961,33 @@ def _latest_retry_csv(stage: str) -> Path | None:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
-def _append_jsonl(source: Path, target: Path) -> None:
-    """Append JSONL records (excluding meta/summary) from source to target."""
-    if not source.exists() or not target.exists():
-        return
+def _error_ids_by_type(error_log_path: Path, blocked_types: set[str]) -> set[str]:
+    """human readable hint: collect paper_ids with deterministic errors that should not trigger auto-retry."""
+
+    if not error_log_path.exists() or not blocked_types:
+        return set()
+
+    blocked_ids: set[str] = set()
     try:
-        with source.open("r", encoding="utf-8") as src, target.open("a", encoding="utf-8") as dst:
-            for line in src:
+        with error_log_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
                 if not line.strip():
                     continue
-                if '"meta": "eligibility_records"' in line or '"meta": "summary"' in line:
+                try:
+                    obj = json.loads(line)
+                except Exception:
                     continue
-                dst.write(line)
+                if not isinstance(obj, dict) or obj.get("meta"):
+                    continue
+                err_type = str(obj.get("error_type") or "").strip()
+                if err_type not in blocked_types:
+                    continue
+                pid = str(obj.get("paper_id") or "").strip()
+                if pid:
+                    blocked_ids.add(pid)
     except Exception:
-        return
-
-
-def _append_text(source: Path, target: Path) -> None:
-    if not source.exists() or not target.exists():
-        return
-    try:
-        with source.open("r", encoding="utf-8") as src, target.open("a", encoding="utf-8") as dst:
-            dst.write("\n\n--- RETRY APPEND ---\n")
-            dst.write(src.read())
-    except Exception:
-        return
-
-
-def _append_resource_log(source: Path, target: Path) -> None:
-    if not source.exists() or not target.exists():
-        return
-    try:
-        with source.open("r", encoding="utf-8") as src, target.open("a", encoding="utf-8") as dst:
-            for line in src:
-                dst.write(line)
-    except Exception:
-        return
+        return set()
+    return blocked_ids
 
 
 def _prompt_retry_if_needed(stage: str, artifact: dict | None) -> None:
@@ -1047,6 +1015,21 @@ def _prompt_retry_if_needed(stage: str, artifact: dict | None) -> None:
         if not candidates:
             print("[retry] All error cases contain is_eligible; no retry suggested.")
             return
+
+        blocked_ids = _error_ids_by_type(error_path, {"llm_output_token_limit", "context_overflow"})
+        blocked_candidates = {pid for pid in candidates if pid in blocked_ids}
+        if blocked_candidates:
+            print(
+                "[retry] Some papers were not queued for auto-retry because they failed deterministically "
+                "(token-limit/context-overflow). Adjust max_tokens or reduce prompt payload first:"
+            )
+            for pid in sorted(blocked_candidates):
+                print(f"  - {pid}")
+            candidates = {pid for pid in candidates if pid not in blocked_candidates}
+            if not candidates:
+                print("[retry] No remaining candidates for automatic retry after deterministic-failure filtering.")
+                return
+
         print("[retry] Papers with missing is_eligible after screening:")
     elif stage == "data_extraction":
         candidates = set(artifact.get("error_ids", []) or [])

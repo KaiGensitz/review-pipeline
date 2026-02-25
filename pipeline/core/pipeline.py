@@ -9,6 +9,7 @@ structure and logging.
 from __future__ import annotations
 
 import csv
+from concurrent.futures import ThreadPoolExecutor
 import json
 import math
 import os
@@ -56,6 +57,7 @@ prompt = PROMPT_FILE.read_text(encoding="utf-8").strip()
 use_api = require_setting(LLM_SETTINGS, "use_api", "LLM_SETTINGS")
 gpustack_model = require_setting(LLM_SETTINGS, "screening_model", "LLM_SETTINGS")
 gpustack_base_url = require_setting(LLM_SETTINGS, "gpustack_base_url", "LLM_SETTINGS")
+llm_max_tokens = require_setting(LLM_SETTINGS, "max_tokens", "LLM_SETTINGS", int)
 
 BATCH_SIZE_DEFAULT = require_setting(SCREENING_DEFAULTS, "batch_size", "SCREENING_DEFAULTS")
 SAMPLE_SIZE_DEFAULT = require_setting(SCREENING_DEFAULTS, "sample_size", "SCREENING_DEFAULTS")
@@ -161,6 +163,7 @@ class PaperScreeningPipeline:
         self.sample_size = sample_size if sample_size is not None else SCREENING_DEFAULTS.get("sample_size", None)
         self.sample_seed = sample_seed if sample_seed is not None else SCREENING_DEFAULTS.get("sample_seed", None)
         self.sustainability_tracking = sustainability_tracking if sustainability_tracking is not None else SCREENING_DEFAULTS.get("sustainability_tracking", True)
+        self.title_abstract_workers = max(1, int(SCREENING_DEFAULTS.get("title_abstract_workers", 1) or 1))
         self.resource_log_path = Path(resource_log_path) if resource_log_path else Path("output/resource_usage.log")
         self.run_label = run_label
         self.qc_sample_path = Path(qc_sample_path) if qc_sample_path else Path("output/qc_sample_batch.csv")
@@ -326,7 +329,6 @@ class PaperScreeningPipeline:
         if self.sustainability_tracking:
             self.resource_tracker.start_run()
 
-        papers_iter = iter(planned_papers)
         progress_total = total_planned if total_planned is not None else (self.sample_size or None)
         progress = (
             tqdm(total=progress_total, desc="screening", ncols=100)
@@ -345,6 +347,7 @@ class PaperScreeningPipeline:
         reason_counts_main: dict[str, int] = {}
         reason_counts_split: dict[bool, dict[str, int]] = {True: {}, False: {}}
         index_entries: list[dict[str, object]] = []
+        executor: ThreadPoolExecutor | None = None
 
         if self.stage in {"title_abstract", "full_text"}:
             self.eligibility_output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -399,10 +402,25 @@ class PaperScreeningPipeline:
 
         times_by_decision: dict[bool, list[float]] = {True: [], False: []}
 
+        def _process_with_timing(paper_item: PaperRecord) -> tuple[PaperRecord, dict, dict, dict | None, float]:
+            """human readable hint: keep per-paper runtime while allowing optional concurrent processing."""
+
+            paper_start_ts = time.time()
+            record_obj, token_stats_obj, extraction_obj = self._process_paper(paper_item)
+            return paper_item, record_obj, token_stats_obj, extraction_obj, (time.time() - paper_start_ts)
+
+        if self.stage == "title_abstract" and self.title_abstract_workers > 1:
+            # human readable hint: title_abstract can be parallelized safely because it bypasses chunk-embedding selection.
+            executor = ThreadPoolExecutor(max_workers=self.title_abstract_workers)
+            processed_stream = executor.map(_process_with_timing, planned_papers)
+        else:
+            processed_stream = (_process_with_timing(paper) for paper in planned_papers)
+
         try:
 
-            for idx, paper in enumerate(papers_iter, start=1):
+            for idx, processed in enumerate(processed_stream, start=1):
                 self._paper_count = idx
+                paper, record, token_stats, extraction_payload, paper_elapsed = processed
 
                 if progress is not None:
                     progress.update(1)
@@ -420,9 +438,6 @@ class PaperScreeningPipeline:
                         flush=True,
                     )
 
-                paper_start_ts = time.time()
-                record, token_stats, extraction_payload = self._process_paper(paper)
-                paper_elapsed = time.time() - paper_start_ts
                 self._paper_times.append(paper_elapsed)
 
                 error_flag = paper.paper_id in self._error_ids
@@ -628,6 +643,8 @@ class PaperScreeningPipeline:
                 text_writer.close()
             if chunk_writer:
                 chunk_writer.close()
+            if executor is not None:
+                executor.shutdown(wait=True)
 
         self._total_runtime_seconds = time.time() - start_time
 
@@ -989,6 +1006,24 @@ class PaperScreeningPipeline:
         failure_type: str | None = None
         failure_attempt = 0
 
+        if self.stage == "title_abstract":
+            # human readable hint: pass full Title+Abstract directly to {data}; no chunking/top-k in this stage.
+            llm_input = self._title_abstract_full_input(paper)
+            prompt_tokens = len((llm_input or "").split())
+            estimated_input_tokens = prompt_tokens
+            selected = [
+                {
+                    "paper_id": paper.paper_id,
+                    "chunk_id": f"{paper.paper_id}::full_input::0000",
+                    "text": llm_input,
+                    "kind": "full_input",
+                    "page_start": None,
+                    "page_end": None,
+                    "line_start": None,
+                    "line_end": None,
+                }
+            ]
+
         if self.stage == "data_extraction":
             preselected_chunks = self._load_selected_chunks_from_input(paper)
             if preselected_chunks:
@@ -999,21 +1034,21 @@ class PaperScreeningPipeline:
                 estimated_input_tokens = prompt_tokens
 
         if not preselected:
-            chunks, pdf_text_tokens, pdf_visual_tokens, language_used = self._prepare_chunks(paper)
-            if self.stage in {"full_text", "data_extraction"} and not chunks:
-                llm_decision = "LLM skipped: PDF missing or unreadable; see error log."
-                estimated_input_tokens = pdf_text_tokens + pdf_visual_tokens
-                selected = []
-                self._log_error(
-                    paper.paper_id,
-                    f"LLM skipped: no chunks produced (PDF missing or unreadable). folder={paper.metadata.get('folder_path')}",
-                    error_type="no_chunks",
-                    pdf_text_tokens=pdf_text_tokens,
-                    pdf_visual_tokens=pdf_visual_tokens,
-                    total_estimated_tokens=estimated_input_tokens,
-                )
-            else:
-                if not chunks:
+            if self.stage != "title_abstract":
+                chunks, pdf_text_tokens, pdf_visual_tokens, language_used = self._prepare_chunks(paper)
+                if self.stage in {"full_text", "data_extraction"} and not chunks:
+                    llm_decision = "LLM skipped: PDF missing or unreadable; see error log."
+                    estimated_input_tokens = pdf_text_tokens + pdf_visual_tokens
+                    selected = []
+                    self._log_error(
+                        paper.paper_id,
+                        f"LLM skipped: no chunks produced (PDF missing or unreadable). folder={paper.metadata.get('folder_path')}",
+                        error_type="no_chunks",
+                        pdf_text_tokens=pdf_text_tokens,
+                        pdf_visual_tokens=pdf_visual_tokens,
+                        total_estimated_tokens=estimated_input_tokens,
+                    )
+                elif not chunks:
                     llm_decision = "LLM skipped: no evidence chunks available."
                     self._log_error(
                         paper.paper_id,
@@ -1025,9 +1060,10 @@ class PaperScreeningPipeline:
                     )
                     selected = []
                 else:
-                    selected, scores, embed_usage = self.selector.select(
+                    selected, _, embed_usage = self.selector.select(
                         chunks, top_k=self.top_k, score_threshold=self.score_threshold
                     )
+
                 if embed_usage:
                     embed_tokens = int(
                         embed_usage.get("prompt_tokens")
@@ -1121,8 +1157,15 @@ class PaperScreeningPipeline:
                             )
                             llm_decision = None
                             continue
-                        failure_reason = "LLM decision incomplete after retry; output may be truncated."
-                        failure_type = "llm_incomplete"
+                        near_token_limit = bool(response_tokens and response_tokens >= int(0.9 * llm_max_tokens))
+                        if near_token_limit:
+                            failure_reason = (
+                                f"LLM decision likely truncated by max_tokens={llm_max_tokens}; reduce prompt payload or increase max_tokens."
+                            )
+                            failure_type = "llm_output_token_limit"
+                        else:
+                            failure_reason = "LLM decision incomplete after retry; output may be truncated."
+                            failure_type = "llm_incomplete"
                         failure_attempt = attempt
                         print(
                             f"[error] chat attempt {attempt}/{max_attempts} failed for model='{model_name}': output incomplete; logged for re-screen",
@@ -1143,12 +1186,22 @@ class PaperScreeningPipeline:
         if llm_decision and response_tokens == 0:
             response_tokens = len((llm_decision or "").split())
 
+        if self.stage in {"title_abstract", "full_text"}:
+            llm_decision = self._sanitize_screening_decision(llm_decision, paper)
+
         if failure_type is None and not api_disabled and self._decision_missing_fields(llm_decision):
             llm_decision_incomplete = True
-            failure_reason = (
-                "LLM decision missing justification or exclusion_reason_category after retries; flagged for re-screen."
-            )
-            failure_type = "llm_missing_fields"
+            near_token_limit = bool(response_tokens and response_tokens >= int(0.9 * llm_max_tokens))
+            if near_token_limit:
+                failure_reason = (
+                    f"LLM decision missing required fields likely due to output truncation at max_tokens={llm_max_tokens}."
+                )
+                failure_type = "llm_output_token_limit"
+            else:
+                failure_reason = (
+                    "LLM decision missing justification or exclusion_reason_category after retries; flagged for re-screen."
+                )
+                failure_type = "llm_missing_fields"
             failure_attempt = attempt or 2
 
         if failure_type:
@@ -1166,6 +1219,10 @@ class PaperScreeningPipeline:
             )
 
         total_chunks = len(chunks) if chunks else len(selected)
+        output_metadata = paper.metadata
+        if self.stage in {"title_abstract", "full_text"}:
+            output_metadata = self._metadata_without_authors(output_metadata)
+
         record = {
             "paper_id": paper.paper_id,
             "selected_chunks": selected,
@@ -1180,7 +1237,7 @@ class PaperScreeningPipeline:
                 "llm_decision_incomplete": llm_decision_incomplete,
                 "language_used": language_used,
             },
-            "metadata": paper.metadata,
+            "metadata": output_metadata,
         }
 
         if self.stage == "data_extraction":
@@ -1206,13 +1263,83 @@ class PaperScreeningPipeline:
         if not chunks:
             return ""
 
-        parts: list[str] = [f"Paper ID: {paper.paper_id}", f"Title: {paper.title}".strip()]
+        authors = self._authors_for_paper(paper) if self.stage in {"title_abstract", "full_text"} else ""
+
+        title_text = (paper.title or "").strip()
+        if self.stage in {"title_abstract", "full_text"}:
+            title_text = self._strip_author_mentions(title_text, authors)
+
+        parts: list[str] = [f"Paper ID: {paper.paper_id}", f"Title: {title_text}".strip()]
         for idx, chunk in enumerate(chunks, start=1):
             text = str(chunk.get("text", "")).strip()
+            if self.stage in {"title_abstract", "full_text"}:
+                text = self._strip_author_mentions(text, authors)
             page = chunk.get("page")
             prefix = f"[Chunk {idx}" + (f", page {page}]" if page is not None else "]")
             parts.append(f"{prefix}\n{text}")
         return "\n\n".join(parts)
+
+    def _title_abstract_full_input(self, paper: PaperRecord) -> str:
+        """Build one full context block for title_abstract (no chunking/retrieval)."""
+
+        title_text = (paper.title or "").strip()
+        abstract_text = (paper.abstract or "").strip()
+        authors = self._authors_for_paper(paper)
+        title_text = self._strip_author_mentions(title_text, authors)
+        abstract_text = self._strip_author_mentions(abstract_text, authors)
+        parts = [f"Paper ID: {paper.paper_id}", f"Title: {title_text}"]
+        if abstract_text:
+            parts.append("Abstract:\n" + abstract_text)
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _metadata_without_authors(metadata: dict) -> dict:
+        """Remove author fields from screening outputs."""
+
+        cleaned = dict(metadata or {})
+        cleaned.pop("Authors", None)
+        cleaned.pop("authors", None)
+        cleaned.pop("Author", None)
+        cleaned.pop("author", None)
+        return cleaned
+
+    @staticmethod
+    def _authors_for_paper(paper: PaperRecord) -> str:
+        """Get author string for redaction matching."""
+
+        metadata = paper.metadata or {}
+        return str(metadata.get("Authors") or metadata.get("authors") or "").strip()
+
+    @staticmethod
+    def _strip_author_mentions(text: str, authors: str) -> str:
+        """Redact exact author names/blocks from text to avoid author-based screening."""
+
+        value = (text or "").strip()
+        author_block = (authors or "").strip()
+        if not value or not author_block:
+            return value
+
+        patterns: list[str] = [author_block]
+        split_candidates = re.split(r"[;\n|]", author_block)
+        for candidate in split_candidates:
+            c = candidate.strip()
+            if c:
+                patterns.append(c)
+
+        redacted = value
+        for candidate in patterns:
+            escaped = re.escape(candidate)
+            redacted = re.sub(escaped, " ", redacted, flags=re.IGNORECASE)
+
+        redacted = re.sub(r"\s+", " ", redacted).strip()
+        return redacted
+
+    def _sanitize_screening_decision(self, decision: str | None, paper: PaperRecord) -> str | None:
+        """Remove author mentions from LLM output for screening stages."""
+
+        if decision is None:
+            return None
+        return self._strip_author_mentions(decision, self._authors_for_paper(paper))
 
     def _write_plain_text_summary(self, writer: TextIO, record: dict) -> None:
         """Write a simple per-paper summary for manual review text files."""
@@ -1255,15 +1382,6 @@ class PaperScreeningPipeline:
         language_setting = self.language_setting
         resolved_language = language_setting or "en"
 
-        if self.stage == "title_abstract":
-            if language_setting in {"auto_first", "auto-first"}:
-                sample_text = f"{paper.title}\n{paper.abstract}"
-                resolved_language = self._detect_language(sample_text)
-            elif language_setting == "auto":
-                resolved_language = "auto"
-            chunks = chunk_paper_sentences(paper.paper_id, paper.title, paper.abstract, resolved_language)
-            return chunks, 0, 0, resolved_language
-
         if self.stage in {"full_text", "data_extraction"}:
             resolved_path = self._resolve_pdf_path(paper)
             pdf_text, page_count, used_path, page_texts = self._load_pdf_text(paper, resolved_path, include_pages=True)
@@ -1281,6 +1399,12 @@ class PaperScreeningPipeline:
                 resolved_language,
                 page_texts=page_texts,
             )
+            if self.stage == "full_text":
+                # human readable hint: do not let authors be part of screening evidence.
+                authors = self._authors_for_paper(paper)
+                for chunk in chunks:
+                    chunk_text = str(chunk.get("text", ""))
+                    chunk["text"] = self._strip_author_mentions(chunk_text, authors)
             pdf_text_tokens = self._estimate_text_tokens(pdf_text)
             pdf_visual_tokens = page_count * TOKENS_PER_PAGE_IMAGE
             return chunks, pdf_text_tokens, pdf_visual_tokens, resolved_language

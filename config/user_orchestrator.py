@@ -116,7 +116,7 @@ LLM_SETTINGS = {
 	"use_api": True,  # True = call API; False would skip LLM calls (not recommended)
 	"gpustack_base_url": "https://gpustack.unibe.ch/v1",  # LLM endpoint URL; must match your server
 	"prompt_path": str(PROMPT_FILE),  # stage-specific prompt; changes decision logic per stage
-	"max_tokens": 1024,  # response length cap; too low can truncate JSON, too high costs more
+	"max_tokens": 2048,  # response length cap; too low can truncate JSON, too high costs more
 	"temperature": 0.0,  # randomness; lower = more stable decisions, higher = more variable
 }
 
@@ -127,6 +127,7 @@ SCREENING_DEFAULTS = {
 	"sample_size": None,  # limit papers per run; set for pilots in any stage
 	"sample_seed": None,  # fixed seed for deterministic sampling when sample_size is set
 	"batch_size": 32,  # embedding batch size; higher = faster, more memory
+	"title_abstract_workers": 1, # controls how many title/abstract papers are sent to the LLM at once; practical rule: keep 1 for maximum stability; use 2-4 only when you need speed and your API endpoint is stable.
 	"sustainability_tracking": True,  # True = write resource logs; False = no tracking
 	"enable_time_savings": True,  # True = compute human-time savings when QC minutes exist; set False to skip
 }
@@ -156,8 +157,8 @@ PATH_SETTINGS = {
 HUMAN_TIME_CONFIG = {
 	"title_abstract": {
 		"reviewers": [
-			{"id": "human_1", "total_minutes": 110}, # Marc (Email 12.02.2026): 1h 50 min = 110 min
-			{"id": "human_2", "total_minutes": 240}, # Shawan (Slack 19.02.2026): 4h = 240 min
+			{"id": "human_1", "total_minutes": 110}, # Marc for 223 articles (Email 12.02.2026): 1h 50 min = 110 min
+			{"id": "human_2", "total_minutes": 240}, # Shawan for 223 articles (Slack 19.02.2026): 4h = 240 min
 			{"id": "human_3", "total_minutes": 0},
 			{"id": "human_4", "total_minutes": 0},
 		],

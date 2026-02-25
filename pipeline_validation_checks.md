@@ -27,6 +27,7 @@ Use this checklist before running `main.py`.
 - Retry outputs are separate from base outputs.
 - Retry manifest exists: `output/<stage>/<stage>_retry_manifest.jsonl`.
 - CodeCarbon emissions for retries are merged with a `run` column (`main`, `retry_<attempt>`).
+- Deterministic failures (`llm_output_token_limit`, `context_overflow`) are excluded from automatic retry prompts.
 
 ## Stage checks
 
