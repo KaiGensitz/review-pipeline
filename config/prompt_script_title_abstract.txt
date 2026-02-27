@@ -16,10 +16,10 @@ Eligibility Criteria (include vs exclude)
 
 Population
 - Include: adults (18+)
-- Exclude: children; youth; animals
+- Exclude: child/children; youth; animals
 
 Intervention / Exposure
-- Include: smartphone-based technology; online plattforms; mobile health; mHealth; digital health; artificial intelligence / AI; machine learning; deep learning; neural networks; reinforcement learning; Q-learning; contextual bandits; generative AI; large language model; natural language processing; natural language understanding; adaptive algorithms; data mining; recommender systems; chatbots; conversational agents; just-in-time adaptive interventions (JITAI); ecological momentary interventions (EMI)
+- Include: smartphone/phone-based technology; online plattforms; mobile health (mHealth); digital health; artificial intelligence (AI); machine learning (ML); deep learning (DL); neural networks (NN); reinforcement learning (RL); Q-learning; contextual bandits; generative AI; large language model (LLM); natural language processing (NLP); natural language understanding (NLU); adaptive algorithms; data mining; recommender systems; chatbots; conversational agent(s) (CAs); just-in-time adaptive interventions (JITAI); ecological momentary interventions (EMI)
 - Exclude: hard-coded algorithms; rule-based expert/recommender systems; not AI-based; not smartphone-based; desktop only; only wearables; no technology
 
 Comparator / Context
@@ -27,7 +27,7 @@ Comparator / Context
 - Exclude: rural area/setting/environment/space; village; hamlet; countryside; remote area/community; farming/agricultural region; outback; wilderness
 
 Outcome
-- Include: physical activity; exercise; light/moderate/vigorous activity; sedentary behavior/behaviour; sedentariness; sit less; move more; walking; jogging; running; cycling/biking; swimming; weight loss; weight management; healthy living; (health) behavior change; rehabilitation; (mental) health promotion
+- Include: physical activity; exercise; light/moderate/vigorous activity; sedentary behavior/behaviour; sedentariness; sit less; move more; walking; jogging; running; cycling/biking; swimming; weight loss; weight management; healthy living/lifestyle; (health) behavior change; rehabilitation; (mental) health promotion
 - Exclude: mainly nutrition; mainly diet; mainly sleep; mainly alcohol; mainly smoking; purely technical human activity recognition (HAR) or gait/posture classification without a PA assessment/promotion and health enhancement focus, meaning no PA intervention intended; health interventions or weight-loss programs with NO PA component
 
 Study Characteristics
@@ -39,10 +39,10 @@ Other
 - Exclude: published before 2011
 
 Field definitions (schema expectations):
-- not_adult_population: boolean. true only if the study is EXPLICITLY exclusively children/youth/animals. false if adults are included, OR if age is not mentioned at all.
+- not_adult_population: boolean. true if the study is EXPLICITLY mentioning and focusing on child/children/youth(s) or animals. false if adults are targeted, OR if age (group) is not mentioned at all.
 - no_smartphone_technology: boolean. true only if EXPLICITLY desktop/PC-only or standalone-wearable-only with no smartphone integration. false if smartphone/mobile Health (mHealth) is mentioned, OR if vague terms like "eHealth", "digital intervention", or "wearable/tracker" are used - as they often imply mobile access.
-- no_artificial_intelligence: boolean. true only if the abstract EXPLICITLY states the use of standard statistics (e.g., "we used t-tests") or explicitly states "rule-based". false if AI/ML/JITAI/EMI is mentioned ANYWHERE in the text - including background, system architecture, or future directions - OR if the technology is described as "personalized", "tailored", "smart", "automated", or "conversational agent", as these may hide AI backend systems.
-- no_physical_activity: boolean. true only if the study EXPLICITLY targets non-PA outcomes (e.g., exclusive focus on diet, sleep, medication adherence, relaxation exercises) and physical activity/exercise is neither measured nor promoted. false if physical activity is targeted, or if the outcome is broadly "healthy lifestyle", "weight loss", "(mental) health promotion", or "rehabilitation" AND the use of physical activity/exercise is mentioned, implied or measured.
+- no_artificial_intelligence: boolean. true only if the abstract EXPLICITLY states the use of standard statistics (e.g., "we used t-tests") or explicitly states "rule-based". false if artificial intelligence (AI)/machine learning (ML)/just-in-time adaptive interventions (JITAI)/ecological momentary interventions (EMI) is mentioned ANYWHERE in the text - including background, system architecture, or future directions - OR if the technology is described as "personalized", "tailored", "smart", "automated", or "conversational agent", as these may hide AI backend systems.
+- no_physical_activity: boolean. true only if the study EXPLICITLY targets non-PA outcomes (e.g., exclusive focus on diet, sleep, medication adherence, relaxation exercises) and physical activity/exercise is neither measured nor promoted. false if physical activity is targeted, or if the outcome is broadly "(health) behavior change/advice", "healthy lifestyle/living", "weight loss", "(mental) health promotion", or "rehabilitation" or the use of physical activity/exercise is mentioned, implied or measured.
 - not_urban_context: boolean or "NEUTRAL". true only if EXPLICITLY rural/remote/wilderness. false if clearly urban/city. "NEUTRAL" if the setting is mixed or simply not mentioned.
 - wrong_publication_type: boolean. true only if the study explicitly identifies as an editorial, commentary, or review (e.g., systematic, rapid, narrative, critical, scoping, meta-analyses). false if it is empirical, protocol, system architecture, simply summarizes domain evidence or is unclear.
 - insufficient_context: boolean. true if abstract missing or <20 words; false otherwise.

@@ -1,0 +1,102 @@
+%% https://mermaid.live/ to render
+
+graph LR
+    %% Define Lean Styling
+    classDef input fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000,rx:5px,ry:5px;
+    classDef process fill:#e1f5fe,stroke:#01579b,stroke-width:2px,color:#000,rx:5px,ry:5px;
+    classDef ai fill:#bbdefb,stroke:#1976d2,stroke-width:2px,color:#000,rx:5px,ry:5px;
+    classDef human fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000,rx:5px,ry:5px;
+    classDef metric fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,color:#000,rx:5px,ry:5px;
+    classDef output fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px,color:#000,rx:5px,ry:5px;
+    classDef env fill:#e0f2f1,stroke:#00796b,stroke-width:2px,color:#000,rx:5px,ry:5px;
+
+    %% --- 1. GLOBAL INPUTS ---
+    subgraph Inputs ["Data & Configuration"]
+        direction TB
+        I_CSV["Project Data<br/>(Paper CSV)"]:::input
+        I_KB["Knowledge Base<br/>(POS/NEG Snippets)"]:::input
+        I_PDF["Full-Text PDFs<br/>(Required for S2 & S3)"]:::input
+        I_CFG["Run Settings<br/>(embedding & large language model)"]:::input
+    end
+
+    %% --- 2. STAGE 1: TITLE/ABSTRACT ---
+    subgraph S1 ["Stage 1: Title & Abstract Screening"]
+        direction TB
+        S1_QC{"10% QC Sample"}:::process
+        S1_AI("AI Screening<br/>(Full T&A)"):::ai
+        S1_Hum("Human Consensus<br/>(Blinded)"):::human
+        S1_Val{"Gate 1: Validation<br/>Sens>0.95 | PABAK>0.8"}:::metric
+        S1_Bulk("Bulk Processing<br/>(Remaining 90%)"):::ai
+        
+        S1_QC -->|Parallel| S1_AI
+        S1_QC -->|Parallel| S1_Hum
+        S1_AI --> S1_Val
+        S1_Hum --> S1_Val
+        S1_Val -->|Fail / Refine Prompt| S1_QC
+        S1_Val -->|Pass| S1_Bulk
+    end
+
+    %% --- 3. STAGE 2: FULL TEXT ---
+    subgraph S2 ["Stage 2: Full-Text Screening"]
+        direction TB
+        S2_QC{"10% QC Sample"}:::process
+        S2_AI("AI Screening<br/>(Chunked PDFs)"):::ai
+        S2_Hum("Human Consensus<br/>(Blinded)"):::human
+        S2_Val{"Gate 2: Validation<br/>Sens>0.95 | PABAK>0.8"}:::metric
+        S2_Bulk("Bulk Processing<br/>(Remaining 90%)"):::ai
+        
+        S2_QC -->|Parallel| S2_AI
+        S2_QC -->|Parallel| S2_Hum
+        S2_AI --> S2_Val
+        S2_Hum --> S2_Val
+        S2_Val -->|Fail / Refine Prompt| S2_QC
+        S2_Val -->|Pass| S2_Bulk
+    end
+
+    %% --- 4. STAGE 3: DATA EXTRACTION ---
+    subgraph S3 ["Stage 3: Data Extraction"]
+        direction TB
+        S3_QC{"10% QC Sample"}:::process
+        S3_AI("AI Extraction<br/>(JSON Schema)"):::ai
+        S3_Hum("Human Gold Standard<br/>(Extraction Matrix)"):::human
+        S3_Val{"Gate 3: Validation<br/>Concordance>0.80"}:::metric
+        S3_Bulk("Bulk Extraction<br/>(Remaining 90%)"):::ai
+        
+        S3_QC -->|Parallel| S3_AI
+        S3_QC -->|Parallel| S3_Hum
+        S3_AI --> S3_Val
+        S3_Hum --> S3_Val
+        S3_Val -->|Fail / Refine Field| S3_QC
+        S3_Val -->|Pass| S3_Bulk
+    end
+
+    %% --- 5. AGGREGATION & AUDIT ---
+    subgraph Outputs ["Final Aggregation & Auditing"]
+        direction TB
+        O_Dec["Eligibility JSONL<br/>(Inclusions/Exclusions)"]:::output
+        O_Ext["Extracted Data Matrix<br/>(CSV/JSON)"]:::output
+        O_Env["CodeCarbon Logs<br/>(Emissions/Energy)"]:::env
+        O_Res["Resource Logs<br/>(Token Usage)"]:::env
+    end
+
+    %% --- FLOW CONNECTIONS ---
+    Inputs ==> S1_QC
+    I_PDF -.-> S2_QC
+    I_PDF -.-> S3_QC
+
+    %% Funnel passing between stages
+    S1_Bulk ==>|Selected Papers CSV| S2_QC
+    S2_Bulk ==>|Included Papers CSV| S3_QC
+    
+    %% To Outputs
+    S1_Bulk -.-> O_Dec
+    S2_Bulk -.-> O_Dec
+    S3_Bulk ==> O_Ext
+    
+    %% Environment and Logging routing
+    S1_Bulk -.-> O_Env
+    S2_Bulk -.-> O_Env
+    S3_Bulk -.-> O_Env
+    S1_Bulk -.-> O_Res
+    S2_Bulk -.-> O_Res
+    S3_Bulk -.-> O_Res
