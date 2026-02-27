@@ -1,4 +1,4 @@
-# Review Procedure
+# Review Procedure (document 3/6)
 
 **Read prior:** [installation_preparation.md](installation_preparation.md)
 **Read next:** [pipeline_validation_checks.md](pipeline_validation_checks.md)
@@ -70,6 +70,7 @@ This is enforced by terminal prompts in `main.py`.
 - Windows main run: `.venv\Scripts\python main.py`
 - macOS/Linux main run: `python main.py`
 - Manual validation (optional): `python -m pipeline.additions.stats_engine`
+- Manual reproducibility trace (optional): `python -m pipeline.additions.input_trace --paper-id <ID> --stage <stage>`
 - Manual backup (optional): `python backup_to_github.py`
 
 ### Command automatically started by main run
@@ -146,7 +147,7 @@ Data extraction:
 
 ## Decision rule
 
-- If QC validation is weak: refine prompt/KB and start a new QC round.
+- If QC validation is weak: refine prompt/knowledge-base and screen QC sample again.
 - If QC validation is strong: continue to remaining papers.
 
 ---

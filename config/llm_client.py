@@ -32,15 +32,24 @@ class OpenAIResponder:
 		last_error: Exception | None = None
 		for attempt in range(retries + 1):
 			try:
-				response = self.client.chat.completions.create(
-					model=self.model,
-					messages=[
+				request_kwargs: dict = {
+					"model": self.model,
+					"messages": [
 						{"role": "system", "content": "You are a RAG system."},
 						{"role": "user", "content": self.prompt},
 					],
-					max_tokens=require_setting(LLM_SETTINGS, "max_tokens", "LLM_SETTINGS", int),
-					temperature=require_setting(LLM_SETTINGS, "temperature", "LLM_SETTINGS", float),
-					stream=False,
+					"max_tokens": require_setting(LLM_SETTINGS, "max_tokens", "LLM_SETTINGS", int),
+					"temperature": require_setting(LLM_SETTINGS, "temperature", "LLM_SETTINGS", float),
+					"top_p": float(LLM_SETTINGS.get("top_p", 1.0) or 1.0),
+					"stream": False,
+				}
+
+				seed_val = LLM_SETTINGS.get("seed")
+				if isinstance(seed_val, int):
+					request_kwargs["seed"] = seed_val
+
+				response = self.client.chat.completions.create(
+					**request_kwargs,
 				)
 
 				if not response or not response.choices:

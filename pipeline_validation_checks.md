@@ -1,4 +1,4 @@
-# Pipeline Validation Checks
+# Pipeline Validation Checks (document 4/6)
 
 **Read prior:** [review_procedure.md](review_procedure.md)
 **Read next:** [pipeline_architecture_reference.md](pipeline_architecture_reference.md)
@@ -20,14 +20,42 @@ Use this checklist before running `main.py`.
   - `<stage>_qc_sample_batch_<yyyymmdd>_<hh-mm>.csv`
   - `<stage>_qc_sample_batch_readable_<yyyymmdd>_<hh-mm>.txt`
 - Validation is run against the matching QC sample timestamp.
+- Eligibility diagnostics include per-paper hashes (`llm_input_sha256`, `full_prompt_sha256`) for reproducibility audits.
 
-## Retry integrity checks
+## Integrity checks
 
 - Retry files follow: `<stage>_<sample>_sample_retry_<attempt>_*_<yyyymmdd>_<hh-mm>`.
 - Retry outputs are separate from base outputs.
 - Retry manifest exists: `output/<stage>/<stage>_retry_manifest.jsonl`.
 - CodeCarbon emissions for retries are merged with a `run` column (`main`, `retry_<attempt>`).
 - Deterministic failures (`llm_output_token_limit`, `context_overflow`) are excluded from automatic retry prompts.
+
+### Reproducibility controls (optional)
+
+- `LLM_SETTINGS` supports optional deterministic request controls:
+  - `temperature` (recommended `0.0`)
+  - `top_p` (recommended `1.0`)
+  - `seed` (set any integer number to create reproducibility audits)
+- Screening eligibility outputs now include per-paper diagnostics:
+  - `llm_input_sha256`
+  - `prompt_template_sha256`
+  - `full_prompt_sha256`
+  - `llm_seed`, `llm_top_p`
+
+| Hash Name              | Tracks…                            | What it proves if identical?                |
+|------------------------|------------------------------------|---------------------------------------------|
+| llm_input_sha256       | The paper’s input data             | The AI saw the same paper content           |
+| prompt_template_sha256 | The question/instruction form      | The instructions to the AI were unchanged   |
+| full_prompt_sha256     | The full prompt (template + paper) | The AI got the same instructions and content |
+
+### On-demand exact input trace
+
+- Reconstruct and verify the exact model input text for one paper (no full-input storage by default):
+  - `python -m pipeline.additions.input_trace --paper-id <ID> --stage <title_abstract|full_text|data_extraction>`
+- Optional: include full merged prompt in the trace report:
+  - `python -m pipeline.additions.input_trace --paper-id <ID> --stage <stage> --show-full-prompt`
+- Output report is written to `output/<stage>/..._input_trace_...txt` with hash match flags.
+- Confirm `context hash match: True` in the trace output report.
 
 ## Stage checks
 

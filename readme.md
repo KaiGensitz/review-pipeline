@@ -1,4 +1,4 @@
-# Automated Review Pipeline
+# Automated Review Pipeline (document 1/6)
 
 Stage-based pipeline for title/abstract screening, full-text screening, and data extraction with transparent logs and optional quality control sampling for human validation.
 
@@ -7,7 +7,7 @@ Stage-based pipeline for title/abstract screening, full-text screening, and data
 - This project is inspired by the FRAG idea: https://github.com/dsl-unibe-ch/rag-framework.
 - This repository is licensed under CC BY-NC-SA 4.0 (see [LICENSE](LICENSE)).
 
-## Start here
+## Documentation overview
 
 - Setup and preparation: [installation_preparation.md](installation_preparation.md)
 - Full run order + exact terminal decision tree: [review_procedure.md](review_procedure.md)
@@ -70,6 +70,7 @@ Knowledge-base format for all stages: CSV with columns `label` (`POS`/`NEG`) and
 - Retries stay isolated and are never merged into base eligibility/chunks/readable/resource files.
 - Deterministic token-limit/context-overflow failures are not auto-retried; adjust payload or token limit first.
 - Retry metadata is appended to `output/<stage>/<stage>_retry_manifest.jsonl`.
+- Eligibility diagnostics now include per-paper hashes (`llm_input_sha256`, `full_prompt_sha256`) for exact input verification.
 
 ## Validation commands
 
@@ -79,6 +80,11 @@ Knowledge-base format for all stages: CSV with columns `label` (`POS`/`NEG`) and
   - `python -m pipeline.additions.stats_engine --included <included_csv> --excluded <excluded_csv>`
 - data extraction:
   - `python -m pipeline.additions.stats_engine --consensus <data_extraction_consensus.csv>`
+
+## Input-forensics utility
+
+- `python -m pipeline.additions.input_trace --paper-id <ID> --stage <stage>` reconstructs the model input text for one paper and verifies it against stored hashes.
+- The utility is on-demand by design (no full-input snapshots are written for every paper during standard runs).
 
 ## Key outputs
 

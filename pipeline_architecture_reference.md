@@ -1,4 +1,4 @@
-# Pipeline Architecture Reference
+# Pipeline Architecture Reference (document 5/6)
 
 **Read prior:** [pipeline_validation_checks.md](pipeline_validation_checks.md)
 **Read next:** [study_protocol_and_governance.md](study_protocol_and_governance.md)
@@ -13,6 +13,7 @@ Advanced technical reference for operators and maintainers.
 - Large language model decisions missing required fields are logged and eligible for retry.
 - Validation compares against matching QC timestamps when available.
 - Per-run resource and emissions outputs are written with stage and sample context.
+- Screening diagnostics store per-paper input fingerprints (`llm_input_sha256`, `prompt_template_sha256`, `full_prompt_sha256`).
 
 ## Pipeline behavior by stage
 

@@ -5,8 +5,8 @@ import typing
 from config.embedding_utils import split_text_into_sentences
 from config.user_orchestrator import EMBEDDING_SETTINGS, require_setting
 
-chunk_size = require_setting(EMBEDDING_SETTINGS, "chunk_size", "EMBEDDING_SETTINGS")
-overlap_size = require_setting(EMBEDDING_SETTINGS, "overlap_size", "EMBEDDING_SETTINGS")
+chunk_size = int(str(require_setting(EMBEDDING_SETTINGS, "chunk_size", "EMBEDDING_SETTINGS")))
+overlap_size = int(str(require_setting(EMBEDDING_SETTINGS, "overlap_size", "EMBEDDING_SETTINGS")))
 
 Chunk = typing.Dict[str, typing.Any]
 

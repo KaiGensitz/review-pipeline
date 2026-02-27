@@ -11,6 +11,8 @@ Decision frame (apply in this order):
 - Return is_eligible = false when any exclusion is clearly supported by the PDF (e.g., children-only, no smartphone path, no AI/ML, no PA focus, purely editorial/review, explicitly rural/remote context).
 - If critical elements remain unclear after reviewing the PDF, err on the side of is_eligible = false (no neutral option).
 
+Formatting guardrail: Always fill boolean subfields with best-supported true/false; only not_urban_context may be true/false/"NEUTRAL".
+
 Eligibility Criteria (include vs exclude)
 
 Population
@@ -18,7 +20,7 @@ Population
 - Exclude: children; youth
 
 Intervention / Exposure
-- Include: smartphone-based technology; mobile health; mHealth; digital health; artificial intelligence / AI; machine learning; deep learning; neural networks; reinforcement learning; Q-learning; contextual bandits; generative AI; large language model; natural language processing; natural language understanding; adaptive algorithms; data mining; recommender systems
+- Include: smartphone-based technology; online plattforms; mobile health; mHealth; digital health; artificial intelligence / AI; machine learning; deep learning; neural networks; reinforcement learning; Q-learning; contextual bandits; generative AI; large language model; natural language processing; natural language understanding; adaptive algorithms; data mining; recommender systems; chatbots; conversational agents; just-in-time adaptive interventions (JITAI); ecological momentary interventions (EMI)
 - Exclude: hard-coded algorithms; rule-based expert/recommender systems; not AI-based; not smartphone-based; desktop only; only wearables; no technology
 
 Comparator / Context
@@ -26,53 +28,57 @@ Comparator / Context
 - Exclude: rural area/setting/environment/space; village; hamlet; countryside; remote area/community; farming/agricultural region; outback; wilderness
 
 Outcome
-- Include: physical activity; exercise; light/moderate/vigorous activity; sedentary behavior/behaviour; sedentariness; sit less; move more; walking; jogging; running; cycling/biking; swimming
-- Exclude: only nutrition; only diet; only sleep; only alcohol; only smoking
+- Include: physical activity; exercise; light/moderate/vigorous activity; sedentary behavior/behaviour; sedentariness; sit less; move more; walking; jogging; running; cycling/biking; swimming; weight loss; weight management; healthy living; (health) behavior change; rehabilitation; (mental) health promotion
+- Exclude: mainly nutrition; mainly diet; mainly sleep; mainly alcohol; mainly smoking; purely technical human activity recognition (HAR) or gait/posture classification without a PA assessment/promotion and health enhancement focus, meaning no PA intervention intended; health interventions or weight-loss programs with NO PA component
 
 Study Characteristics
 - Include: RCT; randomized controlled trial; observation; qualitative; mixed-methods; study protocol; feasibility study; usability study
-- Exclude: review; comment; letter; editorial
+- Exclude: review (e.g., systematic, rapid, narrative, critical, scoping, meta-analyses); comment; letter; editorial
 
 Other
 - Include: published from 2011 onwards
 - Exclude: published before 2011
 
-
 Field definitions (schema expectations):
-- not_adult_population: boolean. TRUE only if the PDF shows an exclusively children/youth/animal population; FALSE otherwise.
-- no_smartphone_technology: boolean. TRUE if the PDF shows no smartphone/mHealth/mobile app path (e.g., wearable-only without app, desktop/PC-only); FALSE if a mobile app, smartphone sensing, or mHealth interface is present or clearly implied.
-- no_artificial_intelligence: boolean. TRUE if the PDF shows no AI/ML (only descriptive stats/manual logging/hard-coded rules); FALSE if ML/AI/DL/NLP/GenAI/adaptive algorithms are present.
-- no_physical_activity: boolean. TRUE if the PDF shows no PA assessment/promotion; FALSE if PA/exercise/sedentary/active transport is targeted.
-- not_urban_context: boolean or "NEUTRAL". TRUE if the PDF explicitly states rural/remote/wilderness context; FALSE if urban/city or if context is mixed/unspecified; NEUTRAL if unspecified or mixed
-- wrong_publication_type: boolean. TRUE if the PDF is an editorial/commentary/review without a study/system/protocol; FALSE if empirical/protocol/feasibility/usability/system architecture.
-- insufficient_context: boolean. TRUE only if the provided PDF text is missing/garbled such that key elements cannot be located; otherwise FALSE.
-- is_eligible: true|false only. TRUE only if all exclusion flags above are FALSE. If any required element cannot be confirmed from the PDF, set FALSE.
-- confidence_score: float 0.0–1.0 reflecting certainty in the decision based on PDF evidence.
-- justification: string. One sentence citing the PDF evidence that supports the decision.
-- exclusion_reason_category: string or null. If is_eligible is FALSE, name the primary blocking factor (e.g., "no_smartphone_technology"). If eligible, null.
+- not_adult_population: boolean. true only if the study is EXPLICITLY exclusively children/youth/animals. false if adults are included, OR if age is not mentioned at all.
+- no_smartphone_technology: boolean. true only if EXPLICITLY desktop/PC-only or standalone-wearable-only with no smartphone integration. false if smartphone/mHealth is mentioned, OR if vague terms like "eHealth," "digital intervention," "web-based," "telehealth," or "wearable/tracker" are used - as they often imply mobile access).
+- no_artificial_intelligence: boolean. true only if the abstract EXPLICITLY states the use of standard non-AI statistics (e.g., "we used t-tests") or explicitly states "rule-based". false if AI/ML/JITAI/EMI is mentioned ANYWHERE in the text - including background, system architecture, or future directions -, OR if the underlying technology is not explicitly described, OR if the technology is described as "personalized," "tailored," "smart," "automated," or "conversational agent," as these often hide AI backend systems.
+- no_physical_activity: boolean. true only if the study EXPLICITLY targets mainly non-PA outcomes (e.g., clear focus on diet, sleep, medication adherence, relaxation exercises) and physical activity/exercise is neither measured nor promoted. false if physical activity is targeted, or if the outcome is broadly "healthy lifestyle", "weight loss", "mental health promotion", or "rehabilitation" AND the use of physical activity/exercise is mentioned, implied or measured.
+- not_urban_context: boolean or "NEUTRAL". true only if EXPLICITLY rural/remote/wilderness. false if clearly urban/city. "NEUTRAL" if the setting is mixed or simply not mentioned.
+- wrong_publication_type: boolean. true only if the study explicitly self-identifies as an editorial, commentary, or review (e.g., systematic, rapid, narrative, critical, scoping, meta-analyses). false if it is empirical, protocol, system architecture, simply summarizes domain evidence without calling itself a review, or is unclear.
+- insufficient_context: boolean. true if abstract missing or <20 words; false otherwise.
+- is_eligible: true|false|"NEUTRAL". 
+  Return false ONLY if any of the exclusion flags above are definitively true based on explicit text.
+  Return true if all inclusion signals are explicitly present. 
+  Return "NEUTRAL" if the abstract discusses health behavior change AND digital technology but lacks sufficient detail to definitively prove all criteria.
+- confidence_score: float 0.0–1.0.
+- justification: string. Maximum 50 words linking evidence to the decision.
+- exclusion_reason_category: string or null. If is_eligible is false, name the triggering flag (e.g., "no smartphone technology", "no artificial intelligence", "no physical activity", "not adult population", "not urban context", "wrong publication type", "language not en/de", "full text not available"). If eligible, null.
 
 Formatting rules:
-1) Return only a single valid JSON object.
-2) No Markdown fences.
+1) Return only a single valid JSON object. No Markdown fences.
+2) Adhere exactly to the response shape below and provide valid boolean outputs of lowercase true/false or a string "NEUTRAL".
 3) Start with '{' and end with '}'.
-4) Use best-supported true/false from the PDF; do not output "NEUTRAL".
+4) Use "NA" only when the abstract truly lacks the information; otherwise give best-supported true/false boolean. 
+5) not_urban_context may be true/false/"NEUTRAL".
+6) For the field is_eligible, always return a direct boolean value true/false, NOT an object with a value key.
 
-EVIDENCE (full-text PDF excerpts; rely on these):
+EVIDENCE (use this to decide):
 {data}
 
 Response shape (fill all fields):
 {
-  "not_adult_population": { "value": true|false },
-  "no_smartphone_technology": { "value": true|false },
-  "no_artificial_intelligence": { "value": true|false },
-  "no_physical_activity": { "value": true|false },
-  "not_urban_context": { "value": true|false|"NEUTRAL" },
-  "wrong_publication_type": { "value": true|false },
-  "insufficient_context": { "value": true|false },
+  "not_adult_population": true|false,
+  "no_smartphone_technology": true|false,
+  "no_artificial_intelligence": true|false,
+  "no_physical_activity": true|false,
+  "not_urban_context": true|false|"NEUTRAL",
+  "wrong_publication_type": true|false,
+  "insufficient_context": true|false,
   "is_eligible": true|false,
   "confidence_score": 0.0-1.0,
-  "justification": "one sentence linking evidence from the PDF to the decision",
-  "exclusion_reason_category": "string or null (e.g., Wrong Population, Not Smartphone, No AI/ML, No PA, Review/Editorial)"
+  "justification": "string",
+  "exclusion_reason_category": "string or null"
 }
 
 Screen using the PDF evidence above and return only the JSON.

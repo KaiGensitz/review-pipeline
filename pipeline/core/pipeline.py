@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 import math
 import os
@@ -237,6 +238,12 @@ class PaperScreeningPipeline:
         else:
             kb_examples = load_labeled_examples(str(self.knowledge_base_path))
         self.selector = RelevanceSelector(self.embedder, kb_examples)
+
+    @staticmethod
+    def _sha256_text(value: str) -> str:
+        """human readable hint: stable fingerprint to verify whether two input texts are exactly identical."""
+
+        return hashlib.sha256((value or "").encode("utf-8")).hexdigest()
 
     def run(self) -> bool:
         """Main pipeline: prep folders (if needed), QC sample, then screen papers."""
@@ -1005,6 +1012,8 @@ class PaperScreeningPipeline:
         failure_reason: str | None = None
         failure_type: str | None = None
         failure_attempt = 0
+        llm_seed = LLM_SETTINGS.get("seed")
+        llm_top_p = float(LLM_SETTINGS.get("top_p", 1.0) or 1.0)
 
         if self.stage == "title_abstract":
             # human readable hint: pass full Title+Abstract directly to {data}; no chunking/top-k in this stage.
@@ -1189,6 +1198,10 @@ class PaperScreeningPipeline:
         if self.stage in {"title_abstract", "full_text"}:
             llm_decision = self._sanitize_screening_decision(llm_decision, paper)
 
+        context_input_hash = self._sha256_text(llm_input)
+        prompt_template_hash = self._sha256_text(prompt)
+        full_prompt_hash = self._sha256_text(prompt.replace("{data}", llm_input or ""))
+
         if failure_type is None and not api_disabled and self._decision_missing_fields(llm_decision):
             llm_decision_incomplete = True
             near_token_limit = bool(response_tokens and response_tokens >= int(0.9 * llm_max_tokens))
@@ -1236,6 +1249,11 @@ class PaperScreeningPipeline:
                 "stage": self.stage,
                 "llm_decision_incomplete": llm_decision_incomplete,
                 "language_used": language_used,
+                "llm_input_sha256": context_input_hash,
+                "prompt_template_sha256": prompt_template_hash,
+                "full_prompt_sha256": full_prompt_hash,
+                "llm_seed": llm_seed,
+                "llm_top_p": llm_top_p,
             },
             "metadata": output_metadata,
         }

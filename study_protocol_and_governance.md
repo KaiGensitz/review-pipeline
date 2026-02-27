@@ -1,7 +1,7 @@
-# Study Protocol and Governance
+# Study Protocol and Governance (document 6/6)
 
 **Read prior:** [pipeline_architecture_reference.md](pipeline_architecture_reference.md)
-**Read next:** [readme.md](readme.md)
+**Go back to:** [readme.md](readme.md)
 
 This file captures methodological and governance statements that are not directly enforced by runtime code.
 
@@ -23,6 +23,7 @@ For publication and reproducibility packages, document:
 
 - Exact model identifiers and runtime settings (including temperature and token limits).
 - Prompt versions used per stage.
+- Per-paper input fingerprint policy (`llm_input_sha256` and `full_prompt_sha256`) and how discrepant cases were traced.
 - Chunking and retrieval settings (`chunk_size`, overlap, `top_k`, threshold).
 - Validation metrics and acceptance rationale.
 - Human adjudication workflow and reviewer role definitions.
@@ -46,6 +47,7 @@ These are protocol suggestions and must be explicitly confirmed per study:
 Per study, define and archive:
 
 - Input export provenance and hash/archive process.
+- Procedure for on-demand reconstruction of paper-level model input text (`pipeline.additions.input_trace`) for audit cases.
 - Which artifacts are public vs restricted.
 - Final release license and repository destination.
 - Redaction rules for sensitive metadata before release.
@@ -57,4 +59,4 @@ Per study, define and archive:
 - For pre-run checks and expected outputs, see [pipeline_validation_checks.md](pipeline_validation_checks.md).
 
 ---
-**Read next:** [readme.md](readme.md)
+**Go back to:** [readme.md](readme.md)

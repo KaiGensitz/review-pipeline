@@ -14,8 +14,8 @@ load_dotenv(REPO_ROOT / ".env")
 
 CURRENT_STAGE = "title_abstract"  # title_abstract | full_text | data_extraction
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")  # API key loaded from .env
-LLM_MODEL = "gpt-oss-120b"  # screening model name on your endpoint
-EMBED_MODEL = "qwen3-embedding-0.6b"  # embedding model name on your endpoint
+LLM_MODEL = "gpt-oss-120b"  # screening model name on your endpoint; working best: "gpt-oss-120b", working very fast: "qwen3-coder-30b-a3b-instruct"
+EMBED_MODEL = "qwen3-embedding-0.6b"  # embedding model name on your endpoint; working for sure: "qwen3-embedding-0.6b"
 CSV_DIR = REPO_ROOT / "input"  # where you drop Covidence exports
 QC_ENABLED = True  # False = skip QC sampling and go straight to full screening
 QC_SAMPLE_RATE = 0.10  # 0.0–1.0; 0.10 = ~10% QC sample
@@ -118,6 +118,8 @@ LLM_SETTINGS = {
 	"prompt_path": str(PROMPT_FILE),  # stage-specific prompt; changes decision logic per stage
 	"max_tokens": 2048,  # response length cap; too low can truncate JSON, too high costs more
 	"temperature": 0.0,  # randomness; lower = more stable decisions, higher = more variable
+	"top_p": 1.0,  # keep at 1.0 with temperature=0.0 for stable decoding behavior
+	"seed": 42,  # reproducibility seed (set an integer number like 42 to stabilize provider-side sampling)
 }
 
 # Screening knobs (advanced; keep defaults unless you know why to change)

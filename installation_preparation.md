@@ -1,4 +1,4 @@
-# Installation and Preparation Guide
+# Installation and Preparation Guide (document 2/6)
 
 **Read prior:** [readme.md](readme.md)
 **Read next:** [review_procedure.md](review_procedure.md)
@@ -64,6 +64,10 @@ Edit [config/user_orchestrator.py](config/user_orchestrator.py):
 - `CURRENT_STAGE` (`title_abstract`, `full_text`, `data_extraction`)
 - `LLM_MODEL`
 - `EMBED_MODEL`
+- reproducibility controls in `LLM_SETTINGS`:
+	- `temperature` (recommended `0.0`)
+	- `top_p` (recommended `1.0`)
+	- `seed` (set for reproducibility audits; any integer as value, e.g. `42`)
 
 Keep defaults unless you know why to change them.
 
@@ -105,6 +109,12 @@ Recommended: at least 10 POS and 10 NEG examples per file.
 
 ~~~bash
 python main.py
+~~~
+
+Optional forensic check for one paper after a run:
+
+~~~bash
+python -m pipeline.additions.input_trace --paper-id <ID> --stage <stage> --show-full-prompt
 ~~~
 
 ## 9) Quality control (QC) confirmation workflow
