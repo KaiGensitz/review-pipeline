@@ -85,6 +85,7 @@ Prepare knowledge-base files:
 - [knowledge-base/title_abstract_pos-neg_examples.csv](knowledge-base/title_abstract_pos-neg_examples.csv)
 - [knowledge-base/full_text_pos-neg_examples.csv](knowledge-base/full_text_pos-neg_examples.csv)
 - [knowledge-base/data_extraction_pos-neg_examples.csv](knowledge-base/data_extraction_pos-neg_examples.csv)
+- [knowledge-base/eligibility_criteria.txt](knowledge-base/eligibility_criteria.txt) (external criteria injected at runtime for `title_abstract` and `full_text`)
 
 Required columns in all knowledge-base files:
 - `label` (`POS`/`NEG`)
@@ -131,6 +132,7 @@ python -m pipeline.additions.input_trace --paper-id <ID> --stage <stage> --show-
 - Correct `CURRENT_STAGE` in [config/user_orchestrator.py](config/user_orchestrator.py).
 - Correct stage CSV present in [input](input).
 - Stage knowledge-base file exists and is not empty.
+- For `title_abstract` or `full_text`: [knowledge-base/eligibility_criteria.txt](knowledge-base/eligibility_criteria.txt) exists and is not empty.
 - For PDF stages, PDFs are placed in the generated per-paper folders.
 
 ## 11) Throughput tips (handling thousands of papers)

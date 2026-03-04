@@ -58,6 +58,9 @@ flowchart LR
   - Knowledge-base: [knowledge-base/data_extraction_pos-neg_examples.csv](knowledge-base/data_extraction_pos-neg_examples.csv)
   - PDFs reused in `input/per_paper_data_extraction/`
 
+External criteria file for screening stages:
+- [knowledge-base/eligibility_criteria.txt](knowledge-base/eligibility_criteria.txt) (injected at runtime for `title_abstract` and `full_text`)
+
 Knowledge-base format for all stages: CSV with columns `label` (`POS`/`NEG`) and `text` (short evidence); recommended >=10 `POS` and >=10 `NEG`.
 
 ## Quality control (QC) and retry behavior
@@ -108,6 +111,7 @@ Data extraction additionally writes per-paper:
 
 - Missing `LLM_API_KEY` in [.env](.env)
 - Missing/empty stage KB file in [knowledge-base](knowledge-base)
+- Missing/empty [knowledge-base/eligibility_criteria.txt](knowledge-base/eligibility_criteria.txt) for `title_abstract` or `full_text`
 - Missing PDFs for `full_text` or `data_extraction`
 - `CURRENT_STAGE` set to wrong stage in [config/user_orchestrator.py](config/user_orchestrator.py)
 

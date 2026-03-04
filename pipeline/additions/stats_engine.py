@@ -398,10 +398,15 @@ def _load_ai() -> tuple[pd.DataFrame, Path]:
                         continue
                     decision_raw = payload.get("llm_decision")
                     ai_decision, ai_reason = _parse_ai_decision(decision_raw)
+                    # human readable hint: ai_reason is always empty string for included, never None or '{}'
+                    if ai_decision == 1:
+                        ai_reason = ""
+                    elif ai_reason is None or ai_reason == "None" or ai_reason == "{}":
+                        ai_reason = ""
                     latest_by_paper[paper_id] = {
                         "paper_id": paper_id,
                         "ai_decision": ai_decision,
-                        "ai_reason": ai_reason or str(payload.get("diagnostics", {})),
+                        "ai_reason": ai_reason,
                         "source_path": path,
                     }
         except Exception:
@@ -517,10 +522,14 @@ def _write_alignment(df: pd.DataFrame, suffix: str | None = None) -> None:
     out = df.copy()
     out.rename(columns={"covidence_id": "ID"}, inplace=True)
     out["decision_match"] = out["ai_decision"] == out["human_decision"]
+    # human readable hint: normalize ai_reason to empty string for included and for any None/"None"/"{}"
+    out["ai_reason"] = out["ai_reason"].replace(["None", "{}"], "")
+    out.loc[out["ai_decision"] == 1, "ai_reason"] = ""
     ai_tags = out["ai_reason"].apply(_tag_list)
     human_tags_series = out["human_tag"].apply(_tag_list) if "human_tag" in out.columns else pd.Series([[]] * len(out))
     out["human_tag"] = human_tags_series.apply(lambda tags: " | ".join(tags))
-    out["reason_match"] = [bool(a and h and (a[0] in h)) for a, h in zip(ai_tags, human_tags_series)]
+    # reason_match is True if both tag lists are empty (i.e., both ai_reason and human_tag are empty strings)
+    out["reason_match"] = [True if not a and not h else bool(a and h and (a[0] in h)) for a, h in zip(ai_tags, human_tags_series)]
 
     metadata_cols: list[str] = []
     for variants in [("Title", "title"), ("Abstract", "abstract"), ("Authors", "authors"), ("Year", "year")]:

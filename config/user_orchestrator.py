@@ -18,7 +18,7 @@ LLM_MODEL = "gpt-oss-120b"  # screening model name on your endpoint; working bes
 EMBED_MODEL = "qwen3-embedding-0.6b"  # embedding model name on your endpoint; working for sure: "qwen3-embedding-0.6b"
 CSV_DIR = REPO_ROOT / "input"  # where you drop Covidence exports
 QC_ENABLED = True  # False = skip QC sampling and go straight to full screening
-QC_SAMPLE_RATE = 0.10  # 0.0–1.0; 0.10 = ~10% QC sample
+QC_SAMPLE_RATE = 0.05  # 0.0–1.0; 0.10 = ~10% QC sample
 
 # Covidence study tags used for validation (case-insensitive)
 STUDY_TAGS_INCLUDE = [
@@ -101,6 +101,20 @@ if not PROMPT_FILE.exists():
 		f"Missing prompt script for CURRENT_STAGE='{CURRENT_STAGE}'. Expected file at: {PROMPT_FILE}."
 	)
 
+ELIGIBILITY_CRITERIA_FILES = {
+	"title_abstract": REPO_ROOT / "knowledge-base" / "eligibility_criteria.txt",
+	"full_text": REPO_ROOT / "knowledge-base" / "eligibility_criteria.txt",
+	"data_extraction": None,
+}
+
+ELIGIBILITY_CRITERIA_FILE = ELIGIBILITY_CRITERIA_FILES[CURRENT_STAGE]
+
+if ELIGIBILITY_CRITERIA_FILE is not None and not ELIGIBILITY_CRITERIA_FILE.exists():
+	raise FileNotFoundError(
+		"Missing external eligibility criteria file for CURRENT_STAGE. "
+		f"Expected file at: {ELIGIBILITY_CRITERIA_FILE}."
+	)
+
 EMBEDDING_SETTINGS = {
 	"gpustack_embedding_model": EMBED_MODEL,  # embedding model; affects relevance ranking in all stages
 	"use_api_embeddings": True,  # True = use API embeddings; False would disable embedding-based selection
@@ -148,6 +162,8 @@ CARBON_CONFIG = {
 PATH_SETTINGS = {
 	"csv_dir": str(CSV_DIR),  # input folder for stage CSVs (all stages)
 	"prompt_file": str(PROMPT_FILE),  # resolved prompt file path for CURRENT_STAGE
+	"eligibility_criteria_file": str(ELIGIBILITY_CRITERIA_FILE) if ELIGIBILITY_CRITERIA_FILE else "",  # resolved criteria file path for CURRENT_STAGE (optional)
+	"eligibility_criteria_files": {stage: (str(path) if path else "") for stage, path in ELIGIBILITY_CRITERIA_FILES.items()},  # stage->criteria file mapping (optional)
 	# Root folder for outputs; files will be placed under output/<stage>/...
 	"output_root": str(REPO_ROOT / "output"),  # base output folder for all stages
 }

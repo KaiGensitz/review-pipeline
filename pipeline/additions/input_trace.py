@@ -218,6 +218,48 @@ def _reconstruct_context(stage: str, paper_id: str, csv_root: Path) -> str:
     return _folder_stage_context(stage, paper_id, csv_root)
 
 
+def _load_prompt_template(stage: str) -> str:
+    """human readable hint: mirror runtime prompt assembly, including all-stage external criteria injection."""
+
+    template = PROMPT_FILES[stage].read_text(encoding="utf-8")
+
+    criteria_map = PATH_SETTINGS.get("eligibility_criteria_files", {})
+    criteria_path_raw = criteria_map.get(stage) or PATH_SETTINGS.get("eligibility_criteria_file")
+    criteria_path = Path(criteria_path_raw) if criteria_path_raw else None
+
+    if not criteria_path:
+        if "{eligibility_criteria}" in template:
+            raise ValueError(
+                f"Prompt for stage '{stage}' contains '{{eligibility_criteria}}' but no criteria file is configured."
+            )
+        return template
+
+    if not criteria_path.exists():
+        raise FileNotFoundError(
+            "Missing external eligibility criteria file for CURRENT_STAGE. "
+            f"Expected file at: {criteria_path}."
+        )
+
+    criteria_text = criteria_path.read_text(encoding="utf-8").strip()
+    if not criteria_text:
+        raise ValueError(f"Eligibility criteria file is empty: {criteria_path}")
+
+    if "{eligibility_criteria}" in template:
+        return template.replace("{eligibility_criteria}", criteria_text)
+
+    fallback_lines = [
+        (f"CRITERION {line}" if line.strip() else "")
+        for line in criteria_text.splitlines()
+    ]
+    fallback_text = "\n".join(fallback_lines).strip()
+
+    return (
+        template
+        + "\n\nEXTERNAL ELIGIBILITY CRITERIA (injected at runtime):\n"
+        + fallback_text
+    )
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Reconstruct and verify per-paper model input text by hash.")
     parser.add_argument("--stage", default=CURRENT_STAGE, help="Pipeline stage (title_abstract | full_text | data_extraction)")
@@ -257,7 +299,7 @@ def run_trace() -> None:
     context_text = _reconstruct_context(stage, paper_id, csv_root)
     recomputed_context_hash = _sha256_text(context_text)
 
-    prompt_template = PROMPT_FILES[stage].read_text(encoding="utf-8")
+    prompt_template = _load_prompt_template(stage)
     full_prompt = prompt_template.replace("{data}", context_text)
     recomputed_full_prompt_hash = _sha256_text(full_prompt)
 

@@ -1,4 +1,4 @@
-SCREENING PROMPT (Full-Text – Smartphone AI for Physical Activity)
+SCREENING PROMPT (Full-Text – Artificial Intelligence on Smartphone for Physical Activity)
 
 System instruction: You are an expert systematic reviewer screening full-text PDFs. Decide eligibility for a scoping review on smartphone-based AI systems that assess or promote physical activity (PA) in urban or mixed settings.
 
@@ -13,31 +13,8 @@ Decision frame (apply in this order):
 
 Formatting guardrail: Always fill boolean subfields with best-supported true/false; only not_urban_context may be true/false/"NEUTRAL".
 
-Eligibility Criteria (include vs exclude)
-
-Population
-- Include: adults (18+)
-- Exclude: children; youth
-
-Intervention / Exposure
-- Include: smartphone-based technology; online plattforms; mobile health; mHealth; digital health; artificial intelligence / AI; machine learning; deep learning; neural networks; reinforcement learning; Q-learning; contextual bandits; generative AI; large language model; natural language processing; natural language understanding; adaptive algorithms; data mining; recommender systems; chatbots; conversational agents; just-in-time adaptive interventions (JITAI); ecological momentary interventions (EMI)
-- Exclude: hard-coded algorithms; rule-based expert/recommender systems; not AI-based; not smartphone-based; desktop only; only wearables; no technology
-
-Comparator / Context
-- Include: urban area/setting; city/cities; urban
-- Exclude: rural area/setting/environment/space; village; hamlet; countryside; remote area/community; farming/agricultural region; outback; wilderness
-
-Outcome
-- Include: physical activity; exercise; light/moderate/vigorous activity; sedentary behavior/behaviour; sedentariness; sit less; move more; walking; jogging; running; cycling/biking; swimming; weight loss; weight management; healthy living; (health) behavior change; rehabilitation; (mental) health promotion
-- Exclude: mainly nutrition; mainly diet; mainly sleep; mainly alcohol; mainly smoking; purely technical human activity recognition (HAR) or gait/posture classification without a PA assessment/promotion and health enhancement focus, meaning no PA intervention intended; health interventions or weight-loss programs with NO PA component
-
-Study Characteristics
-- Include: RCT; randomized controlled trial; observation; qualitative; mixed-methods; study protocol; feasibility study; usability study
-- Exclude: review (e.g., systematic, rapid, narrative, critical, scoping, meta-analyses); comment; letter; editorial
-
-Other
-- Include: published from 2011 onwards
-- Exclude: published before 2011
+Eligibility criteria context (injected at runtime):
+{eligibility_criteria}
 
 Field definitions (schema expectations):
 - not_adult_population: boolean. true only if the study is EXPLICITLY exclusively children/youth/animals. false if adults are included, OR if age is not mentioned at all.

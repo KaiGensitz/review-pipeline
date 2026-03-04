@@ -39,7 +39,7 @@ from config.user_orchestrator import (
     EMBEDDING_SETTINGS,
     LLM_SETTINGS,
     PATH_SETTINGS,
-    PROMPT_FILE,
+    PROMPT_FILES,
     SCREENING_DEFAULTS,
     STAGE_RULES,
     require_setting,
@@ -54,7 +54,6 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 # Configuration defaults pulled from user_orchestrator.
 data_language = require_setting(EMBEDDING_SETTINGS, "data_language", "EMBEDDING_SETTINGS")
-prompt = PROMPT_FILE.read_text(encoding="utf-8").strip()
 use_api = require_setting(LLM_SETTINGS, "use_api", "LLM_SETTINGS")
 gpustack_model = require_setting(LLM_SETTINGS, "screening_model", "LLM_SETTINGS")
 gpustack_base_url = require_setting(LLM_SETTINGS, "gpustack_base_url", "LLM_SETTINGS")
@@ -75,6 +74,51 @@ TOKENS_PER_PAGE_IMAGE = 258
 CONTEXT_WINDOW = 78_000
 TITLE_TRUNC = 50  # short folder names to avoid Windows path limits
 PAPER_PDF_NAME = "paper.pdf"
+
+
+def _load_stage_prompt_template(stage: str) -> str:
+    """human readable hint: load prompt template and inject external criteria for the active stage."""
+
+    prompt_path = PROMPT_FILES.get(stage)
+    if not prompt_path:
+        raise ValueError(f"Missing prompt mapping for stage '{stage}'.")
+    template = prompt_path.read_text(encoding="utf-8").strip()
+
+    criteria_map = PATH_SETTINGS.get("eligibility_criteria_files", {})
+    criteria_path_raw = criteria_map.get(stage) or PATH_SETTINGS.get("eligibility_criteria_file")
+    criteria_path = Path(criteria_path_raw) if criteria_path_raw else None
+
+    if not criteria_path:
+        if "{eligibility_criteria}" in template:
+            raise ValueError(
+                f"Prompt for stage '{stage}' contains '{{eligibility_criteria}}' but no criteria file is configured."
+            )
+        return template
+
+    if not criteria_path.exists():
+        raise FileNotFoundError(
+            "Missing external eligibility criteria file for CURRENT_STAGE. "
+            f"Expected file at: {criteria_path}."
+        )
+
+    criteria_text = criteria_path.read_text(encoding="utf-8").strip()
+    if not criteria_text:
+        raise ValueError(f"Eligibility criteria file is empty: {criteria_path}")
+
+    if "{eligibility_criteria}" in template:
+        return template.replace("{eligibility_criteria}", criteria_text)
+
+    # human readable hint: fallback keeps criteria injection active even when a template has no explicit placeholder.
+    fallback_lines = [
+        (f"CRITERION {line}" if line.strip() else "")
+        for line in criteria_text.splitlines()
+    ]
+    fallback_text = "\n".join(fallback_lines).strip()
+    return (
+        template
+        + "\n\nEXTERNAL ELIGIBILITY CRITERIA (injected at runtime):\n"
+        + fallback_text
+    )
 
 
 @dataclass
@@ -187,6 +231,10 @@ class PaperScreeningPipeline:
         self.summary_to_console = summary_to_console
         self.language_setting = str(EMBEDDING_SETTINGS.get("data_language", "en")) or "en"
         self._detect_language = detect_language
+        self._llm_model = str(gpustack_model)
+        self._llm_base_url = str(gpustack_base_url) if gpustack_base_url is not None else None
+        self._openai_client = None
+        self._openai_client_base_url: str | None = None
         # human readable hint: tracking response times to surface p50/p95 for operators.
         self._paper_times: list[float] = []
         # human readable hint: keep paper_ids that hit an error so outputs can be flagged inline.
@@ -195,7 +243,8 @@ class PaperScreeningPipeline:
         self._row_counter = 0
         self._paper_folders: list[Path] = []
         self._qc_sample_ids: set[str] = set()
-        self._extraction_criteria = self._extract_criteria_from_prompt(prompt)
+        self.prompt_template = _load_stage_prompt_template(self.stage)
+        self._extraction_criteria = self._extract_criteria_from_prompt(self.prompt_template)
 
         # Resource usage tracker logs tokens and energy for each run.
         self.resource_tracker = ResourceUsageTracker(
@@ -214,7 +263,7 @@ class PaperScreeningPipeline:
         self._paper_count = 0
 
         # Warn if the prompt template is missing the {data} placeholder.
-        if not self.split_only and "{data}" not in prompt:
+        if not self.split_only and "{data}" not in self.prompt_template:
             print(
                 "[warning] prompt is missing {data} placeholder; LLM may not see evidence",
                 file=sys.stderr,
@@ -353,6 +402,10 @@ class PaperScreeningPipeline:
         extra_counts: dict[bool, int] = {True: 0, False: 0}
         reason_counts_main: dict[str, int] = {}
         reason_counts_split: dict[bool, dict[str, int]] = {True: {}, False: {}}
+        jsonl_flush_every = 64
+        elig_buffer: list[str] = []
+        split_buffers: dict[bool, list[str]] = {True: [], False: []}
+        chunk_buffer: list[str] = []
         index_entries: list[dict[str, object]] = []
         executor: ThreadPoolExecutor | None = None
 
@@ -463,17 +516,26 @@ class PaperScreeningPipeline:
                         "metadata": record["metadata"],
                         "stage": self.stage,
                     }
-                    elig_writer.write(json.dumps(payload) + "\n")
+                    payload_line = json.dumps(payload) + "\n"
+                    elig_buffer.append(payload_line)
+                    if len(elig_buffer) >= jsonl_flush_every:
+                        elig_writer.write("".join(elig_buffer))
+                        elig_buffer.clear()
                     elig_main_count += 1
 
-                    is_eligible_val = self._parse_is_eligible(record["llm_decision"])
-                    reason_val = self._parse_exclusion_reason(record["llm_decision"])
+                    decision_payload = self._decision_payload(record["llm_decision"])
+                    is_eligible_val = self._parse_is_eligible(decision_payload)
+                    reason_val = self._parse_exclusion_reason(decision_payload)
                     if reason_val:
                         reason_counts_main[reason_val] = reason_counts_main.get(reason_val, 0) + 1
                     if isinstance(is_eligible_val, bool):
                         extra_writer = extra_decision_writers.get(is_eligible_val)
                         if extra_writer is not None:
-                            extra_writer.write(json.dumps(payload) + "\n")
+                            split_buffer = split_buffers[is_eligible_val]
+                            split_buffer.append(payload_line)
+                            if len(split_buffer) >= jsonl_flush_every:
+                                extra_writer.write("".join(split_buffer))
+                                split_buffer.clear()
                             extra_counts[is_eligible_val] += 1
                             times_by_decision[is_eligible_val].append(paper_elapsed)
                             if reason_val:
@@ -482,7 +544,7 @@ class PaperScreeningPipeline:
                                 )
 
                 if chunk_writer:
-                    chunk_writer.write(
+                    chunk_buffer.append(
                         json.dumps(
                             {
                                 "paper_id": record["paper_id"],
@@ -493,6 +555,9 @@ class PaperScreeningPipeline:
                         )
                         + "\n"
                     )
+                    if len(chunk_buffer) >= jsonl_flush_every:
+                        chunk_writer.write("".join(chunk_buffer))
+                        chunk_buffer.clear()
                 elif self.stage in {"full_text", "data_extraction"}:
                     self._write_selected_chunks_to_input(paper, record["selected_chunks"])
 
@@ -602,9 +667,16 @@ class PaperScreeningPipeline:
                 )
 
             if elig_writer:
+                if elig_buffer:
+                    elig_writer.write("".join(elig_buffer))
+                    elig_buffer.clear()
                 _write_summary(elig_writer, elig_main_count)
                 elig_writer.close()
             for truthy, writer in extra_decision_writers.items():
+                split_buffer = split_buffers.get(truthy)
+                if split_buffer:
+                    writer.write("".join(split_buffer))
+                    split_buffer.clear()
                 _write_summary(writer, extra_counts.get(truthy, 0))
                 writer.close()
 
@@ -649,6 +721,9 @@ class PaperScreeningPipeline:
             if text_writer:
                 text_writer.close()
             if chunk_writer:
+                if chunk_buffer:
+                    chunk_writer.write("".join(chunk_buffer))
+                    chunk_buffer.clear()
                 chunk_writer.close()
             if executor is not None:
                 executor.shutdown(wait=True)
@@ -666,30 +741,16 @@ class PaperScreeningPipeline:
 
             if not self.error_log_path.exists() or self.error_log_path.stat().st_size == 0:
                 return
-            unique_ids: set[str] = set()
-            try:
-                with open(self.error_log_path, "r", encoding="utf-8") as handle:
-                    for line in handle:
-                        if not line.strip():
-                            continue
-                        try:
-                            obj = json.loads(line)
-                        except Exception:
-                            continue
-                        if isinstance(obj, dict) and not obj.get("meta"):
-                            pid = obj.get("paper_id")
-                            if pid:
-                                unique_ids.add(str(pid))
-            except Exception:
-                return
+
+            paper_error_count = len(self._error_ids)
 
             summary_payload = {
                 "meta": "error_summary",
                 "stage": self.stage,
                 "run_label": self.run_label,
-                "paper_errors": len(unique_ids),
+                "paper_errors": paper_error_count,
                 "paper_total": total_planned,
-                "error_rate_percent": ((len(unique_ids) / total_planned) * 100.0) if total_planned else 0.0,
+                "error_rate_percent": ((paper_error_count / total_planned) * 100.0) if total_planned else 0.0,
                 "timestamp": datetime.utcnow().isoformat(),
             }
             try:
@@ -1114,9 +1175,6 @@ class PaperScreeningPipeline:
                 max_attempts = 2
                 model_name = getattr(getattr(self, "llm_client", None), "model", None) or gpustack_model
                 for attempt in range(1, max_attempts + 1):
-                    print(
-                        f"[llm] attempt {attempt}/{max_attempts} for paper {paper.paper_id} using model='{model_name}'"
-                    )
                     current_decision, llm_usage = self._call_llm(llm_input)
 
                     if llm_usage:
@@ -1161,9 +1219,10 @@ class PaperScreeningPipeline:
                     if _needs_retry(llm_decision):
                         llm_decision_incomplete = True
                         if attempt < max_attempts:
-                            print(
-                                f"[warn] chat attempt {attempt}/{max_attempts} incomplete; retrying for paper {paper.paper_id}"
-                            )
+                            if not self.quiet:
+                                print(
+                                    f"[warn] chat attempt {attempt}/{max_attempts} incomplete; retrying for paper {paper.paper_id}"
+                                )
                             llm_decision = None
                             continue
                         near_token_limit = bool(response_tokens and response_tokens >= int(0.9 * llm_max_tokens))
@@ -1199,8 +1258,8 @@ class PaperScreeningPipeline:
             llm_decision = self._sanitize_screening_decision(llm_decision, paper)
 
         context_input_hash = self._sha256_text(llm_input)
-        prompt_template_hash = self._sha256_text(prompt)
-        full_prompt_hash = self._sha256_text(prompt.replace("{data}", llm_input or ""))
+        prompt_template_hash = self._sha256_text(self.prompt_template)
+        full_prompt_hash = self._sha256_text(self.prompt_template.replace("{data}", llm_input or ""))
 
         if failure_type is None and not api_disabled and self._decision_missing_fields(llm_decision):
             llm_decision_incomplete = True
@@ -1777,16 +1836,11 @@ class PaperScreeningPipeline:
 
         try:
             if use_api:
-                # Import dynamic config for model and base_url
-                from config.user_orchestrator import LLM_SETTINGS, require_setting
-                model = str(require_setting(LLM_SETTINGS, "screening_model", "LLM_SETTINGS"))
-                base_url_val = LLM_SETTINGS.get("gpustack_base_url")
-                base_url = str(base_url_val) if base_url_val is not None else None
                 responder = OpenAIResponder(
                     data=context,
-                    model=model,
-                    prompt_template=prompt,
-                    client=self._get_openai_client(base_url=base_url),
+                    model=self._llm_model,
+                    prompt_template=self.prompt_template,
+                    client=self._get_openai_client(base_url=self._llm_base_url),
                 )
                 return responder.generate_response()
         except Exception as exc:  # pylint: disable=broad-except
@@ -1798,7 +1852,12 @@ class PaperScreeningPipeline:
 
         from openai import OpenAI
 
-        return OpenAI(api_key=os.environ.get("LLM_API_KEY"), base_url=base_url)
+        if self._openai_client is not None and self._openai_client_base_url == base_url:
+            return self._openai_client
+
+        self._openai_client = OpenAI(api_key=os.environ.get("LLM_API_KEY"), base_url=base_url)
+        self._openai_client_base_url = base_url
+        return self._openai_client
 
     @staticmethod
     def _percentiles(values: list[float]) -> dict:
@@ -1816,12 +1875,7 @@ class PaperScreeningPipeline:
     def _parse_is_eligible(self, decision: object) -> bool | None:
         """human readable hint: stage-aware extraction of is_eligible from the LLM decision payload."""
 
-        payload = decision
-        if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except Exception:
-                return None
+        payload = self._decision_payload(decision)
 
         if isinstance(payload, dict):
             val = payload.get("is_eligible")
@@ -1839,15 +1893,21 @@ class PaperScreeningPipeline:
         return None
 
     @staticmethod
+    def _decision_payload(decision: object) -> object:
+        """human readable hint: parse JSON text decisions once so downstream checks can reuse the payload."""
+
+        if isinstance(decision, str):
+            try:
+                return json.loads(decision)
+            except Exception:
+                return decision
+        return decision
+
+    @staticmethod
     def _parse_exclusion_reason(decision: object) -> str | None:
         """human readable hint: derive exclusion_reason_category if present in LLM output."""
 
-        payload = decision
-        if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except Exception:
-                return None
+        payload = PaperScreeningPipeline._decision_payload(decision)
         if isinstance(payload, dict):
             for key in ("exclusion_reason_category", "exclusion_reason", "reason"):
                 val = payload.get(key)
@@ -1861,12 +1921,9 @@ class PaperScreeningPipeline:
         if decision is None:
             return True
 
-        payload = decision
-        if isinstance(decision, str):
-            try:
-                payload = json.loads(decision)
-            except Exception:
-                return True
+        payload = self._decision_payload(decision)
+        if isinstance(payload, str):
+            return True
 
         if not isinstance(payload, dict):
             return True
@@ -2121,12 +2178,30 @@ class PaperScreeningPipeline:
 
     @classmethod
     def _extract_criteria_from_prompt(cls, prompt_text: str) -> list[str]:
-        """Infer extraction fields from bullet lines in the prompt."""
+        """Infer extraction fields from the "Fields to extract" section only."""
 
         criteria: list[str] = []
         seen = set()
+        in_fields_section = False
+
         for line in prompt_text.splitlines():
             stripped = line.strip()
+
+            lower = stripped.lower()
+            if "fields to extract" in lower:
+                in_fields_section = True
+                continue
+            if in_fields_section and (
+                lower.startswith("formatting rules")
+                or lower.startswith("response shape")
+                or lower.startswith("evidence block")
+                or lower.startswith("external eligibility criteria")
+            ):
+                break
+
+            if not in_fields_section:
+                continue
+
             if stripped.startswith(("- ", "* ")):
                 item = stripped[2:].strip()
                 key = cls._normalize_criterion(item)
