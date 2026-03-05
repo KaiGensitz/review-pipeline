@@ -101,20 +101,6 @@ if not PROMPT_FILE.exists():
 		f"Missing prompt script for CURRENT_STAGE='{CURRENT_STAGE}'. Expected file at: {PROMPT_FILE}."
 	)
 
-ELIGIBILITY_CRITERIA_FILES = {
-	"title_abstract": REPO_ROOT / "knowledge-base" / "eligibility_criteria.txt",
-	"full_text": REPO_ROOT / "knowledge-base" / "eligibility_criteria.txt",
-	"data_extraction": None,
-}
-
-ELIGIBILITY_CRITERIA_FILE = ELIGIBILITY_CRITERIA_FILES[CURRENT_STAGE]
-
-if ELIGIBILITY_CRITERIA_FILE is not None and not ELIGIBILITY_CRITERIA_FILE.exists():
-	raise FileNotFoundError(
-		"Missing external eligibility criteria file for CURRENT_STAGE. "
-		f"Expected file at: {ELIGIBILITY_CRITERIA_FILE}."
-	)
-
 EMBEDDING_SETTINGS = {
 	"gpustack_embedding_model": EMBED_MODEL,  # embedding model; affects relevance ranking in all stages
 	"use_api_embeddings": True,  # True = use API embeddings; False would disable embedding-based selection
@@ -134,6 +120,14 @@ LLM_SETTINGS = {
 	"temperature": 0.0,  # randomness; lower = more stable decisions, higher = more variable
 	"top_p": 1.0,  # keep at 1.0 with temperature=0.0 for stable decoding behavior
 	"seed": 42,  # reproducibility seed (set an integer number like 42 to stabilize provider-side sampling)
+	"async_max_concurrency": 12,  # max concurrent async LLM requests for title_abstract screening
+	"async_max_retries": 3,  # transient API retries (e.g., rate limit/timeouts)
+	"async_backoff_base_seconds": 0.5,  # initial retry delay for async backoff
+	"async_backoff_max_seconds": 8.0,  # maximum retry delay cap
+	"async_jitter_seconds": 0.2,  # random jitter added to backoff to reduce thundering herd
+	"async_heartbeat_seconds": 30,  # operator heartbeat interval in seconds for async progress logs
+	"async_enable_full_text": True,  # True = use async-concurrent LLM calls in full_text stage
+	"async_enable_data_extraction": True,  # True = use async-concurrent LLM calls in data_extraction stage
 }
 
 # Screening knobs (advanced; keep defaults unless you know why to change)
@@ -159,11 +153,53 @@ CARBON_CONFIG = {
 	"country_iso_code": "CHE",  # used only when offline; impacts emissions factors
 }
 
+# UBELIX operational estimate (rough, optional)
+# - Uses runtime + selected resources + TDP + PUE to estimate operational electricity.
+# - This approximates the Green Algorithms calculator style estimate.
+# - It does NOT include embodied emissions (hardware manufacturing/transport).
+UBELIX_ESTIMATION_CONFIG = {
+	"enabled": True,  # set True to include UBELIX rough estimate in resource log TOTAL line
+	"pue": 1.58,  # data-center overhead factor (Power Usage Effectiveness)
+	"grid_carbon_intensity_g_per_kwh": 120.0,  # adjust to your electricity mix assumption
+	"core_usage_factor": 1.0,  # 0.0-1.0 average hardware utilization during runtime (Green Algorithms usage factor)
+	"memory_gb": 0.0,  # RAM attributable to the run in GB (set with scheduler/admin info)
+	"memory_power_watts_per_gb": 0.0,  # memory power draw per GB (set to official value when available)
+	"multiplicative_factor": 1.0,  # multiplier for repeated identical runs (e.g., retries/hyperparameter runs)
+	"resource_tdp_watts": {
+		"anode_core": 8.5,
+		"bnode_core": 3.5,
+		"cnode_core": 3.75,
+		"rtx4090": 450.0,
+		"h100": 350.0,
+	},
+	"resource_usage": {
+		"anode_core": 0,  # number of anode CPU cores used by your job
+		"bnode_core": 0,  # number of bnode CPU cores used by your job
+		"cnode_core": 0,  # number of cnode CPU cores used by your job
+		"rtx4090": 0,  # number of RTX4090 GPUs used by your job
+		"h100": 1,  # number of H100 GPUs used by your job
+	},
+	"assumptions": {
+		"pue_source": "",  # e.g., UBELIX ops email/ticket reference
+		"pue_source_date": "",  # YYYY-MM-DD
+		"grid_intensity_source": "",  # e.g., ElectricityMap/official Swiss source URL or doc
+		"grid_intensity_source_date": "",  # YYYY-MM-DD
+		"resource_usage_source": "",  # e.g., sacct output, GPUSstack dashboard, admin confirmation
+		"resource_usage_source_date": "",  # YYYY-MM-DD
+		"core_usage_factor_source": "",  # where utilization estimate comes from
+		"core_usage_factor_source_date": "",  # YYYY-MM-DD
+		"memory_source": "",  # where memory_gb / memory power assumption comes from
+		"memory_source_date": "",  # YYYY-MM-DD
+		"multiplicative_factor_source": "",  # where repeated-run multiplier comes from
+		"multiplicative_factor_source_date": "",  # YYYY-MM-DD
+		"notes": "",  # free-text assumptions/limitations for audit trail
+	},
+}
+
 PATH_SETTINGS = {
 	"csv_dir": str(CSV_DIR),  # input folder for stage CSVs (all stages)
 	"prompt_file": str(PROMPT_FILE),  # resolved prompt file path for CURRENT_STAGE
-	"eligibility_criteria_file": str(ELIGIBILITY_CRITERIA_FILE) if ELIGIBILITY_CRITERIA_FILE else "",  # resolved criteria file path for CURRENT_STAGE (optional)
-	"eligibility_criteria_files": {stage: (str(path) if path else "") for stage, path in ELIGIBILITY_CRITERIA_FILES.items()},  # stage->criteria file mapping (optional)
+	"eligibility_criteria_file": str(REPO_ROOT / "knowledge-base" / "eligibility_criteria.txt"),  # optional shared criteria text used only when prompts include {eligibility_criteria}
 	# Root folder for outputs; files will be placed under output/<stage>/...
 	"output_root": str(REPO_ROOT / "output"),  # base output folder for all stages
 }

@@ -2,7 +2,7 @@
 
 import typing
 
-from config.embedding_utils import split_text_into_sentences
+from pipeline.integrations.embedding_utils import split_text_into_sentences
 from config.user_orchestrator import EMBEDDING_SETTINGS, require_setting
 
 chunk_size = int(str(require_setting(EMBEDDING_SETTINGS, "chunk_size", "EMBEDDING_SETTINGS")))

@@ -20,6 +20,8 @@ from typing import Optional
 
 from config.user_orchestrator import CURRENT_STAGE, PATH_SETTINGS, PROMPT_FILES
 
+ELIGIBILITY_CRITERIA_PLACEHOLDER = "{eligibility_criteria}"
+
 
 def _sha256_text(value: str) -> str:
     """human readable hint: compute a stable fingerprint of any text."""
@@ -219,45 +221,22 @@ def _reconstruct_context(stage: str, paper_id: str, csv_root: Path) -> str:
 
 
 def _load_prompt_template(stage: str) -> str:
-    """human readable hint: mirror runtime prompt assembly, including all-stage external criteria injection."""
+    """human readable hint: mirror runtime prompt assembly with optional eligibility criteria injection."""
 
-    template = PROMPT_FILES[stage].read_text(encoding="utf-8")
+    prompt_template = PROMPT_FILES[stage].read_text(encoding="utf-8")
+    if ELIGIBILITY_CRITERIA_PLACEHOLDER not in prompt_template:
+        return prompt_template
 
-    criteria_map = PATH_SETTINGS.get("eligibility_criteria_files", {})
-    criteria_path_raw = criteria_map.get(stage) or PATH_SETTINGS.get("eligibility_criteria_file")
-    criteria_path = Path(criteria_path_raw) if criteria_path_raw else None
+    configured_path = PATH_SETTINGS.get("eligibility_criteria_file")
+    if not configured_path:
+        return prompt_template.replace(ELIGIBILITY_CRITERIA_PLACEHOLDER, "")
 
-    if not criteria_path:
-        if "{eligibility_criteria}" in template:
-            raise ValueError(
-                f"Prompt for stage '{stage}' contains '{{eligibility_criteria}}' but no criteria file is configured."
-            )
-        return template
-
+    criteria_path = Path(configured_path)
     if not criteria_path.exists():
-        raise FileNotFoundError(
-            "Missing external eligibility criteria file for CURRENT_STAGE. "
-            f"Expected file at: {criteria_path}."
-        )
+        return prompt_template.replace(ELIGIBILITY_CRITERIA_PLACEHOLDER, "")
 
     criteria_text = criteria_path.read_text(encoding="utf-8").strip()
-    if not criteria_text:
-        raise ValueError(f"Eligibility criteria file is empty: {criteria_path}")
-
-    if "{eligibility_criteria}" in template:
-        return template.replace("{eligibility_criteria}", criteria_text)
-
-    fallback_lines = [
-        (f"CRITERION {line}" if line.strip() else "")
-        for line in criteria_text.splitlines()
-    ]
-    fallback_text = "\n".join(fallback_lines).strip()
-
-    return (
-        template
-        + "\n\nEXTERNAL ELIGIBILITY CRITERIA (injected at runtime):\n"
-        + fallback_text
-    )
+    return prompt_template.replace(ELIGIBILITY_CRITERIA_PLACEHOLDER, criteria_text)
 
 
 def _parse_args() -> argparse.Namespace:

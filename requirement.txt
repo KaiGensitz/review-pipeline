@@ -11,3 +11,4 @@ scipy # Scientific helpers (stats/processing)
 statsmodels # Exact binomial confidence intervals and GEE/GLM utilities
 codecarbon # Emissions tracking (CodeCarbon)
 tqdm # Progress bars for screening runs
+pydantic>=2.8 # Strict response schema validation for LLM screening outputs

@@ -8,21 +8,25 @@ structure and logging.
 
 from __future__ import annotations
 
+import asyncio
 import csv
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import math
 import os
+from queue import Queue
 import random
 import re
 import shutil
 import sys
+from threading import Thread
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Generator, Iterable, Tuple, TextIO
+from typing import Any, Literal
 from statistics import median
 
 try:
@@ -31,9 +35,10 @@ except ImportError:  # pragma: no cover - optional dependency
     tqdm = None
 
 from dotenv import load_dotenv
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from config.embedding_utils import read_pdf_file, read_pdf_pages, detect_language
-from config.llm_client import OpenAIResponder
+from pipeline.integrations.embedding_utils import read_pdf_file, read_pdf_pages, detect_language
+from pipeline.integrations.llm_client import OpenAIResponder
 from config.user_orchestrator import (
     CURRENT_STAGE,
     EMBEDDING_SETTINGS,
@@ -74,51 +79,48 @@ TOKENS_PER_PAGE_IMAGE = 258
 CONTEXT_WINDOW = 78_000
 TITLE_TRUNC = 50  # short folder names to avoid Windows path limits
 PAPER_PDF_NAME = "paper.pdf"
+ELIGIBILITY_CRITERIA_PLACEHOLDER = "{eligibility_criteria}"
+
+
+def _load_optional_eligibility_criteria_text() -> str:
+    """human readable hint: load shared eligibility criteria text when configured and available."""
+
+    configured_path = PATH_SETTINGS.get("eligibility_criteria_file")
+    if not configured_path:
+        return ""
+
+    criteria_path = Path(configured_path)
+    if not criteria_path.exists():
+        print(
+            f"[warning] eligibility criteria file not found at: {criteria_path}. "
+            "Continuing without criteria injection.",
+            file=sys.stderr,
+        )
+        return ""
+
+    return criteria_path.read_text(encoding="utf-8").strip()
 
 
 def _load_stage_prompt_template(stage: str) -> str:
-    """human readable hint: load prompt template and inject external criteria for the active stage."""
+    """human readable hint: load stage prompt and inject shared criteria only when placeholder is present."""
 
     prompt_path = PROMPT_FILES.get(stage)
     if not prompt_path:
         raise ValueError(f"Missing prompt mapping for stage '{stage}'.")
-    template = prompt_path.read_text(encoding="utf-8").strip()
 
-    criteria_map = PATH_SETTINGS.get("eligibility_criteria_files", {})
-    criteria_path_raw = criteria_map.get(stage) or PATH_SETTINGS.get("eligibility_criteria_file")
-    criteria_path = Path(criteria_path_raw) if criteria_path_raw else None
+    prompt_template = prompt_path.read_text(encoding="utf-8")
+    if ELIGIBILITY_CRITERIA_PLACEHOLDER not in prompt_template:
+        return prompt_template.strip()
 
-    if not criteria_path:
-        if "{eligibility_criteria}" in template:
-            raise ValueError(
-                f"Prompt for stage '{stage}' contains '{{eligibility_criteria}}' but no criteria file is configured."
-            )
-        return template
-
-    if not criteria_path.exists():
-        raise FileNotFoundError(
-            "Missing external eligibility criteria file for CURRENT_STAGE. "
-            f"Expected file at: {criteria_path}."
+    criteria_text = _load_optional_eligibility_criteria_text()
+    if not criteria_text:
+        print(
+            "[warning] prompt contains {eligibility_criteria} but no criteria text was loaded; "
+            "continuing with an empty replacement.",
+            file=sys.stderr,
         )
 
-    criteria_text = criteria_path.read_text(encoding="utf-8").strip()
-    if not criteria_text:
-        raise ValueError(f"Eligibility criteria file is empty: {criteria_path}")
-
-    if "{eligibility_criteria}" in template:
-        return template.replace("{eligibility_criteria}", criteria_text)
-
-    # human readable hint: fallback keeps criteria injection active even when a template has no explicit placeholder.
-    fallback_lines = [
-        (f"CRITERION {line}" if line.strip() else "")
-        for line in criteria_text.splitlines()
-    ]
-    fallback_text = "\n".join(fallback_lines).strip()
-    return (
-        template
-        + "\n\nEXTERNAL ELIGIBILITY CRITERIA (injected at runtime):\n"
-        + fallback_text
-    )
+    return prompt_template.replace(ELIGIBILITY_CRITERIA_PLACEHOLDER, criteria_text).strip()
 
 
 @dataclass
@@ -127,6 +129,44 @@ class PaperRecord:
     title: str
     abstract: str
     metadata: dict
+
+
+class _ScreeningDecisionBaseModel(BaseModel):
+    """human readable hint: shared schema for screening decisions returned by the LLM."""
+
+    model_config = ConfigDict(extra="allow")
+
+    step_by_step_deliberation: str
+    not_adult_population: bool
+    no_smartphone_technology: bool
+    no_artificial_intelligence: bool
+    no_physical_activity: bool
+    not_urban_context: bool | Literal["NEUTRAL"]
+    wrong_publication_type: bool
+    insufficient_context: bool
+    confidence_score: float = Field(ge=0.0, le=1.0)
+    justification: str = Field(min_length=1)
+    exclusion_reason_category: str | None
+
+    @model_validator(mode="after")
+    def _check_reason_for_exclusion(self):
+        """human readable hint: exclusion decisions must carry an explicit exclusion reason."""
+
+        if getattr(self, "is_eligible", None) is False and not self.exclusion_reason_category:
+            raise ValueError("exclusion_reason_category is required when is_eligible is false")
+        return self
+
+
+class TitleAbstractScreeningDecisionModel(_ScreeningDecisionBaseModel):
+    """human readable hint: title_abstract allows a NEUTRAL eligibility outcome."""
+
+    is_eligible: bool | Literal["NEUTRAL"]
+
+
+class FullTextScreeningDecisionModel(_ScreeningDecisionBaseModel):
+    """human readable hint: full_text requires a strict boolean eligibility outcome."""
+
+    is_eligible: bool
 
 
 CANONICAL_FIELDS = [
@@ -235,6 +275,17 @@ class PaperScreeningPipeline:
         self._llm_base_url = str(gpustack_base_url) if gpustack_base_url is not None else None
         self._openai_client = None
         self._openai_client_base_url: str | None = None
+        self._async_openai_client = None
+        self._async_openai_client_base_url: str | None = None
+        self._async_max_concurrency = max(1, int(LLM_SETTINGS.get("async_max_concurrency", 12) or 12))
+        self._async_max_retries = max(0, int(LLM_SETTINGS.get("async_max_retries", 3) or 3))
+        self._async_backoff_base = float(LLM_SETTINGS.get("async_backoff_base_seconds", 0.5) or 0.5)
+        self._async_backoff_max = float(LLM_SETTINGS.get("async_backoff_max_seconds", 8.0) or 8.0)
+        self._async_jitter = float(LLM_SETTINGS.get("async_jitter_seconds", 0.2) or 0.2)
+        self._async_heartbeat_seconds = max(5.0, float(LLM_SETTINGS.get("async_heartbeat_seconds", 30) or 30))
+        self._async_enable_full_text = bool(LLM_SETTINGS.get("async_enable_full_text", True))
+        self._async_enable_data_extraction = bool(LLM_SETTINGS.get("async_enable_data_extraction", True))
+        self._validation_max_retries = 3
         # human readable hint: tracking response times to surface p50/p95 for operators.
         self._paper_times: list[float] = []
         # human readable hint: keep paper_ids that hit an error so outputs can be flagged inline.
@@ -244,6 +295,7 @@ class PaperScreeningPipeline:
         self._paper_folders: list[Path] = []
         self._qc_sample_ids: set[str] = set()
         self.prompt_template = _load_stage_prompt_template(self.stage)
+        self._prompt_required_json_fields = self._extract_required_json_fields_from_prompt(self.prompt_template)
         self._extraction_criteria = self._extract_criteria_from_prompt(self.prompt_template)
 
         # Resource usage tracker logs tokens and energy for each run.
@@ -270,8 +322,7 @@ class PaperScreeningPipeline:
             )
 
         # Embedding backend for chunk selection; loads examples if not provided.
-        resolved_batch_size = batch_size if batch_size is not None else SCREENING_DEFAULTS.get("batch_size", 32)
-        self.embedder = embedder or EmbeddingBackend(batch_size=resolved_batch_size)
+        self.embedder = embedder or EmbeddingBackend()
         def to_labeled_examples(examples_list):
             # Accepts list[dict] or list[LabeledExample], returns list[LabeledExample]
             labeled = []
@@ -469,10 +520,12 @@ class PaperScreeningPipeline:
             record_obj, token_stats_obj, extraction_obj = self._process_paper(paper_item)
             return paper_item, record_obj, token_stats_obj, extraction_obj, (time.time() - paper_start_ts)
 
-        if self.stage == "title_abstract" and self.title_abstract_workers > 1:
-            # human readable hint: title_abstract can be parallelized safely because it bypasses chunk-embedding selection.
-            executor = ThreadPoolExecutor(max_workers=self.title_abstract_workers)
-            processed_stream = executor.map(_process_with_timing, planned_papers)
+        if self.stage == "title_abstract":
+            # human readable hint: title_abstract is processed via asyncio to maximize API concurrency safely.
+            processed_stream = self._process_title_abstract_batch(planned_papers)
+        elif self._use_async_stage_processing():
+            # human readable hint: full_text/data_extraction can also use async LLM calls with bounded concurrency.
+            processed_stream = self._process_non_title_async_batch(planned_papers)
         else:
             processed_stream = (_process_with_timing(paper) for paper in planned_papers)
 
@@ -1027,6 +1080,583 @@ class PaperScreeningPipeline:
                     rows.append(dict(normalized))
         return rows
 
+    def _process_title_abstract_batch(
+        self,
+        planned_papers: list[PaperRecord],
+    ) -> Generator[tuple[PaperRecord, dict, dict, dict | None, float], None, None]:
+        """human readable hint: stream title_abstract completions paper-by-paper as async calls finish."""
+
+        yield from self._stream_async_batch(
+            planned_papers,
+            self._process_title_abstract_paper_async,
+            stage_label="title_abstract",
+        )
+
+    def _use_async_stage_processing(self) -> bool:
+        """human readable hint: allow stage-specific opt-in async processing beyond title_abstract."""
+
+        if self.stage == "full_text":
+            return bool(self._async_enable_full_text and bool(use_api))
+        if self.stage == "data_extraction":
+            return bool(self._async_enable_data_extraction and bool(use_api))
+        return False
+
+    def _process_non_title_async_batch(
+        self,
+        planned_papers: list[PaperRecord],
+    ) -> Generator[tuple[PaperRecord, dict, dict, dict | None, float], None, None]:
+        """human readable hint: stream full_text/data_extraction completions paper-by-paper."""
+
+        yield from self._stream_async_batch(
+            planned_papers,
+            self._process_paper_async,
+            stage_label=str(self.stage),
+        )
+
+    def _stream_async_batch(
+        self,
+        planned_papers: list[PaperRecord],
+        processor,
+        *,
+        stage_label: str,
+    ) -> Generator[tuple[PaperRecord, dict, dict, dict | None, float], None, None]:
+        """human readable hint: bridge async processing to sync caller while emitting per-paper completion updates."""
+
+        queue: Queue = Queue()
+
+        async def _runner() -> None:
+            semaphore = asyncio.Semaphore(max(1, self._async_max_concurrency))
+            total = len(planned_papers)
+            completed = 0
+            warn_count = 0
+            last_completion_ts = time.time()
+
+            async def _heartbeat() -> None:
+                """human readable hint: emit periodic progress so operators can see async work is alive."""
+
+                while True:
+                    await asyncio.sleep(self._async_heartbeat_seconds)
+                    if self.quiet:
+                        continue
+                    remaining = max(total - completed, 0)
+                    seconds_since_last = int(max(0.0, time.time() - last_completion_ts))
+                    print(
+                        f"[async][heartbeat] stage={stage_label} done={completed}/{total} warn={warn_count} remaining={remaining} no_completion_for={seconds_since_last}s",
+                        flush=True,
+                    )
+
+            async def _run_one(paper_item: PaperRecord) -> tuple[PaperRecord, dict, dict, dict | None, float]:
+                paper_start_ts = time.time()
+                async with semaphore:
+                    record_obj, token_stats_obj, extraction_obj = await processor(paper_item)
+                return paper_item, record_obj, token_stats_obj, extraction_obj, (time.time() - paper_start_ts)
+
+            tasks = [asyncio.create_task(_run_one(paper)) for paper in planned_papers]
+            heartbeat_task = asyncio.create_task(_heartbeat())
+
+            try:
+                for finished in asyncio.as_completed(tasks):
+                    result = await finished
+                    completed += 1
+                    last_completion_ts = time.time()
+                    paper_item, record_obj, _, _, _ = result
+                    decision_obj = record_obj.get("llm_decision")
+                    diagnostics_obj = record_obj.get("diagnostics", {}) or {}
+                    decision_incomplete = bool(diagnostics_obj.get("llm_decision_incomplete"))
+                    llm_error = isinstance(decision_obj, str) and decision_obj.startswith("LLM error")
+                    if decision_incomplete or llm_error:
+                        warn_count += 1
+                    if not self.quiet:
+                        status = "WARN" if (decision_incomplete or llm_error) else "OK"
+                        print(
+                            f"[async] stage={stage_label} completed {completed}/{total} paper={paper_item.paper_id} status={status}",
+                            flush=True,
+                        )
+                        if decision_incomplete or llm_error:
+                            print(
+                                f"[async][warn] paper={paper_item.paper_id} returned incomplete/invalid LLM output; check {self.error_log_path}",
+                                flush=True,
+                            )
+                    queue.put(("result", result))
+            finally:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+                queue.put(("done", None))
+
+        def _thread_target() -> None:
+            try:
+                asyncio.run(_runner())
+            except Exception as exc:  # pylint: disable=broad-except
+                queue.put(("error", exc))
+                queue.put(("done", None))
+
+        worker = Thread(target=_thread_target, daemon=True)
+        worker.start()
+
+        while True:
+            kind, payload = queue.get()
+            if kind == "result":
+                yield payload
+                continue
+            if kind == "error":
+                raise RuntimeError(f"Async batch processing failed for stage '{stage_label}': {payload}")
+            if kind == "done":
+                break
+
+    async def _process_title_abstract_paper_async(self, paper: PaperRecord) -> tuple[dict, dict, dict | None]:
+        """human readable hint: async title_abstract screening with strict schema validation and retry policy."""
+
+        llm_input = self._title_abstract_full_input(paper)
+        selected = [
+            {
+                "paper_id": paper.paper_id,
+                "chunk_id": f"{paper.paper_id}::full_input::0000",
+                "text": llm_input,
+                "kind": "full_input",
+                "page_start": None,
+                "page_end": None,
+                "line_start": None,
+                "line_end": None,
+            }
+        ]
+
+        prompt_tokens = len((llm_input or "").split())
+        response_tokens = 0
+        prompt_tokens_source = "estimate"
+        response_tokens_source = "estimate"
+        llm_seed = LLM_SETTINGS.get("seed")
+        llm_top_p = float(LLM_SETTINGS.get("top_p", 1.0) or 1.0)
+        llm_decision_incomplete = False
+        failure_type: str | None = None
+        failure_reason: str | None = None
+
+        if not use_api:
+            llm_decision = "LLM disabled: use_api=False; no API call made."
+        else:
+            llm_decision = None
+            max_attempts = self._validation_max_retries
+            for attempt in range(1, max_attempts + 1):
+                current_decision, llm_usage = await self._call_llm_async(llm_input)
+
+                if llm_usage:
+                    prompt_tokens = int(
+                        llm_usage.get("prompt_tokens")
+                        or llm_usage.get("input_tokens")
+                        or llm_usage.get("total_tokens")
+                        or prompt_tokens
+                    )
+                    response_tokens = int(
+                        llm_usage.get("completion_tokens")
+                        or llm_usage.get("output_tokens")
+                        or llm_usage.get("response_tokens")
+                        or 0
+                    )
+                    prompt_tokens_source = "api"
+                    response_tokens_source = "api"
+
+                if not current_decision:
+                    failure_type = "llm_no_response"
+                    failure_reason = "LLM returned no decision after retries."
+                    llm_decision_incomplete = True
+                    continue
+
+                if isinstance(current_decision, str) and current_decision.startswith("LLM error"):
+                    failure_type = "llm_error"
+                    failure_reason = current_decision
+                    llm_decision_incomplete = True
+                    continue
+
+                sanitized = self._sanitize_screening_decision(current_decision, paper)
+
+                try:
+                    validated_payload = self._validate_screening_decision(sanitized or "")
+                    llm_decision = json.dumps(validated_payload, ensure_ascii=False)
+                    llm_decision_incomplete = False
+                    failure_type = None
+                    failure_reason = None
+                    break
+                except ValidationError as exc:
+                    llm_decision_incomplete = True
+                    failure_type = "llm_validation_error"
+                    failure_reason = f"Schema validation failed: {exc}"
+                    if attempt == max_attempts:
+                        llm_decision = sanitized
+
+        if llm_decision and response_tokens == 0:
+            response_tokens = len((llm_decision or "").split())
+
+        if failure_type:
+            self._log_error(
+                paper.paper_id,
+                failure_reason or "LLM decision failed validation.",
+                error_type=failure_type,
+                prompt_tokens=prompt_tokens,
+                response_tokens=response_tokens,
+                embedding_tokens=0,
+                pdf_text_tokens=0,
+                pdf_visual_tokens=0,
+                total_estimated_tokens=prompt_tokens,
+            )
+
+        context_input_hash = self._sha256_text(llm_input)
+        prompt_template_hash = self._sha256_text(self.prompt_template)
+        full_prompt_hash = self._sha256_text(self.prompt_template.replace("{data}", llm_input or ""))
+
+        output_metadata = self._metadata_without_authors(paper.metadata)
+        record = {
+            "paper_id": paper.paper_id,
+            "selected_chunks": selected,
+            "llm_decision": llm_decision,
+            "diagnostics": {
+                "total_chunks": 1,
+                "selected_count": 1,
+                "top_k": self.top_k,
+                "score_threshold": self.score_threshold,
+                "preselected_chunks": True,
+                "stage": self.stage,
+                "llm_decision_incomplete": llm_decision_incomplete,
+                "language_used": str(EMBEDDING_SETTINGS.get("data_language", "en")),
+                "llm_input_sha256": context_input_hash,
+                "prompt_template_sha256": prompt_template_hash,
+                "full_prompt_sha256": full_prompt_hash,
+                "llm_seed": llm_seed,
+                "llm_top_p": llm_top_p,
+            },
+            "metadata": output_metadata,
+        }
+
+        token_stats = {
+            "prompt_tokens": prompt_tokens,
+            "prompt_tokens_source": prompt_tokens_source,
+            "response_tokens": response_tokens,
+            "response_tokens_source": response_tokens_source,
+            "embedding_tokens": 0,
+            "embedding_tokens_source": "estimate",
+            "pdf_text_tokens": 0,
+            "pdf_visual_tokens": 0,
+        }
+
+        return record, token_stats, None
+
+    async def _process_paper_async(self, paper: PaperRecord) -> tuple[dict, dict, dict | None]:
+        """Select evidence, call the LLM asynchronously, and build outputs for one paper."""
+
+        llm_decision = None
+        selected: list[dict] = []
+        llm_input = ""
+        extraction_payload = None
+        language_used = str(EMBEDDING_SETTINGS.get("data_language", "en"))
+
+        def _needs_retry(decision: str) -> bool:
+            if not isinstance(decision, str):
+                return False
+            if decision.startswith("LLM error"):
+                return False
+            text = decision.strip()
+            if not text:
+                return False
+            if not text.endswith("}"):
+                return True
+            if text.startswith("{"):
+                try:
+                    json.loads(text)
+                except Exception:
+                    return True
+            return False
+
+        preselected = False
+        api_disabled = not use_api
+        chunks: list[dict] = []
+        pdf_text_tokens = 0
+        pdf_visual_tokens = 0
+        estimated_input_tokens = 0
+        prompt_tokens = 0
+        response_tokens = 0
+        embed_tokens = 0
+        embed_usage = None
+        prompt_tokens_source = "estimate"
+        response_tokens_source = "estimate"
+        embed_tokens_source = "estimate"
+        llm_decision_incomplete = False
+        attempt = 0
+        failure_reason: str | None = None
+        failure_type: str | None = None
+        failure_attempt = 0
+        llm_seed = LLM_SETTINGS.get("seed")
+        llm_top_p = float(LLM_SETTINGS.get("top_p", 1.0) or 1.0)
+
+        if self.stage == "data_extraction":
+            preselected_chunks = self._load_selected_chunks_from_input(paper)
+            if preselected_chunks:
+                selected = preselected_chunks
+                preselected = True
+                llm_input = self._format_chunks_for_prompt(paper, selected)
+                prompt_tokens = len((llm_input or "").split())
+                estimated_input_tokens = prompt_tokens
+
+        if not preselected:
+            chunks, pdf_text_tokens, pdf_visual_tokens, language_used = await asyncio.to_thread(
+                self._prepare_chunks,
+                paper,
+            )
+            if self.stage in {"full_text", "data_extraction"} and not chunks:
+                llm_decision = "LLM skipped: PDF missing or unreadable; see error log."
+                estimated_input_tokens = pdf_text_tokens + pdf_visual_tokens
+                selected = []
+                self._log_error(
+                    paper.paper_id,
+                    f"LLM skipped: no chunks produced (PDF missing or unreadable). folder={paper.metadata.get('folder_path')}",
+                    error_type="no_chunks",
+                    pdf_text_tokens=pdf_text_tokens,
+                    pdf_visual_tokens=pdf_visual_tokens,
+                    total_estimated_tokens=estimated_input_tokens,
+                )
+            elif not chunks:
+                llm_decision = "LLM skipped: no evidence chunks available."
+                self._log_error(
+                    paper.paper_id,
+                    "LLM skipped: no evidence chunks available after preprocessing.",
+                    error_type="no_chunks",
+                    pdf_text_tokens=pdf_text_tokens,
+                    pdf_visual_tokens=pdf_visual_tokens,
+                    total_estimated_tokens=estimated_input_tokens,
+                )
+                selected = []
+            else:
+                selected, _, embed_usage = await asyncio.to_thread(
+                    self.selector.select,
+                    chunks,
+                    self.top_k,
+                    self.score_threshold,
+                )
+
+            if embed_usage:
+                embed_tokens = int(
+                    embed_usage.get("prompt_tokens")
+                    or embed_usage.get("input_tokens")
+                    or embed_usage.get("total_tokens")
+                    or 0
+                )
+                embed_tokens_source = "api"
+            else:
+                embed_tokens = int(sum(len((c.get("text") or "").split()) for c in chunks) * TOKENS_PER_WORD)
+
+            llm_input = self._format_chunks_for_prompt(paper, selected)
+            prompt_tokens = len((llm_input or "").split())
+            estimated_input_tokens = prompt_tokens + pdf_text_tokens + pdf_visual_tokens
+
+        if llm_decision is None and not selected:
+            llm_decision = "LLM skipped: no evidence available after selection."
+            self._log_error(
+                paper.paper_id,
+                "LLM skipped: empty evidence set (title/abstract or PDF missing).",
+                error_type="no_evidence",
+                total_estimated_tokens=estimated_input_tokens,
+            )
+
+        if llm_decision is None:
+            if estimated_input_tokens > CONTEXT_WINDOW:
+                llm_decision = (
+                    f"LLM skipped: estimated input {estimated_input_tokens} tokens exceeds context window {CONTEXT_WINDOW}."
+                )
+                self._log_overflow(paper.paper_id, estimated_input_tokens)
+            elif api_disabled:
+                llm_decision = "LLM disabled: use_api=False; no API call made."
+                prompt_tokens = len((llm_input or "").split())
+                response_tokens = 0
+                prompt_tokens_source = "estimate"
+                response_tokens_source = "estimate"
+                llm_decision_incomplete = False
+            else:
+                screening_stage = self.stage in {"title_abstract", "full_text"}
+                max_attempts = self._validation_max_retries if screening_stage else 2
+                model_name = getattr(getattr(self, "llm_client", None), "model", None) or gpustack_model
+                for attempt in range(1, max_attempts + 1):
+                    current_decision, llm_usage = await self._call_llm_async(llm_input)
+
+                    if llm_usage:
+                        prompt_tokens = int(
+                            llm_usage.get("prompt_tokens")
+                            or llm_usage.get("input_tokens")
+                            or llm_usage.get("total_tokens")
+                            or prompt_tokens
+                        )
+                        response_tokens = int(
+                            llm_usage.get("completion_tokens")
+                            or llm_usage.get("output_tokens")
+                            or llm_usage.get("response_tokens")
+                            or 0
+                        )
+                        prompt_tokens_source = "api"
+                        response_tokens_source = "api"
+
+                    if not current_decision:
+                        if attempt == max_attempts:
+                            failure_reason = "LLM returned no decision after retries."
+                            failure_type = "llm_no_response"
+                            failure_attempt = attempt
+                        continue
+
+                    llm_decision = current_decision
+
+                    if isinstance(llm_decision, str) and llm_decision.startswith("LLM error"):
+                        llm_decision_incomplete = True
+                        failure_reason = llm_decision
+                        failure_type = "llm_error"
+                        failure_attempt = attempt
+                        print(
+                            f"[error] async chat attempt {attempt}/{max_attempts} failed for model='{model_name}': {llm_decision}",
+                            file=sys.stderr,
+                        )
+                        if attempt == max_attempts:
+                            break
+                        llm_decision = None
+                        continue
+
+                    if screening_stage:
+                        llm_decision = self._sanitize_screening_decision(llm_decision, paper)
+                        try:
+                            validated_payload = self._validate_screening_decision(llm_decision or "")
+                            llm_decision = json.dumps(validated_payload, ensure_ascii=False)
+                            llm_decision_incomplete = False
+                            failure_type = None
+                            failure_reason = None
+                            failure_attempt = attempt
+                            break
+                        except ValidationError as exc:
+                            llm_decision_incomplete = True
+                            failure_reason = f"Schema validation failed: {exc}"
+                            failure_type = "llm_validation_error"
+                            failure_attempt = attempt
+                            if attempt == max_attempts:
+                                break
+                            llm_decision = None
+                            continue
+
+                    if _needs_retry(llm_decision):
+                        llm_decision_incomplete = True
+                        if attempt < max_attempts:
+                            if not self.quiet:
+                                print(
+                                    f"[warn] async chat attempt {attempt}/{max_attempts} incomplete; retrying for paper {paper.paper_id}"
+                                )
+                            llm_decision = None
+                            continue
+                        near_token_limit = bool(response_tokens and response_tokens >= int(0.9 * llm_max_tokens))
+                        if near_token_limit:
+                            failure_reason = (
+                                f"LLM decision likely truncated by max_tokens={llm_max_tokens}; reduce prompt payload or increase max_tokens."
+                            )
+                            failure_type = "llm_output_token_limit"
+                        else:
+                            failure_reason = "LLM decision incomplete after retry; output may be truncated."
+                            failure_type = "llm_incomplete"
+                        failure_attempt = attempt
+                        print(
+                            f"[error] async chat attempt {attempt}/{max_attempts} failed for model='{model_name}': output incomplete; logged for re-screen",
+                            file=sys.stderr,
+                        )
+                    else:
+                        llm_decision_incomplete = False
+                        failure_type = None
+                        failure_reason = None
+                        failure_attempt = attempt
+                        break
+
+                if failure_type is None and llm_decision and response_tokens == 0:
+                    response_tokens = len((llm_decision or "").split())
+                if failure_type is None and llm_decision and prompt_tokens == 0:
+                    prompt_tokens = len((llm_input or "").split())
+
+        if llm_decision and response_tokens == 0:
+            response_tokens = len((llm_decision or "").split())
+
+        if self.stage in {"title_abstract", "full_text"} and not isinstance(llm_decision, str):
+            llm_decision = None
+
+        if self.stage in {"title_abstract", "full_text"} and llm_decision is not None:
+            llm_decision = self._sanitize_screening_decision(llm_decision, paper)
+
+        context_input_hash = self._sha256_text(llm_input)
+        prompt_template_hash = self._sha256_text(self.prompt_template)
+        full_prompt_hash = self._sha256_text(self.prompt_template.replace("{data}", llm_input or ""))
+
+        if failure_type is None and not api_disabled and self._decision_missing_fields(llm_decision):
+            llm_decision_incomplete = True
+            near_token_limit = bool(response_tokens and response_tokens >= int(0.9 * llm_max_tokens))
+            if near_token_limit:
+                failure_reason = (
+                    f"LLM decision missing required fields likely due to output truncation at max_tokens={llm_max_tokens}."
+                )
+                failure_type = "llm_output_token_limit"
+            else:
+                failure_reason = (
+                    "LLM decision missing justification or exclusion_reason_category after retries; flagged for re-screen."
+                )
+                failure_type = "llm_missing_fields"
+            failure_attempt = attempt or 2
+
+        if failure_type:
+            self._log_error(
+                paper.paper_id,
+                failure_reason or "LLM decision incomplete after retries.",
+                error_type=failure_type,
+                attempt=failure_attempt or None,
+                prompt_tokens=prompt_tokens,
+                response_tokens=response_tokens,
+                embedding_tokens=embed_tokens,
+                pdf_text_tokens=pdf_text_tokens,
+                pdf_visual_tokens=pdf_visual_tokens,
+                total_estimated_tokens=estimated_input_tokens,
+            )
+
+        total_chunks = len(chunks) if chunks else len(selected)
+        output_metadata = paper.metadata
+        if self.stage in {"title_abstract", "full_text"}:
+            output_metadata = self._metadata_without_authors(output_metadata)
+
+        record = {
+            "paper_id": paper.paper_id,
+            "selected_chunks": selected,
+            "llm_decision": llm_decision,
+            "diagnostics": {
+                "total_chunks": total_chunks,
+                "selected_count": len(selected),
+                "top_k": self.top_k,
+                "score_threshold": self.score_threshold,
+                "preselected_chunks": preselected,
+                "stage": self.stage,
+                "llm_decision_incomplete": llm_decision_incomplete,
+                "language_used": language_used,
+                "llm_input_sha256": context_input_hash,
+                "prompt_template_sha256": prompt_template_hash,
+                "full_prompt_sha256": full_prompt_hash,
+                "llm_seed": llm_seed,
+                "llm_top_p": llm_top_p,
+            },
+            "metadata": output_metadata,
+        }
+
+        if self.stage == "data_extraction":
+            extraction_payload = await asyncio.to_thread(self._build_extraction_payload, paper, llm_decision)
+            await asyncio.to_thread(self._write_data_extraction_metadata, paper, selected, llm_decision, extraction_payload)
+
+        token_stats = {
+            "prompt_tokens": prompt_tokens,
+            "prompt_tokens_source": prompt_tokens_source,
+            "response_tokens": response_tokens,
+            "response_tokens_source": response_tokens_source,
+            "embedding_tokens": embed_tokens,
+            "embedding_tokens_source": embed_tokens_source,
+            "pdf_text_tokens": pdf_text_tokens,
+            "pdf_visual_tokens": pdf_visual_tokens,
+        }
+
+        return record, token_stats, extraction_payload
+
     def _process_paper(self, paper: PaperRecord) -> tuple[dict, dict, dict | None]:
         """Select evidence, call the LLM, and build outputs for one paper."""
 
@@ -1172,7 +1802,8 @@ class PaperScreeningPipeline:
                 response_tokens_source = "estimate"
                 llm_decision_incomplete = False
             else:
-                max_attempts = 2
+                screening_stage = self.stage in {"title_abstract", "full_text"}
+                max_attempts = self._validation_max_retries if screening_stage else 2
                 model_name = getattr(getattr(self, "llm_client", None), "model", None) or gpustack_model
                 for attempt in range(1, max_attempts + 1):
                     current_decision, llm_usage = self._call_llm(llm_input)
@@ -1216,6 +1847,26 @@ class PaperScreeningPipeline:
                         llm_decision = None
                         continue
 
+                    if screening_stage:
+                        llm_decision = self._sanitize_screening_decision(llm_decision, paper)
+                        try:
+                            validated_payload = self._validate_screening_decision(llm_decision or "")
+                            llm_decision = json.dumps(validated_payload, ensure_ascii=False)
+                            llm_decision_incomplete = False
+                            failure_type = None
+                            failure_reason = None
+                            failure_attempt = attempt
+                            break
+                        except ValidationError as exc:
+                            llm_decision_incomplete = True
+                            failure_reason = f"Schema validation failed: {exc}"
+                            failure_type = "llm_validation_error"
+                            failure_attempt = attempt
+                            if attempt == max_attempts:
+                                break
+                            llm_decision = None
+                            continue
+
                     if _needs_retry(llm_decision):
                         llm_decision_incomplete = True
                         if attempt < max_attempts:
@@ -1254,7 +1905,10 @@ class PaperScreeningPipeline:
         if llm_decision and response_tokens == 0:
             response_tokens = len((llm_decision or "").split())
 
-        if self.stage in {"title_abstract", "full_text"}:
+        if self.stage in {"title_abstract", "full_text"} and not isinstance(llm_decision, str):
+            llm_decision = None
+
+        if self.stage in {"title_abstract", "full_text"} and llm_decision is not None:
             llm_decision = self._sanitize_screening_decision(llm_decision, paper)
 
         context_input_hash = self._sha256_text(llm_input)
@@ -1847,6 +2501,27 @@ class PaperScreeningPipeline:
             return f"LLM error: {exc}", None
         return None, None
 
+    async def _call_llm_async(self, context: str) -> tuple[str | None, dict | None]:
+        """Call the LLM asynchronously and return text plus usage metadata."""
+
+        try:
+            if use_api:
+                responder = OpenAIResponder(
+                    data=context,
+                    model=self._llm_model,
+                    prompt_template=self.prompt_template,
+                    client=self._get_async_openai_client(base_url=self._llm_base_url),
+                )
+                return await responder.generate_response_async(
+                    max_retries=self._async_max_retries,
+                    backoff_base_seconds=self._async_backoff_base,
+                    backoff_max_seconds=self._async_backoff_max,
+                    jitter_seconds=self._async_jitter,
+                )
+        except Exception as exc:  # pylint: disable=broad-except
+            return f"LLM error: {exc}", None
+        return None, None
+
     def _get_openai_client(self, base_url: str | None = None):
         """Create a configured OpenAI API client."""
 
@@ -1858,6 +2533,52 @@ class PaperScreeningPipeline:
         self._openai_client = OpenAI(api_key=os.environ.get("LLM_API_KEY"), base_url=base_url)
         self._openai_client_base_url = base_url
         return self._openai_client
+
+    def _get_async_openai_client(self, base_url: str | None = None):
+        """Create a configured async OpenAI API client."""
+
+        from openai import AsyncOpenAI
+
+        if self._async_openai_client is not None and self._async_openai_client_base_url == base_url:
+            return self._async_openai_client
+
+        self._async_openai_client = AsyncOpenAI(api_key=os.environ.get("LLM_API_KEY"), base_url=base_url)
+        self._async_openai_client_base_url = base_url
+        return self._async_openai_client
+
+    def _validate_screening_decision(self, decision_text: str) -> dict[str, Any]:
+        """human readable hint: validate screening JSON and enforce prompt-demanded keys for this stage."""
+
+        model_cls = (
+            TitleAbstractScreeningDecisionModel
+            if self.stage == "title_abstract"
+            else FullTextScreeningDecisionModel
+        )
+        validated = model_cls.model_validate_json(decision_text)
+        payload = validated.model_dump()
+
+        required_fields = getattr(self, "_prompt_required_json_fields", set())
+        if required_fields:
+            missing_fields = sorted(field for field in required_fields if field not in payload)
+            if missing_fields:
+                raise ValueError(
+                    "LLM decision is missing prompt-required JSON field(s): " + ", ".join(missing_fields)
+                )
+
+        return payload
+
+    @staticmethod
+    def _extract_required_json_fields_from_prompt(prompt_template: str) -> set[str]:
+        """human readable hint: detect field names declared in the prompt schema section."""
+
+        if not prompt_template:
+            return set()
+
+        candidates = re.findall(r"[\"`']([a-zA-Z_][a-zA-Z0-9_]*)[\"`']\s*:\s*", prompt_template)
+        fields = {field.strip() for field in candidates if field and field.strip()}
+
+        # Keep only meaningful key-like tokens (ignore long prose fragments if any prompt format changes).
+        return {field for field in fields if 1 <= len(field) <= 64}
 
     @staticmethod
     def _percentiles(values: list[float]) -> dict:

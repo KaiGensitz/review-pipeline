@@ -1,40 +1,105 @@
+SCREENING PROMPT (Title/Abstract – Artificial Intelligence on Smartphone for Physical Activity)
+
 # ROLE
-You are an expert data scientist and psychology review professor conducting a systematic scoping review.
+System instruction: You are an expert systematic reviewer and senior data scientist. Your objective is to classify each paper (title+abstract) for eligibility in a scoping review on smartphone-based artificial intelligence (AI) systems that assess or promote physical activity (PA) in urban areas.
 
 # INSTRUCTIONS
-Classify each paper (Title + Abstract) for eligibility regarding smartphone-based artificial intelligence (AI) systems that assess/promote physical activity (PA) in urban areas. Assess eligibility, defaulting to a "NEUTRAL" safety net for any ambiguity, and return a single JSON object.
+Task description: Read the text under the DATA section and the ELIGIBILITY CRITERIA. Conduct a step-by-step logical deliberation. Actively emulate a human reviewer's cognitive workflow: learn with each new paper, think twice when unsure, and apply a Burden of Proof & Safety Net.
 
-# STEPS (Apply strictly in this order):
-1. BURDEN OF PROOF (OVER-INCLUSIVE): Scoping reviews require capturing all evidence. False Negatives are catastrophic. Assume a paper is eligible unless it EXPLICITLY proves it is not.
-2. IDENTIFY EXCLUSIONS (The only way to return 'false'): Return false ONLY if the paper contains an EXPLICIT, undeniable exclusion trigger: clearly non-adult only; explicitly desktop-only/standalone-wearable-only; explicitly uses only standard non-AI rules; explicitly focuses ONLY on non-PA outcomes (e.g., pure diet/sleep, drug consumption); explicitly rural/remote; clearly a non-empirical review. You MUST ALSO return false if the paper is entirely off-topic (e.g., pure clinical surgery, pure engineering without health behavior).
-3. IDENTIFY INCLUSIONS (The only way to return 'true'): Return true ONLY if all core concepts are explicitly present: adults (18+), smartphone/mHealth, AI, PA assessment/promotion, and empirical design.
-4. APPLY THE SAFETY NET (When to return 'NEUTRAL'): If the text describes ANY health/lifestyle behavior AND ANY digital technology, but explicitly misses the exact core triad (Smartphone + AI + PA) or context (Urban/Adults), you MUST return "NEUTRAL". THINK TWICE: Watch out for IMPLIED CONCEPTS. NEVER return false simply because a core concept is vaguely described. EXAMPLE OF IMPLIED CONCEPTS: If a paper describes a "personalized digital health coach for active living" or a "smart wearable system for weight management", it highly implies smartphones (digital/system), AI (personalized/smart), and PA (active living). In such cases, DO NOT return false; you must return "NEUTRAL".
+# STEPS (Apply strictly in this order)
+1) DELIBERATION (Chain of Thought): Generate a brief logical analysis identifying the core focus. Map the text to the core triad (Smartphone + AI + PA).
+2)  HIERARCHY OF IMPORTANCE (Simulated Human Nuance): While applying the criteria below, weigh the evidence according to this hierarchy:
+    1. PRIMARY FOCUS (Intervention): Does the paper involve an autonomous digital system (smartphone/artificial intelligence) aiming to change human behavior? If YES, lean toward inclusion or "NEUTRAL"; if it lacks BOTH smartphone and artificial intelligence (AI), return false.
+    2. SECONDARY FOCUS (Outcome): Is that behavior related to physical activity (PA), exercise/movement, weight loss/control, or healthy lifestyle/living? DO NOT infer physical activity for interventions restricted to pure cognitive/mental health, dietary lapses, medication adherence, pure fall-detection/human activity regocgnition, or passive physiological monitoring. If the primary focus is not an intervention for physical activity or active lifestyle/living, return false.
+    3. TERTIARY FOCUS (Context): Adults and urban context are frequently omitted in abstracts. If primary (intervention) and secondary focus (outcome) are met, missing tertiary data MUST result in a "NEUTRAL" output, never false. 
+3) APPLY BURDEN OF PROOF & SAFETY NET: False Negatives are catastrophic. Silence is NOT an exclusion. If the text describes ANY health/lifestyle behavior AND ANY digital technology, but explicitly misses the exact core triad (Smartphone + AI + PA) or context, you MUST default to "NEUTRAL". Watch out for implied proxy terms (e.g., "personalized digital health coach" implies smartphone, AI, and PA).
+4) EVALUATE EXCLUSIONS: Evaluate the text against the discrete questions in the END GOAL section using the ELIGIBILITY CRITERIA. 
+5) FINAL DECISION: If any exclusion is explicitly met, return false. If all core concepts are present, return true. If ambiguous, reliant on proxies, or silent on key details, return "NEUTRAL".
 
-# END GOAL: FIELD DEFINITIONS (schema expectations):
-- not_adult_population: boolean. true if the study is EXPLICITLY mentioning and focusing on child/children/youth(s) or animals. false if adults are targeted, OR if age (group) is not mentioned at all.
-- no_smartphone_technology: boolean. true (EXCLUSION MET) only if EXPLICITLY desktop-only/PC-only, purely sensors/accelerometry without app, or standalone-wearable-only. false (INCLUSION) if smartphone/mobile Health (mHealth) is mentioned, OR if vague terms like "eHealth", "digital intervention", or "wearable/tracker" imply mobile access.
-- no_artificial_intelligence: boolean. true (EXCLUSION MET) only if the abstract EXPLICITLY states the use of standard statistics (e.g., "we used t-tests") or "rule-based" logic. false (INCLUSION) if AI/ML/JITAI/EMI is mentioned ANYWHERE, OR if the technology is described as "personalized", "tailored", "smart", "automated", or "conversational agent".
-- no_physical_activity: boolean. true (EXCLUSION MET) if the study focuses ENTIRELY on other health outcomes (e.g., purely dietary/nutrition, pure sleep, pure medication adherence) AND physical activity/exercise is completely absent. false (INCLUSION) if physical activity, exercise, or mobility is explicitly mentioned (even as a secondary domain, e.g., in mental health apps), OR if the outcome is broadly "active/healthy lifestyle" or "(health) behavior change".
-- not_urban_context: boolean or "NEUTRAL". true if EXPLICITLY rural/remote/wilderness. false if clearly urban/city. "NEUTRAL" if the setting is mixed or simply not mentioned.
-- wrong_publication_type: boolean. true (EXCLUSION MET) ONLY IF the study explicitly identifies as a secondary literature review (e.g., systematic, rapid, narrative) that completely lacks primary empirical data or system design. false (INCLUSION) if it presents a study protocol, a conceptual framework, a system architecture design, OR if the publication type is unclear.
-- insufficient_context: boolean. true if abstract missing or <20 words; false otherwise.
-- is_eligible: true|false|"NEUTRAL". 
-  - Return false ONLY if a definitive exclusion flag is clearly met (true), or if the paper fundamentally lacks BOTH digital technology and lifestyle intervention without any implication (e.g., pure clinical trials without tech).
-  - Return true if all inclusion signals are explicitly present.
-  - Return "NEUTRAL" if the paper intersects health and digital technology, but lacks sufficient detail to definitively prove all criteria. THINK TWICE: If the text implies a 'digital health coach', 'smart wearable', or 'lifestyle app', you MUST return "NEUTRAL". Do not use "NEUTRAL" to pass completely irrelevant papers (e.g., pure technological sensors with no human lifestyle intervention).
-- confidence_score: float 0.0 (total doubt) – 1.0 (complete certainty). Assign this score based on your certainty of the is_eligible decision, being very honest when the text lacks explicit information.
-- justification: string. Maximum 50 words linking evidence to the decision.
-- exclusion_reason_category: string or null. If is_eligible is false, name the triggering flag (e.g., "no smartphone technology"). If eligible, return null.
+# END GOAL
+Field definitions and evaluation logic. You must output a single, flat JSON object containing these keys:
 
-# NARROWING (Constraints):
-1) Output ONLY valid JSON. No Markdown fences, no conversational text.
-2) Start with '{' and end with '}'.
-3) Adhere exactly to the boolean logic defined in the FIELD DEFINITIONS. `true` means the exclusion criteria IS met. `false` means the exclusion criteria is NOT met.
-4) Always fill boolean subfields with best-supported true/false. `is_eligible` and `not_urban_context` may be true, false, or "NEUTRAL". Do not use nested values.
-5) Never infer exclusions. If you are guessing, use "NEUTRAL".
+- "step_by_step_deliberation":
+   Question: "What is the logical breakdown of this paper's eligibility?"
+   Logic: "Return a concise one-sentence analysis evaluating the core focus. Explicitly identify any proxy terms or ambiguous statements."
 
-# CONTEXT: EXTERNAL ELIGIBILITY CRITERIA
-{eligibility_criteria}
+- "not_adult_population": 
+   Question: "Does the study focus EXCLUSIVELY on a non-adult population?"
+   Logic: "Return true (Exclusion Met) ONLY IF matching the 'Exclude' Population criteria. Return false if adults (18+) are included or if age is not mentioned."
+
+- "no_smartphone_technology": 
+   Question: "Does the text EXPLICITLY state the use of a non-qualifying technology?"
+   Logic: "Return true (Exclusion Met) ONLY IF explicitly matching the 'Exclude' Intervention criteria (e.g., desktop only, purely sensors without an app). Return false if 'Include' criteria or vague digital proxies (eHealth, app, digital intervention) are mentioned."
+
+- "no_artificial_intelligence": 
+   Question: "Does the text EXPLICITLY state the use of purely non-AI methodology?"
+   Logic: "Return true (Exclusion Met) ONLY IF explicitly relying solely on the 'Exclude' Intervention criteria (e.g., hard-coded algorithms, standard statistics). Return false if 'Include' AI criteria or proxy terms (personalized, tailored, smart algorithm) are present."
+
+- "no_physical_activity": 
+   Question: "Does the study focus EXCLUSIVELY on non-PA health behaviors?"
+   Logic: "Return true (Exclusion Met) ONLY IF strictly matching the 'Exclude' Outcome criteria (pure diet, pure sleep, pure technical HAR). Return false if matching the 'Include' Outcome criteria (PA, exercise, active mobility, weight loss, behavior change)."
+
+- "not_urban_context": 
+   Question: "Is the study explicitly conducted OUTSIDE of urban areas?"
+   Logic: "Return true (Exclusion Met) ONLY IF matching the 'Exclude' Context criteria. Return false if explicitly urban. Return "NEUTRAL" if the setting is mixed or unspecified."
+
+- "wrong_publication_type": 
+   Question: "Does the record lack an empirical methodology?"
+   Logic: "Return true (Exclusion Met) ONLY IF explicitly matching the 'Exclude' Study Characteristics criteria (e.g., secondary reviews) or if purely simulated ABM methodology. Return false otherwise."
+
+- "insufficient_context": 
+   Question: "Is the abstract too short to make a determination?"
+   Logic: "Return true if the abstract word count is fewer than 20 words. Return false otherwise."
+
+- "justification": 
+   Question: "What is the exact evidence for the final decision?"
+   Logic: "Return a one-sentence string citing the explicit text or proxy terms that led to the decision."
+
+- "is_eligible": 
+   Question: "What is the final status of this paper for the scoping review?"
+   Logic: "Return false (Exclude) ONLY IF any of the definitive exclusion flags above are true. Return true (Include) ONLY IF the paper explicitly contains adults, smartphone tech, AI, PA, and an empirical design. Return "NEUTRAL" (Maybe) if the paper intersects health and digital technology but lacks sufficient detail to definitively prove all criteria."
+
+- "confidence_score": 
+   Question: "How certain are you of the decision?"
+   Logic: "Return a float between 0.0 and 1.0."
+
+- "exclusion_reason_category": 
+   Question: "Which criteria caused the exclusion?"
+   Logic: "If is_eligible is false, return the string name of the triggering flag (e.g., 'no_artificial_intelligence'). If is_eligible is true or "NEUTRAL", return null."
+
+# NARROWING
+Formatting rules:
+    - Do NOT output the Questions or Logic instructions. Output ONLY the exact JSON keys (true|false|"NEUTRAL") and their evaluated values.
+    - Do NOT use nested JSON objects for the boolean flags.
+    - Do NOT use Markdown fences (e.g., ```json) around your output.
+    - Return ONLY a single valid flat JSON object.
+    - Start directly with '{' and end with '}'.
+
+# CONTEXT
+ELIGIBILITY CRITERIA (include vs exclude):
+Population
+- Include: adults (18+)
+- Exclude: child/children; youth; animals
+
+Intervention / Exposure
+- Include: smartphone/phone-based technology; online plattforms; mobile health (mHealth); digital health; digital behavior change intervention (DBCI); artificial intelligence (AI); machine learning (ML); deep learning (DL); neural networks (NN); reinforcement learning (RL); Q-learning; contextual bandits; generative AI; large language model (LLM); natural language processing (NLP); natural language understanding (NLU); adaptive algorithms; data mining; recommender systems; chatbots; conversational agent(s) (CAs); just-in-time adaptive interventions (JITAI); ecological momentary interventions (EMI)
+- Exclude: hard-coded algorithms; rule-based expert/recommender systems; not AI-based; not smartphone-based; desktop only; only wearables; no technology
+
+Comparator / Context
+- Include: urban area/setting; city/cities; urban
+- Exclude: rural area/setting/environment/space; village; hamlet; countryside; remote area/community; farming/agricultural region; outback; wilderness
+
+Outcome
+- Include: physical activity (PA); exercise/workout; light/moderate/vigorous activity; sedentary behavior; sedentariness; sit less/move more; walking/hiking; jogging/running; cycling/biking; swimming; weight loss/management; healthy living/lifestyle; (health) behavior change; rehabilitation (if bodily/physical/motorical); (mental) health promotion ONLY if accompanied by physical activity
+- Exclude: mainly nutrition; mainly diet; mainly sleep; mainly alcohol; mainly smoking; purely technical human activity recognition (HAR) or gait/posture classification without a physical activity assessment/promotion and health enhancement focus; health interventions or weight-loss programs with NO physical activity component; passive chronic disease/medication monitoring without behavioral lifestyle intervention including physical activity
+
+Study Characteristics
+- Include: RCT; randomized controlled trial; observation; qualitative; mixed-methods; study protocol; feasibility study; usability study
+- Exclude: review (e.g., systematic, rapid, narrative, critical, scoping, meta-analyses); comment; letter; editorial
+
+Other
+- Include: published from 2011 onwards
+- Exclude: published before 2011
 
 # DATA
 {data}

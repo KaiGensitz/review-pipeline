@@ -68,6 +68,10 @@ Edit [config/user_orchestrator.py](config/user_orchestrator.py):
 	- `temperature` (recommended `0.0`)
 	- `top_p` (recommended `1.0`)
 	- `seed` (set for reproducibility audits; any integer as value, e.g. `42`)
+	- async controls for `title_abstract` throughput and stability:
+		- `async_max_concurrency` (concurrent abstract calls)
+		- `async_max_retries` (transient API retries)
+		- `async_backoff_base_seconds`, `async_backoff_max_seconds`, `async_jitter_seconds` (rate-limit backoff)
 
 Keep defaults unless you know why to change them.
 
@@ -85,7 +89,10 @@ Prepare knowledge-base files:
 - [knowledge-base/title_abstract_pos-neg_examples.csv](knowledge-base/title_abstract_pos-neg_examples.csv)
 - [knowledge-base/full_text_pos-neg_examples.csv](knowledge-base/full_text_pos-neg_examples.csv)
 - [knowledge-base/data_extraction_pos-neg_examples.csv](knowledge-base/data_extraction_pos-neg_examples.csv)
-- [knowledge-base/eligibility_criteria.txt](knowledge-base/eligibility_criteria.txt) (external criteria injected at runtime for `title_abstract` and `full_text`)
+- Optional shared criteria file: [knowledge-base/eligibility_criteria.txt](knowledge-base/eligibility_criteria.txt)
+	- It is used only when the active prompt contains `{eligibility_criteria}`.
+	- If the placeholder is not present, prompt text is used as-is.
+	- If the placeholder is present but the file is missing, the run continues with a warning.
 
 Required columns in all knowledge-base files:
 - `label` (`POS`/`NEG`)
@@ -132,7 +139,7 @@ python -m pipeline.additions.input_trace --paper-id <ID> --stage <stage> --show-
 - Correct `CURRENT_STAGE` in [config/user_orchestrator.py](config/user_orchestrator.py).
 - Correct stage CSV present in [input](input).
 - Stage knowledge-base file exists and is not empty.
-- For `title_abstract` or `full_text`: [knowledge-base/eligibility_criteria.txt](knowledge-base/eligibility_criteria.txt) exists and is not empty.
+- If you use `{eligibility_criteria}` in a prompt, verify [knowledge-base/eligibility_criteria.txt](knowledge-base/eligibility_criteria.txt) exists and is up to date.
 - For PDF stages, PDFs are placed in the generated per-paper folders.
 
 ## 11) Throughput tips (handling thousands of papers)

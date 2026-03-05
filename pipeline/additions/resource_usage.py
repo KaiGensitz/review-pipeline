@@ -14,7 +14,208 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
-from config.user_orchestrator import CARBON_CONFIG, HUMAN_TIME_CONFIG
+from config.user_orchestrator import CARBON_CONFIG, HUMAN_TIME_CONFIG, UBELIX_ESTIMATION_CONFIG
+
+
+def _estimate_ubelix_operational(total_runtime_seconds: float) -> dict[str, Any] | None:
+	"""Estimate UBELIX operational energy/CO2e with Green-Algorithms style factors."""
+
+	config = UBELIX_ESTIMATION_CONFIG if isinstance(UBELIX_ESTIMATION_CONFIG, dict) else {}
+	if not bool(config.get("enabled", False)):
+		return None
+
+	runtime_hours = max(float(total_runtime_seconds or 0.0), 0.0) / 3600.0
+	if runtime_hours <= 0:
+		return {
+			"enabled": True,
+			"note": "UBELIX estimate skipped (runtime was zero).",
+		}
+
+	pue_raw = config.get("pue", 1.0)
+	try:
+		pue = max(1.0, float(pue_raw))
+	except Exception:
+		pue = 1.0
+
+	usage_raw = config.get("core_usage_factor", 1.0)
+	try:
+		core_usage_factor = min(max(float(usage_raw), 0.0), 1.0)
+	except Exception:
+		core_usage_factor = 1.0
+
+	mult_raw = config.get("multiplicative_factor", 1.0)
+	try:
+		multiplicative_factor = max(float(mult_raw), 1.0)
+	except Exception:
+		multiplicative_factor = 1.0
+
+	memory_gb_raw = config.get("memory_gb", 0.0)
+	try:
+		memory_gb = max(float(memory_gb_raw), 0.0)
+	except Exception:
+		memory_gb = 0.0
+
+	memory_w_per_gb_raw = config.get("memory_power_watts_per_gb", 0.0)
+	try:
+		memory_power_watts_per_gb = max(float(memory_w_per_gb_raw), 0.0)
+	except Exception:
+		memory_power_watts_per_gb = 0.0
+
+	memory_power_watts = memory_gb * memory_power_watts_per_gb
+
+	grid_raw = config.get("grid_carbon_intensity_g_per_kwh", None)
+	grid_intensity = None
+	try:
+		if grid_raw is not None:
+			grid_intensity = float(grid_raw)
+	except Exception:
+		grid_intensity = None
+
+	tdp_table = config.get("resource_tdp_watts", {}) if isinstance(config.get("resource_tdp_watts"), dict) else {}
+	usage_table = config.get("resource_usage", {}) if isinstance(config.get("resource_usage"), dict) else {}
+
+	it_power_watts = 0.0
+	breakdown: dict[str, dict[str, float]] = {}
+
+	for resource_name, count_raw in usage_table.items():
+		try:
+			count = max(float(count_raw), 0.0)
+		except Exception:
+			continue
+		try:
+			tdp_watts = max(float(tdp_table.get(resource_name, 0.0) or 0.0), 0.0)
+		except Exception:
+			tdp_watts = 0.0
+		if count <= 0 or tdp_watts <= 0:
+			continue
+
+		resource_power_watts = count * tdp_watts
+		resource_energy_kwh = (resource_power_watts * runtime_hours) / 1000.0
+		breakdown[resource_name] = {
+			"count": count,
+			"tdp_watts": tdp_watts,
+			"power_watts": resource_power_watts,
+			"it_energy_kwh": resource_energy_kwh,
+		}
+		it_power_watts += resource_power_watts
+
+	core_power_watts_usage_adjusted = it_power_watts * core_usage_factor
+	it_power_watts_total = core_power_watts_usage_adjusted + memory_power_watts
+	it_energy_kwh = (it_power_watts_total * runtime_hours) / 1000.0
+	facility_energy_kwh = it_energy_kwh * pue * multiplicative_factor
+	operational_co2e_kg = None
+	if grid_intensity is not None:
+		operational_co2e_kg = (facility_energy_kwh * grid_intensity) / 1000.0
+
+	return {
+		"enabled": True,
+		"runtime_hours": runtime_hours,
+		"resource_breakdown": breakdown,
+		"core_power_watts_raw": it_power_watts,
+		"core_usage_factor": core_usage_factor,
+		"core_power_watts_usage_adjusted": core_power_watts_usage_adjusted,
+		"memory_gb": memory_gb,
+		"memory_power_watts_per_gb": memory_power_watts_per_gb,
+		"memory_power_watts": memory_power_watts,
+		"multiplicative_factor": multiplicative_factor,
+		"it_power_watts": it_power_watts_total,
+		"it_energy_kwh": it_energy_kwh,
+		"pue": pue,
+		"facility_energy_kwh": facility_energy_kwh,
+		"grid_carbon_intensity_g_per_kwh": grid_intensity,
+		"operational_co2e_kg": operational_co2e_kg,
+		"note": "Rough operational estimate only; excludes embodied emissions (materials/manufacturing/transport).",
+	}
+
+
+def _build_ubelix_assumption_log() -> dict[str, Any] | None:
+	"""Build a compact assumption log for reproducibility/audit reporting."""
+
+	config = UBELIX_ESTIMATION_CONFIG if isinstance(UBELIX_ESTIMATION_CONFIG, dict) else {}
+	if not bool(config.get("enabled", False)):
+		return None
+
+	assumptions = config.get("assumptions", {}) if isinstance(config.get("assumptions"), dict) else {}
+	return {
+		"method_reference": "https://calculator.green-algorithms.org/",
+		"scope": "Operational estimate only (no embodied emissions).",
+		"pue": config.get("pue"),
+		"grid_carbon_intensity_g_per_kwh": config.get("grid_carbon_intensity_g_per_kwh"),
+		"core_usage_factor": config.get("core_usage_factor", 1.0),
+		"memory_gb": config.get("memory_gb", 0.0),
+		"memory_power_watts_per_gb": config.get("memory_power_watts_per_gb", 0.0),
+		"multiplicative_factor": config.get("multiplicative_factor", 1.0),
+		"resource_usage": config.get("resource_usage"),
+		"resource_tdp_watts": config.get("resource_tdp_watts"),
+		"sources": {
+			"pue_source": assumptions.get("pue_source", ""),
+			"pue_source_date": assumptions.get("pue_source_date", ""),
+			"grid_intensity_source": assumptions.get("grid_intensity_source", ""),
+			"grid_intensity_source_date": assumptions.get("grid_intensity_source_date", ""),
+			"resource_usage_source": assumptions.get("resource_usage_source", ""),
+			"resource_usage_source_date": assumptions.get("resource_usage_source_date", ""),
+			"core_usage_factor_source": assumptions.get("core_usage_factor_source", ""),
+			"core_usage_factor_source_date": assumptions.get("core_usage_factor_source_date", ""),
+			"memory_source": assumptions.get("memory_source", ""),
+			"memory_source_date": assumptions.get("memory_source_date", ""),
+			"multiplicative_factor_source": assumptions.get("multiplicative_factor_source", ""),
+			"multiplicative_factor_source_date": assumptions.get("multiplicative_factor_source_date", ""),
+			"notes": assumptions.get("notes", ""),
+		},
+	}
+
+
+def _ubelix_assumption_missing_fields(assumption_log: dict[str, Any] | None) -> list[str]:
+	"""Return required assumption source fields that are still blank."""
+
+	if not assumption_log or not isinstance(assumption_log, dict):
+		return []
+	sources = assumption_log.get("sources", {}) if isinstance(assumption_log.get("sources"), dict) else {}
+	required_fields = [
+		"pue_source",
+		"pue_source_date",
+		"grid_intensity_source",
+		"grid_intensity_source_date",
+		"resource_usage_source",
+		"resource_usage_source_date",
+		"core_usage_factor_source",
+		"core_usage_factor_source_date",
+		"memory_source",
+		"memory_source_date",
+		"multiplicative_factor_source",
+		"multiplicative_factor_source_date",
+	]
+	missing: list[str] = []
+	for field in required_fields:
+		value = sources.get(field, "")
+		if not str(value).strip():
+			missing.append(field)
+	return missing
+
+
+def _print_ubelix_summary_line(total_runtime_seconds: float, stage: str, run_label: str) -> None:
+	"""Print one operator-friendly summary line after a run."""
+
+	assumption_log = _build_ubelix_assumption_log()
+	if not assumption_log:
+		return
+
+	estimate = _estimate_ubelix_operational(total_runtime_seconds)
+	if not estimate or not isinstance(estimate, dict):
+		return
+
+	energy_kwh = estimate.get("facility_energy_kwh")
+	co2e_kg = estimate.get("operational_co2e_kg")
+	missing = _ubelix_assumption_missing_fields(assumption_log)
+	assumption_status = "complete" if not missing else f"missing({','.join(missing)})"
+
+	energy_text = f"{float(energy_kwh):.4f} kWh" if isinstance(energy_kwh, (int, float)) else "n/a"
+	co2_text = f"{float(co2e_kg):.4f} kgCO2e" if isinstance(co2e_kg, (int, float)) else "n/a"
+
+	print(
+		f"[ubelix] stage={stage} run={run_label} estimate={energy_text}, {co2_text} assumptions={assumption_status}",
+		flush=True,
+	)
 
 
 def _count_qc_papers(qc_sample_path: Path | None) -> int:
@@ -245,6 +446,7 @@ class ResourceUsageTracker:
 			energy_kwh = self._carbon_tracker.energy_kwh()
 			self._carbon_tracker.rename_emissions_csv(run_label=self.config.run_label)
 		self._write_totals(total_runtime_seconds, paper_count, emissions_kg, energy_kwh)
+		_print_ubelix_summary_line(total_runtime_seconds, self.stage, self.config.run_label)
 
 	def log_paper(
 		self,
@@ -347,6 +549,9 @@ class ResourceUsageTracker:
 			cc_energy_per_1k_tokens = (energy_kwh / tokens_total) * 1000.0
 			cc_carbon_g_per_1k_tokens = ((emissions_kg * 1000.0) / tokens_total) * 1000.0
 
+		ubelix_estimate = _estimate_ubelix_operational(total_runtime_seconds)
+		ubelix_assumptions_log = _build_ubelix_assumption_log()
+
 		self.config.resource_log_path.parent.mkdir(parents=True, exist_ok=True)
 		entries: list[str] = []
 		for record in self._paper_records:
@@ -366,6 +571,8 @@ class ResourceUsageTracker:
 					"codecarbon_energy_kwh_per_1k_tokens": cc_energy_per_1k_tokens,
 					"codecarbon_carbon_g_per_1k_tokens": cc_carbon_g_per_1k_tokens,
 					"codecarbon_carbon_intensity_g_per_kwh": cc_intensity,
+					"ubelix_operational_estimate": ubelix_estimate,
+					"ubelix_assumptions_log": ubelix_assumptions_log,
 					"total_runtime_seconds": total_runtime_seconds,
 					"total_runtime_avg_seconds_per_paper": total_runtime_avg_seconds_per_paper,
 					"paper_count": paper_count,

@@ -58,14 +58,18 @@ flowchart LR
   - Knowledge-base: [knowledge-base/data_extraction_pos-neg_examples.csv](knowledge-base/data_extraction_pos-neg_examples.csv)
   - PDFs reused in `input/per_paper_data_extraction/`
 
-External criteria file for screening stages:
-- [knowledge-base/eligibility_criteria.txt](knowledge-base/eligibility_criteria.txt) (injected at runtime for `title_abstract` and `full_text`)
+Eligibility criteria can be centrally stored in [knowledge-base/eligibility_criteria.txt](knowledge-base/eligibility_criteria.txt).
+- The file is injected only when a stage prompt contains `{eligibility_criteria}`.
+- If the placeholder is absent, the file is ignored.
+- If the placeholder is present but the file is missing, the pipeline continues (warning + empty replacement).
 
 Knowledge-base format for all stages: CSV with columns `label` (`POS`/`NEG`) and `text` (short evidence); recommended >=10 `POS` and >=10 `NEG`.
 
 ## Quality control (QC) and retry behavior
 
 - QC is enabled by default (`QC_ENABLED=True`): pipeline generates a deterministic ~10% sample (`ceil(sample_rate * N)`).
+- `title_abstract` now uses asynchronous LLM batching with bounded concurrency and exponential backoff for transient API/rate-limit failures.
+- Screening responses are validated against a strict JSON schema (Pydantic); invalid JSON/missing fields trigger automatic retry up to 3 attempts.
 - QC outputs are written to `output/<stage>/` as:
   - `<stage>_qc_sample_batch_<yyyymmdd>_<hh-mm>.csv`
   - `<stage>_qc_sample_batch_readable_<yyyymmdd>_<hh-mm>.txt`
@@ -111,7 +115,7 @@ Data extraction additionally writes per-paper:
 
 - Missing `LLM_API_KEY` in [.env](.env)
 - Missing/empty stage KB file in [knowledge-base](knowledge-base)
-- Missing/empty [knowledge-base/eligibility_criteria.txt](knowledge-base/eligibility_criteria.txt) for `title_abstract` or `full_text`
+- Missing/invalid criteria section inside prompt script for `title_abstract` or `full_text`
 - Missing PDFs for `full_text` or `data_extraction`
 - `CURRENT_STAGE` set to wrong stage in [config/user_orchestrator.py](config/user_orchestrator.py)
 
@@ -123,6 +127,12 @@ Data extraction additionally writes per-paper:
 ## Notes
 
 - Change only [config/user_orchestrator.py](config/user_orchestrator.py) for daily runs.
+- Async LLM controls are in `LLM_SETTINGS`: `async_max_concurrency`, `async_max_retries`, `async_backoff_base_seconds`, `async_backoff_max_seconds`, `async_jitter_seconds`.
+- Stage toggles for async processing: `async_enable_full_text`, `async_enable_data_extraction`.
+- Async heartbeat log interval: `async_heartbeat_seconds` (default `30`).
+- Optional UBELIX rough estimate in `config/user_orchestrator.py` via `UBELIX_ESTIMATION_CONFIG` (uses runtime + TDP + PUE; excludes embodied emissions).
+- UBELIX assumption log fields can be filled in `UBELIX_ESTIMATION_CONFIG["assumptions"]` (source + date for PUE, grid intensity, and resource usage) and are written to the `TOTAL` resource log line.
+- Green-Algorithms style factors supported in `UBELIX_ESTIMATION_CONFIG`: `core_usage_factor`, `memory_gb`, `memory_power_watts_per_gb`, `multiplicative_factor`.
 - Keep one stage at a time: `title_abstract` -> `full_text` -> `data_extraction`.
 - Use newest CSV exports per stage in [input](input).
 

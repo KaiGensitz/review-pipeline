@@ -15,12 +15,16 @@ Use this checklist before running `main.py`.
 - You are connected to Bern network (eduroam/campus LAN/VPN).
 - `.env` contains `LLM_API_KEY`.
 - Stage KB file exists and has `POS` and `NEG` rows.
+- If a stage prompt uses `{eligibility_criteria}`, `knowledge-base/eligibility_criteria.txt` exists and is current.
 - QC is enabled unless intentionally bypassed (`QC_ENABLED=True`).
 - QC files exist in `output/<stage>/`:
   - `<stage>_qc_sample_batch_<yyyymmdd>_<hh-mm>.csv`
   - `<stage>_qc_sample_batch_readable_<yyyymmdd>_<hh-mm>.txt`
 - Validation is run against the matching QC sample timestamp.
 - Eligibility diagnostics include per-paper hashes (`llm_input_sha256`, `full_prompt_sha256`) for reproducibility audits.
+- `LLM_SETTINGS` async controls are set to endpoint-safe values (`async_max_concurrency`, retry/backoff settings).
+- Screening JSON responses are schema-validated (Pydantic); repeated validation failures are visible in error logs.
+- Placeholder rule is respected: criteria file is only used when `{eligibility_criteria}` is present in the active prompt.
 
 ## Integrity checks
 
@@ -29,6 +33,7 @@ Use this checklist before running `main.py`.
 - Retry manifest exists: `output/<stage>/<stage>_retry_manifest.jsonl`.
 - CodeCarbon emissions for retries are merged with a `run` column (`main`, `retry_<attempt>`).
 - Deterministic failures (`llm_output_token_limit`, `context_overflow`) are excluded from automatic retry prompts.
+- Validation failures are labeled (`llm_validation_error`) and retried up to 3 attempts before logging.
 
 ### Reproducibility controls (optional)
 

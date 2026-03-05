@@ -13,8 +13,30 @@ Decision frame (apply in this order):
 
 Formatting guardrail: Always fill boolean subfields with best-supported true/false; only not_urban_context may be true/false/"NEUTRAL".
 
-Eligibility criteria context (injected at runtime):
-{eligibility_criteria}
+Eligibility criteria context (embedded directly in this prompt):
+Population
+- Include: adults (18+)
+- Exclude: child/children; youth; animals
+
+Intervention / Exposure
+- Include: smartphone/phone-based technology; online plattforms; mobile health (mHealth); digital health; digital behavior change intervention (DBCI); artificial intelligence (AI); machine learning (ML); deep learning (DL); neural networks (NN); reinforcement learning (RL); Q-learning; contextual bandits; generative AI; large language model (LLM); natural language processing (NLP); natural language understanding (NLU); adaptive algorithms; data mining; recommender systems; chatbots; conversational agent(s) (CAs); just-in-time adaptive interventions (JITAI); ecological momentary interventions (EMI)
+- Exclude: hard-coded algorithms; rule-based expert/recommender systems; not AI-based; not smartphone-based; desktop only; only wearables; no technology
+
+Comparator / Context
+- Include: urban area/setting; city/cities; urban
+- Exclude: rural area/setting/environment/space; village; hamlet; countryside; remote area/community; farming/agricultural region; outback; wilderness
+
+Outcome
+- Include: physical activity (PA); exercise/workout; light/moderate/vigorous activity; sedentary behavior; sedentariness; sit less/move more; walking/hiking; jogging/running; cycling/biking; swimming; weight loss/management; healthy living/lifestyle; (health) behavior change; rehabilitation (if bodily/physical/motorical); (mental) health promotion ONLY if accompanied by physical activity
+- Exclude: mainly nutrition; mainly diet; mainly sleep; mainly alcohol; mainly smoking; purely technical human activity recognition (HAR) or gait/posture classification without a physical activity assessment/promotion and health enhancement focus; health interventions or weight-loss programs with NO physical activity component; passive chronic disease/medication monitoring without behavioral lifestyle intervention including physical activity
+
+Study Characteristics
+- Include: RCT; randomized controlled trial; observation; qualitative; mixed-methods; study protocol; feasibility study; usability study
+- Exclude: review (e.g., systematic, rapid, narrative, critical, scoping, meta-analyses); comment; letter; editorial
+
+Other
+- Include: published from 2011 onwards
+- Exclude: published before 2011
 
 Field definitions (schema expectations):
 - not_adult_population: boolean. true only if the study is EXPLICITLY exclusively children/youth/animals. false if adults are included, OR if age is not mentioned at all.

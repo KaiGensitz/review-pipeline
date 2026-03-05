@@ -11,6 +11,8 @@ End-to-end procedure for the three pipeline stages with mandatory human quality 
 - Use deterministic QC sampling (~10%) before full automation at each stage.
 - Validate AI vs human QC decisions before processing remaining papers.
 - Keep stage outputs, retries, and logs fully traceable.
+- For `title_abstract`, screening uses asynchronous batched LLM requests with bounded concurrency and backoff.
+- Screening outputs are accepted only after strict JSON schema validation; invalid responses are retried automatically.
 
 ## Required setup
 

@@ -14,12 +14,26 @@ Advanced technical reference for operators and maintainers.
 - Validation compares against matching QC timestamps when available.
 - Per-run resource and emissions outputs are written with stage and sample context.
 - Screening diagnostics store per-paper input fingerprints (`llm_input_sha256`, `prompt_template_sha256`, `full_prompt_sha256`).
+- Prompt assembly supports optional shared criteria injection from `knowledge-base/eligibility_criteria.txt` only when `{eligibility_criteria}` is present in the active prompt.
+- `title_abstract` screening executes via asyncio with bounded request concurrency.
+- Transient API failures (rate limit/timeout/5xx) use exponential backoff with jitter.
+- Screening decisions are validated via a strict Pydantic schema before being accepted.
 
 ## Pipeline behavior by stage
 
 - `title_abstract`: full `Title + Abstract` is injected directly into prompt `{data}` (no chunking/top-k filtering), eligibility JSONL outputs.
 - `full_text`: per-paper folder/PDF workflow, page-line chunking with relevance selection (`top_k`/threshold), eligibility JSONL outputs.
 - `data_extraction`: extraction-focused prompt, per-paper extraction JSONL/CSV outputs, evidence JSON.
+
+Placeholder behavior (all stages):
+- If `{eligibility_criteria}` is in the prompt, the pipeline attempts to inject `knowledge-base/eligibility_criteria.txt`.
+- If the placeholder is absent, no criteria-file lookup is performed.
+- If the placeholder exists but the file is missing, execution continues with a warning and empty replacement.
+
+## Runtime integrations
+
+- LLM API client wrapper: `pipeline/integrations/llm_client.py`
+- PDF/text/language utilities used by selection and pipeline: `pipeline/integrations/embedding_utils.py`
 
 ## Deterministic QC model
 
@@ -42,8 +56,10 @@ Advanced technical reference for operators and maintainers.
 ## LLM decision quality gates
 
 - Every response is checked for parseability and completion.
+- Screening stages enforce schema-level validation (`bool`/`NEUTRAL` rules, required justification/reason fields).
 - `justification` and `exclusion_reason_category` are required for accepted decisions.
 - Missing/invalid decisions are logged and queued for retry.
+- Validation errors are retried automatically up to 3 attempts per paper.
 - Token-limit truncation is explicitly labeled as `llm_output_token_limit` to avoid masked retry loops.
 - Neutral/maybe is accepted only in `title_abstract`; ambiguous full-text decisions are retried.
 
