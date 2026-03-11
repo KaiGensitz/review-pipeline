@@ -868,15 +868,29 @@ def _parse_args():
     return parser.parse_args()
 
 
+class ValidationEngine:
+    """human readable hint: one-class validation orchestrator for screening and extraction stages."""
+
+    def __init__(self, stage: str = CURRENT_STAGE) -> None:
+        """human readable hint: __init__ stores the active stage used to route validation."""
+
+        self.stage = stage
+
+    def run(self, args=None) -> None:
+        """human readable hint: run the correct validation branch based on the configured stage."""
+
+        args = args or _parse_args()
+        if self.stage == "data_extraction":
+            validate_extraction(args.consensus)
+            return
+
+        validate_screening(self.stage, args)
+
+
 def run_validation() -> None:
-    """Route validation to the correct stage."""
+    """Compatibility wrapper for direct execution."""
 
-    args = _parse_args()
-    if CURRENT_STAGE == "data_extraction":
-        validate_extraction(args.consensus)
-        return
-
-    validate_screening(CURRENT_STAGE, args)
+    ValidationEngine().run()
 
 
 if __name__ == "__main__":

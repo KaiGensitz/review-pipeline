@@ -14,6 +14,7 @@ Stage-based pipeline for title/abstract screening, full-text screening, and data
 - Validation checks and expected files: [pipeline_validation_checks.md](pipeline_validation_checks.md)
 - Technical implementation details: [pipeline_architecture_reference.md](pipeline_architecture_reference.md)
 - Methodological/governance commitments: [study_protocol_and_governance.md](study_protocol_and_governance.md)
+- Function-by-function user explanations (UID format): [function_explanations_uid.md](function_explanations_uid.md)
 
 ## Workflow summary diagram
 

@@ -49,9 +49,9 @@ from config.user_orchestrator import (
     STAGE_RULES,
     require_setting,
 )
-from pipeline.additions.resource_usage import ResourceUsageConfig, ResourceUsageTracker
+from pipeline.additions.resource_usage import ResourceUsageEngine
 from pipeline.selection.chunking import chunk_fulltext_sentences, chunk_paper_sentences
-from pipeline.selection.selector import EmbeddingBackend, RelevanceSelector, load_labeled_examples
+from pipeline.selection.selector import EmbeddingBackend, SelectionEngine, load_labeled_examples
 
 # Load environment variables once per process.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -200,7 +200,7 @@ class PaperScreeningPipeline:
         top_k: int | None = None,
         score_threshold: float | None = None,
         batch_size: int | None = None,
-        embedder: EmbeddingBackend | None = None,
+        embedder: EmbeddingBackend | SelectionEngine | None = None,
         examples: list[dict] | None = None,
         sample_size: int | None = None,
         sample_seed: int | None = None,
@@ -248,7 +248,6 @@ class PaperScreeningPipeline:
         self.sample_size = sample_size if sample_size is not None else SCREENING_DEFAULTS.get("sample_size", None)
         self.sample_seed = sample_seed if sample_seed is not None else SCREENING_DEFAULTS.get("sample_seed", None)
         self.sustainability_tracking = sustainability_tracking if sustainability_tracking is not None else SCREENING_DEFAULTS.get("sustainability_tracking", True)
-        self.title_abstract_workers = max(1, int(SCREENING_DEFAULTS.get("title_abstract_workers", 1) or 1))
         self.resource_log_path = Path(resource_log_path) if resource_log_path else Path("output/resource_usage.log")
         self.run_label = run_label
         self.qc_sample_path = Path(qc_sample_path) if qc_sample_path else Path("output/qc_sample_batch.csv")
@@ -299,16 +298,14 @@ class PaperScreeningPipeline:
         self._extraction_criteria = self._extract_criteria_from_prompt(self.prompt_template)
 
         # Resource usage tracker logs tokens and energy for each run.
-        self.resource_tracker = ResourceUsageTracker(
-            ResourceUsageConfig(
-                resource_log_path=self.resource_log_path,
-                enable_tracking=self.sustainability_tracking,
-                enable_codecarbon=codecarbon_enabled if codecarbon_enabled is not None else False,
-                stage=self.stage,
-                qc_sample_path=self.qc_sample_path,
-                run_label=self.run_label,
-                enable_time_savings=enable_time_savings,
-            )
+        self.resource_tracker = ResourceUsageEngine(
+            resource_log_path=self.resource_log_path,
+            enable_tracking=self.sustainability_tracking,
+            enable_codecarbon=codecarbon_enabled if codecarbon_enabled is not None else False,
+            stage=self.stage,
+            qc_sample_path=self.qc_sample_path,
+            run_label=self.run_label,
+            enable_time_savings=enable_time_savings,
         )
 
         self._total_runtime_seconds = 0.0
@@ -322,7 +319,8 @@ class PaperScreeningPipeline:
             )
 
         # Embedding backend for chunk selection; loads examples if not provided.
-        self.embedder = embedder or EmbeddingBackend()
+        self.embedder = embedder if isinstance(embedder, EmbeddingBackend) else None
+        self.selection_engine = embedder if isinstance(embedder, SelectionEngine) else None
         def to_labeled_examples(examples_list):
             # Accepts list[dict] or list[LabeledExample], returns list[LabeledExample]
             labeled = []
@@ -337,7 +335,15 @@ class PaperScreeningPipeline:
             kb_examples = to_labeled_examples(examples)
         else:
             kb_examples = load_labeled_examples(str(self.knowledge_base_path))
-        self.selector = RelevanceSelector(self.embedder, kb_examples)
+
+        if self.selection_engine is None:
+            self.selection_engine = SelectionEngine(
+                examples=kb_examples,
+                batch_size=self.batch_size,
+                embedder=self.embedder,
+            )
+
+        self.selector = self.selection_engine
 
     @staticmethod
     def _sha256_text(value: str) -> str:
@@ -1342,7 +1348,10 @@ class PaperScreeningPipeline:
         return record, token_stats, None
 
     async def _process_paper_async(self, paper: PaperRecord) -> tuple[dict, dict, dict | None]:
-        """Select evidence, call the LLM asynchronously, and build outputs for one paper."""
+        """human readable hint: shared async paper processor used by both async and sync execution paths."""
+
+        if self.stage == "title_abstract":
+            return await self._process_title_abstract_paper_async(paper)
 
         llm_decision = None
         selected: list[dict] = []
@@ -1658,335 +1667,9 @@ class PaperScreeningPipeline:
         return record, token_stats, extraction_payload
 
     def _process_paper(self, paper: PaperRecord) -> tuple[dict, dict, dict | None]:
-        """Select evidence, call the LLM, and build outputs for one paper."""
+        """human readable hint: sync mode reuses the async processing core to avoid duplicate decision logic."""
 
-        llm_decision = None
-        selected: list[dict] = []
-        llm_input = ""
-        extraction_payload = None
-        language_used = str(EMBEDDING_SETTINGS.get("data_language", "en"))
-
-        def _needs_retry(decision: str) -> bool:
-            """Detect obviously incomplete JSON-like LLM outputs."""
-
-            if not isinstance(decision, str):
-                return False
-            if decision.startswith("LLM error"):
-                return False
-            text = decision.strip()
-            if not text:
-                return False
-            if not text.endswith("}"):
-                return True
-            if text.startswith("{"):
-                try:
-                    json.loads(text)
-                except Exception:
-                    return True
-            return False
-
-        preselected = False
-        api_disabled = not use_api
-        chunks: list[dict] = []
-        pdf_text_tokens = 0
-        pdf_visual_tokens = 0
-        estimated_input_tokens = 0
-        prompt_tokens = 0
-        response_tokens = 0
-        embed_tokens = 0
-        embed_usage = None
-        prompt_tokens_source = "estimate"
-        response_tokens_source = "estimate"
-        embed_tokens_source = "estimate"
-        llm_decision_incomplete = False
-        attempt = 0
-        failure_reason: str | None = None
-        failure_type: str | None = None
-        failure_attempt = 0
-        llm_seed = LLM_SETTINGS.get("seed")
-        llm_top_p = float(LLM_SETTINGS.get("top_p", 1.0) or 1.0)
-
-        if self.stage == "title_abstract":
-            # human readable hint: pass full Title+Abstract directly to {data}; no chunking/top-k in this stage.
-            llm_input = self._title_abstract_full_input(paper)
-            prompt_tokens = len((llm_input or "").split())
-            estimated_input_tokens = prompt_tokens
-            selected = [
-                {
-                    "paper_id": paper.paper_id,
-                    "chunk_id": f"{paper.paper_id}::full_input::0000",
-                    "text": llm_input,
-                    "kind": "full_input",
-                    "page_start": None,
-                    "page_end": None,
-                    "line_start": None,
-                    "line_end": None,
-                }
-            ]
-
-        if self.stage == "data_extraction":
-            preselected_chunks = self._load_selected_chunks_from_input(paper)
-            if preselected_chunks:
-                selected = preselected_chunks
-                preselected = True
-                llm_input = self._format_chunks_for_prompt(paper, selected)
-                prompt_tokens = len((llm_input or "").split())
-                estimated_input_tokens = prompt_tokens
-
-        if not preselected:
-            if self.stage != "title_abstract":
-                chunks, pdf_text_tokens, pdf_visual_tokens, language_used = self._prepare_chunks(paper)
-                if self.stage in {"full_text", "data_extraction"} and not chunks:
-                    llm_decision = "LLM skipped: PDF missing or unreadable; see error log."
-                    estimated_input_tokens = pdf_text_tokens + pdf_visual_tokens
-                    selected = []
-                    self._log_error(
-                        paper.paper_id,
-                        f"LLM skipped: no chunks produced (PDF missing or unreadable). folder={paper.metadata.get('folder_path')}",
-                        error_type="no_chunks",
-                        pdf_text_tokens=pdf_text_tokens,
-                        pdf_visual_tokens=pdf_visual_tokens,
-                        total_estimated_tokens=estimated_input_tokens,
-                    )
-                elif not chunks:
-                    llm_decision = "LLM skipped: no evidence chunks available."
-                    self._log_error(
-                        paper.paper_id,
-                        "LLM skipped: no evidence chunks available after preprocessing.",
-                        error_type="no_chunks",
-                        pdf_text_tokens=pdf_text_tokens,
-                        pdf_visual_tokens=pdf_visual_tokens,
-                        total_estimated_tokens=estimated_input_tokens,
-                    )
-                    selected = []
-                else:
-                    selected, _, embed_usage = self.selector.select(
-                        chunks, top_k=self.top_k, score_threshold=self.score_threshold
-                    )
-
-                if embed_usage:
-                    embed_tokens = int(
-                        embed_usage.get("prompt_tokens")
-                        or embed_usage.get("input_tokens")
-                        or embed_usage.get("total_tokens")
-                        or 0
-                    )
-                    embed_tokens_source = "api"
-                else:
-                    embed_tokens = int(sum(len((c.get("text") or "").split()) for c in chunks) * TOKENS_PER_WORD)
-
-                llm_input = self._format_chunks_for_prompt(paper, selected)
-                prompt_tokens = len((llm_input or "").split())
-                estimated_input_tokens = prompt_tokens + pdf_text_tokens + pdf_visual_tokens
-
-        if llm_decision is None and not selected:
-            llm_decision = "LLM skipped: no evidence available after selection."
-            self._log_error(
-                paper.paper_id,
-                "LLM skipped: empty evidence set (title/abstract or PDF missing).",
-                error_type="no_evidence",
-                total_estimated_tokens=estimated_input_tokens,
-            )
-
-        if llm_decision is None:
-            if estimated_input_tokens > CONTEXT_WINDOW:
-                llm_decision = (
-                    f"LLM skipped: estimated input {estimated_input_tokens} tokens exceeds context window {CONTEXT_WINDOW}."
-                )
-                self._log_overflow(paper.paper_id, estimated_input_tokens)
-            elif api_disabled:
-                llm_decision = "LLM disabled: use_api=False; no API call made."
-                prompt_tokens = len((llm_input or "").split())
-                response_tokens = 0
-                prompt_tokens_source = "estimate"
-                response_tokens_source = "estimate"
-                llm_decision_incomplete = False
-            else:
-                screening_stage = self.stage in {"title_abstract", "full_text"}
-                max_attempts = self._validation_max_retries if screening_stage else 2
-                model_name = getattr(getattr(self, "llm_client", None), "model", None) or gpustack_model
-                for attempt in range(1, max_attempts + 1):
-                    current_decision, llm_usage = self._call_llm(llm_input)
-
-                    if llm_usage:
-                        prompt_tokens = int(
-                            llm_usage.get("prompt_tokens")
-                            or llm_usage.get("input_tokens")
-                            or llm_usage.get("total_tokens")
-                            or prompt_tokens
-                        )
-                        response_tokens = int(
-                            llm_usage.get("completion_tokens")
-                            or llm_usage.get("output_tokens")
-                            or llm_usage.get("response_tokens")
-                            or 0
-                        )
-                        prompt_tokens_source = "api"
-                        response_tokens_source = "api"
-
-                    if not current_decision:
-                        if attempt == max_attempts:
-                            failure_reason = "LLM returned no decision after retries."
-                            failure_type = "llm_no_response"
-                            failure_attempt = attempt
-                        continue
-
-                    llm_decision = current_decision
-
-                    if isinstance(llm_decision, str) and llm_decision.startswith("LLM error"):
-                        llm_decision_incomplete = True
-                        failure_reason = llm_decision
-                        failure_type = "llm_error"
-                        failure_attempt = attempt
-                        print(
-                            f"[error] chat attempt {attempt}/{max_attempts} failed for model='{model_name}': {llm_decision}",
-                            file=sys.stderr,
-                        )
-                        if attempt == max_attempts:
-                            break
-                        llm_decision = None
-                        continue
-
-                    if screening_stage:
-                        llm_decision = self._sanitize_screening_decision(llm_decision, paper)
-                        try:
-                            validated_payload = self._validate_screening_decision(llm_decision or "")
-                            llm_decision = json.dumps(validated_payload, ensure_ascii=False)
-                            llm_decision_incomplete = False
-                            failure_type = None
-                            failure_reason = None
-                            failure_attempt = attempt
-                            break
-                        except ValidationError as exc:
-                            llm_decision_incomplete = True
-                            failure_reason = f"Schema validation failed: {exc}"
-                            failure_type = "llm_validation_error"
-                            failure_attempt = attempt
-                            if attempt == max_attempts:
-                                break
-                            llm_decision = None
-                            continue
-
-                    if _needs_retry(llm_decision):
-                        llm_decision_incomplete = True
-                        if attempt < max_attempts:
-                            if not self.quiet:
-                                print(
-                                    f"[warn] chat attempt {attempt}/{max_attempts} incomplete; retrying for paper {paper.paper_id}"
-                                )
-                            llm_decision = None
-                            continue
-                        near_token_limit = bool(response_tokens and response_tokens >= int(0.9 * llm_max_tokens))
-                        if near_token_limit:
-                            failure_reason = (
-                                f"LLM decision likely truncated by max_tokens={llm_max_tokens}; reduce prompt payload or increase max_tokens."
-                            )
-                            failure_type = "llm_output_token_limit"
-                        else:
-                            failure_reason = "LLM decision incomplete after retry; output may be truncated."
-                            failure_type = "llm_incomplete"
-                        failure_attempt = attempt
-                        print(
-                            f"[error] chat attempt {attempt}/{max_attempts} failed for model='{model_name}': output incomplete; logged for re-screen",
-                            file=sys.stderr,
-                        )
-                    else:
-                        llm_decision_incomplete = False
-                        failure_type = None
-                        failure_reason = None
-                        failure_attempt = attempt
-                        break
-
-                if failure_type is None and llm_decision and response_tokens == 0:
-                    response_tokens = len((llm_decision or "").split())
-                if failure_type is None and llm_decision and prompt_tokens == 0:
-                    prompt_tokens = len((llm_input or "").split())
-
-        if llm_decision and response_tokens == 0:
-            response_tokens = len((llm_decision or "").split())
-
-        if self.stage in {"title_abstract", "full_text"} and not isinstance(llm_decision, str):
-            llm_decision = None
-
-        if self.stage in {"title_abstract", "full_text"} and llm_decision is not None:
-            llm_decision = self._sanitize_screening_decision(llm_decision, paper)
-
-        context_input_hash = self._sha256_text(llm_input)
-        prompt_template_hash = self._sha256_text(self.prompt_template)
-        full_prompt_hash = self._sha256_text(self.prompt_template.replace("{data}", llm_input or ""))
-
-        if failure_type is None and not api_disabled and self._decision_missing_fields(llm_decision):
-            llm_decision_incomplete = True
-            near_token_limit = bool(response_tokens and response_tokens >= int(0.9 * llm_max_tokens))
-            if near_token_limit:
-                failure_reason = (
-                    f"LLM decision missing required fields likely due to output truncation at max_tokens={llm_max_tokens}."
-                )
-                failure_type = "llm_output_token_limit"
-            else:
-                failure_reason = (
-                    "LLM decision missing justification or exclusion_reason_category after retries; flagged for re-screen."
-                )
-                failure_type = "llm_missing_fields"
-            failure_attempt = attempt or 2
-
-        if failure_type:
-            self._log_error(
-                paper.paper_id,
-                failure_reason or "LLM decision incomplete after retries.",
-                error_type=failure_type,
-                attempt=failure_attempt or None,
-                prompt_tokens=prompt_tokens,
-                response_tokens=response_tokens,
-                embedding_tokens=embed_tokens,
-                pdf_text_tokens=pdf_text_tokens,
-                pdf_visual_tokens=pdf_visual_tokens,
-                total_estimated_tokens=estimated_input_tokens,
-            )
-
-        total_chunks = len(chunks) if chunks else len(selected)
-        output_metadata = paper.metadata
-        if self.stage in {"title_abstract", "full_text"}:
-            output_metadata = self._metadata_without_authors(output_metadata)
-
-        record = {
-            "paper_id": paper.paper_id,
-            "selected_chunks": selected,
-            "llm_decision": llm_decision,
-            "diagnostics": {
-                "total_chunks": total_chunks,
-                "selected_count": len(selected),
-                "top_k": self.top_k,
-                "score_threshold": self.score_threshold,
-                "preselected_chunks": preselected,
-                "stage": self.stage,
-                "llm_decision_incomplete": llm_decision_incomplete,
-                "language_used": language_used,
-                "llm_input_sha256": context_input_hash,
-                "prompt_template_sha256": prompt_template_hash,
-                "full_prompt_sha256": full_prompt_hash,
-                "llm_seed": llm_seed,
-                "llm_top_p": llm_top_p,
-            },
-            "metadata": output_metadata,
-        }
-
-        if self.stage == "data_extraction":
-            extraction_payload = self._build_extraction_payload(paper, llm_decision)
-            self._write_data_extraction_metadata(paper, selected, llm_decision, extraction_payload)
-
-        token_stats = {
-            "prompt_tokens": prompt_tokens,
-            "prompt_tokens_source": prompt_tokens_source,
-            "response_tokens": response_tokens,
-            "response_tokens_source": response_tokens_source,
-            "embedding_tokens": embed_tokens,
-            "embedding_tokens_source": embed_tokens_source,
-            "pdf_text_tokens": pdf_text_tokens,
-            "pdf_visual_tokens": pdf_visual_tokens,
-        }
-
-        return record, token_stats, extraction_payload
+        return asyncio.run(self._process_paper_async(paper))
 
     def _format_chunks_for_prompt(self, paper: PaperRecord, chunks: list[dict]) -> str:
         """Format selected chunks into a readable prompt section."""

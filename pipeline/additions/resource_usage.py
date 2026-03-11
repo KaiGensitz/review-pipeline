@@ -601,6 +601,78 @@ class ResourceUsageTracker:
 		return _count_qc_papers(self.qc_sample_path)
 
 
+class ResourceUsageEngine:
+	"""human readable hint: dominant class for this script; it exposes one stable API for run/resource tracking."""
+
+	def __init__(
+		self,
+		resource_log_path: Path,
+		enable_tracking: bool = True,
+		enable_codecarbon: bool = True,
+		stage: str = "title_abstract",
+		qc_sample_path: Path | None = None,
+		qc_paper_count: int | None = None,
+		run_label: str = "run",
+		enable_time_savings: bool = False,
+	) -> None:
+		"""human readable hint: __init__ captures all run-level tracking parameters in one visible constructor."""
+
+		self.config = ResourceUsageConfig(
+			resource_log_path=resource_log_path,
+			enable_tracking=enable_tracking,
+			enable_codecarbon=enable_codecarbon,
+			stage=stage,
+			qc_sample_path=qc_sample_path,
+			qc_paper_count=qc_paper_count,
+			run_label=run_label,
+			enable_time_savings=enable_time_savings,
+		)
+		self._tracker = ResourceUsageTracker(self.config)
+
+	def start_run(self) -> None:
+		"""human readable hint: start CodeCarbon/resource tracking for the current run."""
+
+		self._tracker.start_run()
+
+	def set_qc_count(self, qc_count: int) -> None:
+		"""human readable hint: set QC paper count once so the tracker does not re-read QC CSV files."""
+
+		self._tracker.set_qc_count(qc_count)
+
+	def log_paper(
+		self,
+		paper_id: str,
+		prompt_tokens: int,
+		response_tokens: int,
+		pdf_text_tokens: int = 0,
+		pdf_visual_tokens: int = 0,
+		embedding_tokens: int = 0,
+		prompt_tokens_source: str = "estimate",
+		response_tokens_source: str = "estimate",
+		embedding_tokens_source: str = "estimate",
+		paper_seconds: float | None = None,
+	) -> None:
+		"""human readable hint: log per-paper token/runtime metrics in the shared run tracker."""
+
+		self._tracker.log_paper(
+			paper_id=paper_id,
+			prompt_tokens=prompt_tokens,
+			response_tokens=response_tokens,
+			pdf_text_tokens=pdf_text_tokens,
+			pdf_visual_tokens=pdf_visual_tokens,
+			embedding_tokens=embedding_tokens,
+			prompt_tokens_source=prompt_tokens_source,
+			response_tokens_source=response_tokens_source,
+			embedding_tokens_source=embedding_tokens_source,
+			paper_seconds=paper_seconds,
+		)
+
+	def stop_run(self, total_runtime_seconds: float, paper_count: int) -> None:
+		"""human readable hint: stop tracking and write final TOTAL summary lines."""
+
+		self._tracker.stop_run(total_runtime_seconds=total_runtime_seconds, paper_count=paper_count)
+
+
 def backfill_time_savings(resource_log_path: Path, stage: str, qc_sample_path: Path | None) -> bool:
 	"""Recompute human-time fields in an existing resource_usage log after minutes are confirmed.
 

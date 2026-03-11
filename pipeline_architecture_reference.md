@@ -18,6 +18,8 @@ Advanced technical reference for operators and maintainers.
 - `title_abstract` screening executes via asyncio with bounded request concurrency.
 - Transient API failures (rate limit/timeout/5xx) use exponential backoff with jitter.
 - Screening decisions are validated via a strict Pydantic schema before being accepted.
+- Sync execution path reuses the same async paper-processing core to reduce duplicate decision logic.
+- Relevance selection skips embedding/scoring for always-included chunk kinds (for example title chunks), reducing avoidable embedding workload.
 
 ## Pipeline behavior by stage
 
@@ -34,6 +36,8 @@ Placeholder behavior (all stages):
 
 - LLM API client wrapper: `pipeline/integrations/llm_client.py`
 - PDF/text/language utilities used by selection and pipeline: `pipeline/integrations/embedding_utils.py`
+- Dominant selector API: `pipeline/selection/selector.py` via `SelectionEngine`
+- Dominant resource-tracking API: `pipeline/additions/resource_usage.py` via `ResourceUsageEngine`
 
 ## Deterministic QC model
 

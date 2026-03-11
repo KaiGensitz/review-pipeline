@@ -192,20 +192,32 @@ class RelevanceSelector:
 		top_k: int | None,
 		score_threshold: float | None = None,
 	) -> tuple[list[dict], list[float], dict | None]:
-		"""Return selected chunks and their scores based on relevance."""
+		"""human readable hint: score only candidate chunks; always-include kinds bypass embedding for speed."""
 
-		texts = [chunk["text"] for chunk in chunks]
-		embeddings, usage = self.embedder.embed_texts(texts)
-		scores = self._score_vectors(embeddings)
+		always_chunks = [chunk for chunk in chunks if chunk.get("kind") in self.always_include_kinds]
+		candidate_chunks = [chunk for chunk in chunks if chunk.get("kind") not in self.always_include_kinds]
 
-		enriched = []
-		for chunk, score in zip(chunks, scores):
+		usage = None
+		scores_by_chunk_id: dict[str, float] = {}
+		if candidate_chunks:
+			texts = [chunk["text"] for chunk in candidate_chunks]
+			embeddings, usage = self.embedder.embed_texts(texts)
+			candidate_scores = self._score_vectors(embeddings)
+			for chunk, score in zip(candidate_chunks, candidate_scores):
+				scores_by_chunk_id[str(chunk.get("chunk_id", ""))] = float(score)
+
+		enriched: list[dict] = []
+		for chunk in chunks:
 			item = dict(chunk)
-			item["score"] = score
+			chunk_id = str(item.get("chunk_id", ""))
+			if chunk.get("kind") in self.always_include_kinds:
+				item["score"] = float(item.get("score", 0.0) or 0.0)
+			else:
+				item["score"] = float(scores_by_chunk_id.get(chunk_id, 0.0))
 			enriched.append(item)
 
 		always = [c for c in enriched if c.get("kind") in self.always_include_kinds]
-		remaining = [c for c in enriched if c not in always]
+		remaining = [c for c in enriched if c.get("kind") not in self.always_include_kinds]
 		remaining.sort(key=lambda item: item["score"], reverse=True)
 
 		if score_threshold is not None:
@@ -229,4 +241,38 @@ class RelevanceSelector:
 			)
 		)
 
-		return selected, scores, usage
+		scores_out = [float(item.get("score", 0.0)) for item in enriched]
+		return selected, scores_out, usage
+
+
+class SelectionEngine:
+	"""human readable hint: dominant selector class that owns embedding and relevance-scoring setup for one script."""
+
+	def __init__(
+		self,
+		examples: list[LabeledExample],
+		batch_size: int = 32,
+		always_include_kinds: typing.Iterable[str] = ("title",),
+		embedder: EmbeddingBackend | None = None,
+	) -> None:
+		"""human readable hint: __init__ stores examples and prepares the underlying selector with one consistent interface."""
+
+		self.examples = examples
+		self.batch_size = batch_size
+		self.always_include_kinds = tuple(always_include_kinds)
+		self.embedder = embedder or EmbeddingBackend(batch_size=batch_size)
+		self._selector = RelevanceSelector(
+			embedder=self.embedder,
+			examples=self.examples,
+			always_include_kinds=self.always_include_kinds,
+		)
+
+	def select(
+		self,
+		chunks: list[dict],
+		top_k: int | None,
+		score_threshold: float | None = None,
+	) -> tuple[list[dict], list[float], dict | None]:
+		"""human readable hint: return selected chunks and scores using the configured embedding+relevance backend."""
+
+		return self._selector.select(chunks=chunks, top_k=top_k, score_threshold=score_threshold)

@@ -144,7 +144,7 @@ python -m pipeline.additions.input_trace --paper-id <ID> --stage <stage> --show-
 
 ## 11) Throughput tips (handling thousands of papers)
 - Keep `top_k` modest (e.g., 6–10) and `chunk_size` moderately sized (e.g., 20-25) for `full_text`/`data_extraction` to cut embedding/LLM load (`title_abstract` now uses full Title+Abstract directly).
-- For large `title_abstract` runs, you can set `SCREENING_DEFAULTS["title_abstract_workers"]` in [config/user_orchestrator.py](config/user_orchestrator.py) to `2-4` for concurrent API calls.
+- For large `title_abstract` runs, tune async throughput with `LLM_SETTINGS["async_max_concurrency"]` and retry/backoff parameters in [config/user_orchestrator.py](config/user_orchestrator.py).
 - Use QC-only first, then full run; each run writes new timestamped outputs—no need to merge manually.
 - Large PDFs: keep under a practical size budget; the reader now supports optional page caps (configurable in code if needed).
 - Ensure the latest CSV per stage is present; the tool auto-picks the newest match per pattern.

@@ -30,6 +30,25 @@ STAGE_KB_DEFAULTS = {
     "data_extraction": REPO_ROOT / "knowledge-base" / "data_extraction_pos-neg_examples.csv",
 }
 
+
+class StagePipelineRunner:
+    """human readable hint: one-class stage runner that centralizes stage defaults and the run entrypoint."""
+
+    def __init__(self, stage: str = CURRENT_STAGE, csv_dir: str | None = None) -> None:
+        """human readable hint: __init__ stores the stage and input folder used to start screening."""
+
+        self.stage = stage
+        self.csv_dir = csv_dir or PATH_SETTINGS.get("csv_dir")
+
+    def run(self, **kwargs):
+        """human readable hint: execute one stage run while allowing explicit overrides from callers."""
+
+        if "stage" not in kwargs:
+            kwargs["stage"] = self.stage
+        if "csv_dir" not in kwargs and self.csv_dir is not None:
+            kwargs["csv_dir"] = self.csv_dir
+        return run_pipeline(**kwargs)
+
 def _timestamp_label() -> str:
     """Create a timestamp string for output filenames.
 

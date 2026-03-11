@@ -254,68 +254,82 @@ def _parse_args() -> argparse.Namespace:
     return args
 
 
+class InputTraceRunner:
+    """human readable hint: one-class trace utility that reconstructs one paper input and verifies its hashes."""
+
+    def __init__(self, stage: str = CURRENT_STAGE) -> None:
+        """human readable hint: __init__ stores the default stage used when CLI arguments omit --stage."""
+
+        self.stage = stage
+
+    def run(self, args: argparse.Namespace | None = None) -> None:
+        """human readable hint: execute the full trace workflow from eligibility record lookup to report writing."""
+
+        args = args or _parse_args()
+        stage = str(args.stage).strip() if getattr(args, "stage", None) else self.stage
+
+        if stage not in {"title_abstract", "full_text", "data_extraction"}:
+            raise ValueError(f"Unsupported stage '{stage}'.")
+
+        eligibility_file = Path(args.eligibility_file) if args.eligibility_file else _latest_eligibility_file(stage)
+        if not eligibility_file.exists():
+            raise FileNotFoundError(f"Eligibility file not found: {eligibility_file}")
+
+        record = _find_record(eligibility_file, args.paper_id, args.input_hash)
+        paper_id = str(record.get("paper_id", "")).strip()
+        diagnostics = record.get("diagnostics", {}) if isinstance(record.get("diagnostics"), dict) else {}
+
+        stored_context_hash = str(diagnostics.get("llm_input_sha256", "")).strip().lower()
+        stored_full_prompt_hash = str(diagnostics.get("full_prompt_sha256", "")).strip().lower()
+        csv_root = Path(PATH_SETTINGS.get("csv_dir", "input"))
+
+        context_text = _reconstruct_context(stage, paper_id, csv_root)
+        recomputed_context_hash = _sha256_text(context_text)
+
+        prompt_template = _load_prompt_template(stage)
+        full_prompt = prompt_template.replace("{data}", context_text)
+        recomputed_full_prompt_hash = _sha256_text(full_prompt)
+
+        context_ok = bool(stored_context_hash) and stored_context_hash == recomputed_context_hash
+        full_prompt_ok = bool(stored_full_prompt_hash) and stored_full_prompt_hash == recomputed_full_prompt_hash
+
+        stage_root = Path(PATH_SETTINGS.get("output_root", "output")) / stage
+        ts = datetime.now().strftime("%Y%m%d_%H-%M-%S")
+        default_name = f"{stage}_{paper_id}_input_trace_{ts}.txt"
+        output_path = Path(args.output) if args.output else (stage_root / default_name)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        lines: list[str] = [
+            "INPUT TRACE REPORT",
+            f"stage: {stage}",
+            f"paper_id: {paper_id}",
+            f"eligibility_file: {eligibility_file}",
+            f"stored_llm_input_sha256: {stored_context_hash or 'NA'}",
+            f"recomputed_llm_input_sha256: {recomputed_context_hash}",
+            f"context_hash_match: {context_ok}",
+            f"stored_full_prompt_sha256: {stored_full_prompt_hash or 'NA'}",
+            f"recomputed_full_prompt_sha256: {recomputed_full_prompt_hash}",
+            f"full_prompt_hash_match: {full_prompt_ok}",
+            "",
+            "=== Reconstructed LLM Input Context ===",
+            context_text,
+        ]
+
+        if args.show_full_prompt:
+            lines.extend(["", "=== Reconstructed Full Prompt ===", full_prompt])
+
+        output_path.write_text("\n".join(lines), encoding="utf-8")
+
+        print("Input trace completed.")
+        print(f"- report: {output_path}")
+        print(f"- context hash match: {context_ok}")
+        print(f"- full prompt hash match: {full_prompt_ok}")
+
+
 def run_trace() -> None:
-    """human readable hint: recover human-readable input text and verify exact-hash identity."""
+    """Compatibility wrapper for direct module execution."""
 
-    args = _parse_args()
-    stage = str(args.stage).strip()
-
-    if stage not in {"title_abstract", "full_text", "data_extraction"}:
-        raise ValueError(f"Unsupported stage '{stage}'.")
-
-    eligibility_file = Path(args.eligibility_file) if args.eligibility_file else _latest_eligibility_file(stage)
-    if not eligibility_file.exists():
-        raise FileNotFoundError(f"Eligibility file not found: {eligibility_file}")
-
-    record = _find_record(eligibility_file, args.paper_id, args.input_hash)
-    paper_id = str(record.get("paper_id", "")).strip()
-    diagnostics = record.get("diagnostics", {}) if isinstance(record.get("diagnostics"), dict) else {}
-
-    stored_context_hash = str(diagnostics.get("llm_input_sha256", "")).strip().lower()
-    stored_full_prompt_hash = str(diagnostics.get("full_prompt_sha256", "")).strip().lower()
-    csv_root = Path(PATH_SETTINGS.get("csv_dir", "input"))
-
-    context_text = _reconstruct_context(stage, paper_id, csv_root)
-    recomputed_context_hash = _sha256_text(context_text)
-
-    prompt_template = _load_prompt_template(stage)
-    full_prompt = prompt_template.replace("{data}", context_text)
-    recomputed_full_prompt_hash = _sha256_text(full_prompt)
-
-    context_ok = bool(stored_context_hash) and stored_context_hash == recomputed_context_hash
-    full_prompt_ok = bool(stored_full_prompt_hash) and stored_full_prompt_hash == recomputed_full_prompt_hash
-
-    stage_root = Path(PATH_SETTINGS.get("output_root", "output")) / stage
-    ts = datetime.now().strftime("%Y%m%d_%H-%M-%S")
-    default_name = f"{stage}_{paper_id}_input_trace_{ts}.txt"
-    output_path = Path(args.output) if args.output else (stage_root / default_name)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    lines: list[str] = [
-        "INPUT TRACE REPORT",
-        f"stage: {stage}",
-        f"paper_id: {paper_id}",
-        f"eligibility_file: {eligibility_file}",
-        f"stored_llm_input_sha256: {stored_context_hash or 'NA'}",
-        f"recomputed_llm_input_sha256: {recomputed_context_hash}",
-        f"context_hash_match: {context_ok}",
-        f"stored_full_prompt_sha256: {stored_full_prompt_hash or 'NA'}",
-        f"recomputed_full_prompt_sha256: {recomputed_full_prompt_hash}",
-        f"full_prompt_hash_match: {full_prompt_ok}",
-        "",
-        "=== Reconstructed LLM Input Context ===",
-        context_text,
-    ]
-
-    if args.show_full_prompt:
-        lines.extend(["", "=== Reconstructed Full Prompt ===", full_prompt])
-
-    output_path.write_text("\n".join(lines), encoding="utf-8")
-
-    print("Input trace completed.")
-    print(f"- report: {output_path}")
-    print(f"- context hash match: {context_ok}")
-    print(f"- full prompt hash match: {full_prompt_ok}")
+    InputTraceRunner().run()
 
 
 if __name__ == "__main__":

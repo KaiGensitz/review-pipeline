@@ -1329,144 +1329,152 @@ def _run_qc_loop(stage: str, sample_rate: float, quiet: bool = False) -> bool:
         return False
 
 
-def main() -> None:
-    """Run the pipeline for the selected stage with safety checks.
+class MainWorkflow:
+    """human readable hint: one-class orchestrator for terminal flow, retries, QC gating, and stage execution."""
 
-    Note: this is the main entry point; it handles QC → validation → full run.
-    """
-    # human readable hint: stop immediately if the API key is missing to avoid wasted setup time.
-    if not LLM_API_KEY:
-        print("[error] LLM_API_KEY is empty. Set it in .env or config/user_orchestrator.py before running.")
-        return
+    def __init__(self) -> None:
+        """human readable hint: __init__ keeps the key runtime attributes visible in one place."""
 
-    # Note: QC is always required for screening; this script guides the QC → validation → full run loop.
-    stage = CURRENT_STAGE
-    csv_dir = Path(PATH_SETTINGS["csv_dir"])
-    sample_rate = QC_SAMPLE_RATE
+        self.stage = CURRENT_STAGE
+        self.csv_dir = Path(PATH_SETTINGS["csv_dir"])
+        self.sample_rate = QC_SAMPLE_RATE
 
-    print(f"[main] Stage: {stage} | Model: {LLM_MODEL}")
+    def run(self) -> None:
+        """Run the pipeline for the selected stage with safety checks."""
 
-    if stage not in STAGE_RULES:
-        print(f"[error] Unknown CURRENT_STAGE='{stage}'. Choose from {sorted(STAGE_RULES)}.")
-        return
-
-    if not _ensure_csv_inputs(csv_dir):
-        return
-
-    _ensure_nltk_tokenizers()
-
-    if not sys.stdin.isatty():
-        print("[error] QC confirmation requires an interactive terminal. Rerun in an interactive session.")
-        return
-
-    # Study tags must be confirmed once before any screening or validation.
-    if not _prompt_yes_no("[qc] Are study tags the same since the last run? [y/n]: "):
-        print("[qc] Update STUDY_TAGS_INCLUDE/STUDY_TAGS_IGNORE in config/user_orchestrator.py.")
-        return
-
-    # human readable hint: prioritize any pending retry CSVs before a new screening run.
-    retry_csv = _latest_retry_csv(stage)
-    if retry_csv:
-        pending_ids = _retry_csv_needed(retry_csv, stage)
-        if not pending_ids:
-            print(f"[retry] Retry CSV {retry_csv.name} already has complete decisions; skipping retry prompt.")
-        else:
-            hinted = _infer_run_label_from_retry_csv(retry_csv, stage)
-            run_label = _first_available_run_label(stage, hinted)
-            if not run_label:
-                print("[retry] Base outputs missing for both qc_sample and remaining_sample; run a base screening first.")
-            else:
-                print(f"[retry] Detected retry CSV at {retry_csv} with {len(pending_ids)} pending paper(s). Re-screen before the new run?")
-                if _prompt_yes_no("[retry] Run pending retry CSV first? [y/n]: "):
-                    attempt_map: dict[str, int] = {}
-                    attempt_for_run = _next_retry_attempt(stage, run_label)
-                    for pid in pending_ids:
-                        attempt_map[pid] = attempt_for_run
-                    # human readable hint: narrow the retry CSV to only the pending IDs so we do not re-screen resolved papers.
-                    filtered_retry_csv = _write_retry_csv(retry_csv, retry_csv.parent, pending_ids, stage, run_label)
-                    if not filtered_retry_csv:
-                        print("[retry] Could not build a filtered retry CSV; aborting retry step.")
-                        return
-                    retry_csv = filtered_retry_csv
-                    retry_out = _retry_output_paths(stage, run_label, attempt_for_run)
-                    _run_pipeline_guarded(
-                        stage=stage,
-                        csv_dir=str(retry_csv.parent),
-                        qc_enabled=False,
-                        confirm_sampling=False,
-                        quiet=False,
-                        eligibility_output=retry_out.get("eligibility"),
-                        chunks_output=retry_out.get("chunks"),
-                        text_output=retry_out.get("text"),
-                        error_log=retry_out.get("error"),
-                        resource_log=retry_out.get("resource"),
-                        run_label_override=run_label,
-                    )
-                    artifact = _last_artifact_dict()
-                    emissions_info = _post_run_updates(stage, artifact, attempt_for_run)
-                    _record_retry_manifest(artifact, stage, attempt_map, retry_csv, emissions_info)
-                    manifest_path = Path(PATH_SETTINGS.get("output_root", "output")) / stage / f"{stage}_retry_manifest.jsonl"
-                    print(f"[retry] Outputs kept separate; manifest updated at {manifest_path}.")
-                    _prompt_retry_if_needed(stage, artifact)
-
-                    if not _retry_csv_needed(retry_csv, stage):
-                        _archive_retry_csv(retry_csv)
-
-    rule = STAGE_RULES[stage]
-    for pattern in rule["screen_patterns"]:
-        if not _require_pattern(csv_dir, pattern, f"{stage} required CSV export", stage=stage):
+        if not LLM_API_KEY:
+            print("[error] LLM_API_KEY is empty. Set it in .env or config/user_orchestrator.py before running.")
             return
 
-    if stage == "title_abstract":
+        stage = self.stage
+        csv_dir = self.csv_dir
+        sample_rate = self.sample_rate
+
+        print(f"[main] Stage: {stage} | Model: {LLM_MODEL}")
+
+        if stage not in STAGE_RULES:
+            print(f"[error] Unknown CURRENT_STAGE='{stage}'. Choose from {sorted(STAGE_RULES)}.")
+            return
+
+        if not _ensure_csv_inputs(csv_dir):
+            return
+
+        _ensure_nltk_tokenizers()
+
+        if not sys.stdin.isatty():
+            print("[error] QC confirmation requires an interactive terminal. Rerun in an interactive session.")
+            return
+
+        if not _prompt_yes_no("[qc] Are study tags the same since the last run? [y/n]: "):
+            print("[qc] Update STUDY_TAGS_INCLUDE/STUDY_TAGS_IGNORE in config/user_orchestrator.py.")
+            return
+
+        retry_csv = _latest_retry_csv(stage)
+        if retry_csv:
+            pending_ids = _retry_csv_needed(retry_csv, stage)
+            if not pending_ids:
+                print(f"[retry] Retry CSV {retry_csv.name} already has complete decisions; skipping retry prompt.")
+            else:
+                hinted = _infer_run_label_from_retry_csv(retry_csv, stage)
+                run_label = _first_available_run_label(stage, hinted)
+                if not run_label:
+                    print("[retry] Base outputs missing for both qc_sample and remaining_sample; run a base screening first.")
+                else:
+                    print(f"[retry] Detected retry CSV at {retry_csv} with {len(pending_ids)} pending paper(s). Re-screen before the new run?")
+                    if _prompt_yes_no("[retry] Run pending retry CSV first? [y/n]: "):
+                        attempt_map: dict[str, int] = {}
+                        attempt_for_run = _next_retry_attempt(stage, run_label)
+                        for pid in pending_ids:
+                            attempt_map[pid] = attempt_for_run
+                        filtered_retry_csv = _write_retry_csv(retry_csv, retry_csv.parent, pending_ids, stage, run_label)
+                        if not filtered_retry_csv:
+                            print("[retry] Could not build a filtered retry CSV; aborting retry step.")
+                            return
+                        retry_csv = filtered_retry_csv
+                        retry_out = _retry_output_paths(stage, run_label, attempt_for_run)
+                        _run_pipeline_guarded(
+                            stage=stage,
+                            csv_dir=str(retry_csv.parent),
+                            qc_enabled=False,
+                            confirm_sampling=False,
+                            quiet=False,
+                            eligibility_output=retry_out.get("eligibility"),
+                            chunks_output=retry_out.get("chunks"),
+                            text_output=retry_out.get("text"),
+                            error_log=retry_out.get("error"),
+                            resource_log=retry_out.get("resource"),
+                            run_label_override=run_label,
+                        )
+                        artifact = _last_artifact_dict()
+                        emissions_info = _post_run_updates(stage, artifact, attempt_for_run)
+                        _record_retry_manifest(artifact, stage, attempt_map, retry_csv, emissions_info)
+                        manifest_path = Path(PATH_SETTINGS.get("output_root", "output")) / stage / f"{stage}_retry_manifest.jsonl"
+                        print(f"[retry] Outputs kept separate; manifest updated at {manifest_path}.")
+                        _prompt_retry_if_needed(stage, artifact)
+
+                        if not _retry_csv_needed(retry_csv, stage):
+                            _archive_retry_csv(retry_csv)
+
+        rule = STAGE_RULES[stage]
+        for pattern in rule["screen_patterns"]:
+            if not _require_pattern(csv_dir, pattern, f"{stage} required CSV export", stage=stage):
+                return
+
+        if stage == "title_abstract":
+            if QC_ENABLED:
+                if _run_qc_loop(stage, sample_rate, quiet=False):
+                    _run_pipeline_guarded(stage=stage, confirm_sampling=True, sample_rate=sample_rate, qc_only=False, qc_enabled=False)
+                    _post_run_updates(stage, _last_artifact_dict(), 0)
+                    _prompt_retry_if_needed(stage, _last_artifact_dict())
+                return
+            _run_pipeline_guarded(stage=stage, confirm_sampling=True, sample_rate=sample_rate, qc_only=False, qc_enabled=False)
+            _post_run_updates(stage, _last_artifact_dict(), 0)
+            _prompt_retry_if_needed(stage, _last_artifact_dict())
+            return
+
         if QC_ENABLED:
+            print(f"[main] Preparing per-paper folders for {stage} (no screening in this step)...")
+            _run_pipeline_guarded(stage=stage, split_only=True, quiet=True, mark_failure=False)
+
+            if stage == "data_extraction":
+                full_text_dir = csv_dir / "per_paper_full_text"
+                if not full_text_dir.exists():
+                    print(
+                        f"[warning] per_paper_full_text missing at {full_text_dir}. "
+                        "Run the full_text stage first (or rerun after creating full_text folders)."
+                    )
+                    return
+
+            paper_dir = csv_dir / rule["pdf_dir"]
+            if not paper_dir.exists():
+                print(f"[setup] Expected per-paper folders at {paper_dir}. Rerun after generating CSV exports.")
+                return
+
+            missing = _missing_pdf_folders(paper_dir)
+            if missing:
+                print(
+                    f"[setup] PDFs missing for {len(missing)} folder(s) in {rule['pdf_dir']}."
+                    " Screening will proceed; missing folders will be skipped and logged."
+                )
+                for name in missing:
+                    print(f"  - {name}")
+
             if _run_qc_loop(stage, sample_rate, quiet=False):
-                _run_pipeline_guarded(stage=stage, confirm_sampling=True, sample_rate=sample_rate, qc_only=False, qc_enabled=False)
+                _run_pipeline_guarded(stage=stage, quiet=False, confirm_sampling=True, sample_rate=sample_rate, qc_only=False, qc_enabled=False)
                 _post_run_updates(stage, _last_artifact_dict(), 0)
                 _prompt_retry_if_needed(stage, _last_artifact_dict())
             return
-        _run_pipeline_guarded(stage=stage, confirm_sampling=True, sample_rate=sample_rate, qc_only=False, qc_enabled=False)
+
+        _run_pipeline_guarded(stage=stage, quiet=False, confirm_sampling=True, sample_rate=sample_rate, qc_only=False, qc_enabled=False)
         _post_run_updates(stage, _last_artifact_dict(), 0)
         _prompt_retry_if_needed(stage, _last_artifact_dict())
         return
 
-    if QC_ENABLED:
-        print(f"[main] Preparing per-paper folders for {stage} (no screening in this step)...")
-        _run_pipeline_guarded(stage=stage, split_only=True, quiet=True, mark_failure=False)
 
-        if stage == "data_extraction":
-            full_text_dir = csv_dir / "per_paper_full_text"
-            if not full_text_dir.exists():
-                print(
-                    f"[warning] per_paper_full_text missing at {full_text_dir}. "
-                    "Run the full_text stage first (or rerun after creating full_text folders)."
-                )
-                return
+def main() -> None:
+    """Compatibility entrypoint that runs the class-based main workflow."""
 
-        paper_dir = csv_dir / rule["pdf_dir"]
-        if not paper_dir.exists():
-            print(f"[setup] Expected per-paper folders at {paper_dir}. Rerun after generating CSV exports.")
-            return
-
-        missing = _missing_pdf_folders(paper_dir)
-        if missing:
-            print(
-                f"[setup] PDFs missing for {len(missing)} folder(s) in {rule['pdf_dir']}."
-                " Screening will proceed; missing folders will be skipped and logged."
-            )
-            for name in missing:
-                print(f"  - {name}")
-
-        if _run_qc_loop(stage, sample_rate, quiet=False):
-            _run_pipeline_guarded(stage=stage, quiet=False, confirm_sampling=True, sample_rate=sample_rate, qc_only=False, qc_enabled=False)
-            _post_run_updates(stage, _last_artifact_dict(), 0)
-            _prompt_retry_if_needed(stage, _last_artifact_dict())
-        return
-
-    # QC disabled: single screening pass, no pre-run split_only call
-    _run_pipeline_guarded(stage=stage, quiet=False, confirm_sampling=True, sample_rate=sample_rate, qc_only=False, qc_enabled=False)
-    _post_run_updates(stage, _last_artifact_dict(), 0)
-    _prompt_retry_if_needed(stage, _last_artifact_dict())
-    return
+    MainWorkflow().run()
 
 
 if __name__ == "__main__":
