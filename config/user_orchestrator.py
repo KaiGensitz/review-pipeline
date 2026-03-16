@@ -18,7 +18,7 @@ LLM_MODEL = "gpt-oss-120b"  # screening model name on your endpoint; working bes
 EMBED_MODEL = "qwen3-embedding-0.6b"  # embedding model name on your endpoint; working for sure: "qwen3-embedding-0.6b"
 CSV_DIR = REPO_ROOT / "input"  # where you drop Covidence exports
 QC_ENABLED = True  # False = skip QC sampling and go straight to full screening
-QC_SAMPLE_RATE = 0.05  # 0.0–1.0; 0.10 = ~10% QC sample
+QC_SAMPLE_RATE = 0.1  # 0.0–1.0; 0.10 = ~10% QC sample
 
 # Covidence study tags used for validation (case-insensitive)
 STUDY_TAGS_INCLUDE = [
@@ -211,8 +211,8 @@ PATH_SETTINGS = {
 HUMAN_TIME_CONFIG = {
 	"title_abstract": {
 		"reviewers": [
-			{"id": "human_1", "total_minutes": 50}, # Marc for 223 articles (Email 12.02.2026): 1h 50 min = 110 min
-			{"id": "human_2", "total_minutes": 110}, # Shawan for 223 articles (Slack 19.02.2026): 4h = 240 min
+			{"id": "human_1", "total_minutes": 40}, # Marc for 223 articles (Email 12.02.2026): 1h 50 min = 110 min
+			{"id": "human_2", "total_minutes": 75}, # Shawan for 110 articles (Email 13.03.2026); 223 articles (Slack 19.02.2026): 4h = 240 min
 			{"id": "human_3", "total_minutes": 0},
 			{"id": "human_4", "total_minutes": 0},
 		],
