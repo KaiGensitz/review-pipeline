@@ -51,7 +51,7 @@ This is enforced by terminal prompts in `main.py`.
 
 1. Export select CSV to `input/` (`*_select_csv_*.csv`).
 2. Prepare `knowledge-base/full_text_pos-neg_examples.csv`.
-3. Run `main.py` to create `input/per_paper_full_text/`.
+3. Run `main.py` once to create `input/per_paper_full_text/` folders (setup-only run).
 4. Add one PDF per paper folder.
 5. Run QC-only screening, then human QC, then validation.
 6. If validation is acceptable, continue to remaining papers.

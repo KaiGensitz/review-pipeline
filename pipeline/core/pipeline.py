@@ -166,7 +166,18 @@ class TitleAbstractScreeningDecisionModel(_ScreeningDecisionBaseModel):
 class FullTextScreeningDecisionModel(_ScreeningDecisionBaseModel):
     """human readable hint: full_text requires a strict boolean eligibility outcome."""
 
+    seed_references: bool
     is_eligible: bool
+
+    @model_validator(mode="after")
+    def _check_seed_references_threshold(self):
+        """human readable hint: seed_references can be true only when confidence_score is strictly greater than 0.98."""
+
+        if self.seed_references and not (self.confidence_score > 0.98):
+            raise ValueError(
+                "seed_references can be true only when confidence_score is strictly greater than 0.98"
+            )
+        return self
 
 
 CANONICAL_FIELDS = [

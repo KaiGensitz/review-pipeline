@@ -12,7 +12,7 @@ load_dotenv(REPO_ROOT / ".env")
 # Edit these each run (minimal inputs for non-coders)
 # ---------------------------------------------------------------------------
 
-CURRENT_STAGE = "title_abstract"  # title_abstract | full_text | data_extraction
+CURRENT_STAGE = "full_text"  # title_abstract | full_text | data_extraction
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")  # API key loaded from .env
 LLM_MODEL = "gpt-oss-120b"  # screening model name on your endpoint; working best: "gpt-oss-120b", working very fast: "qwen3-coder-30b-a3b-instruct"
 EMBED_MODEL = "qwen3-embedding-0.6b"  # embedding model name on your endpoint; working for sure: "qwen3-embedding-0.6b"
@@ -211,8 +211,8 @@ PATH_SETTINGS = {
 HUMAN_TIME_CONFIG = {
 	"title_abstract": {
 		"reviewers": [
-			{"id": "human_1", "total_minutes": 40}, # Marc for 223 articles (Email 12.02.2026): 1h 50 min = 110 min
-			{"id": "human_2", "total_minutes": 75}, # Shawan for 110 articles (Email 13.03.2026); 223 articles (Slack 19.02.2026): 4h = 240 min
+			{"id": "human_1", "total_minutes": 150}, # Reviewer 1 for 110 articles (estimation) = 40 min; 223 articles (Email 12.02.2026): 1h 50 min = 110 min
+			{"id": "human_2", "total_minutes": 315}, # Reviewer 2 for 110 articles (Email 13.03.2026) = 75 min; 223 articles (Slack 19.02.2026): 4h = 240 min
 			{"id": "human_3", "total_minutes": 0},
 			{"id": "human_4", "total_minutes": 0},
 		],

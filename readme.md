@@ -54,6 +54,7 @@ flowchart LR
   - input CSV: `*_select_csv_*.csv`
   - Knowledge-base: [knowledge-base/full_text_pos-neg_examples.csv](knowledge-base/full_text_pos-neg_examples.csv)
   - PDFs: one PDF per folder in `input/per_paper_full_text/`
+  - first run behavior: `main.py` creates `per_paper_full_text/` folders and stops; upload all PDFs, then rerun to start screening
 - `data_extraction`
   - input CSV: `*_included_csv_*.csv`
   - Knowledge-base: [knowledge-base/data_extraction_pos-neg_examples.csv](knowledge-base/data_extraction_pos-neg_examples.csv)

@@ -102,7 +102,7 @@ Recommended: at least 10 POS and 10 NEG examples per file.
 
 ## 7) PDF preparation (stage-specific)
 
-- `full_text`: run once, then add one PDF per folder in `input/per_paper_full_text/`.
+- `full_text`: first run creates `input/per_paper_full_text/` folders only and then stops; add one PDF per folder and rerun `main.py` to start screening.
 - `data_extraction`: ensure `input/per_paper_full_text/` already exists; pipeline builds `input/per_paper_data_extraction/`.
 
 ## 8) Run the pipeline

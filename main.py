@@ -1420,6 +1420,38 @@ class MainWorkflow:
             if not _require_pattern(csv_dir, pattern, f"{stage} required CSV export", stage=stage):
                 return
 
+        if stage == "full_text":
+            paper_dir = csv_dir / str(rule["pdf_dir"])
+            first_prep_run = not paper_dir.exists()
+
+            print("[main] Preparing per-paper folders for full_text (setup preflight)...")
+            _run_pipeline_guarded(stage=stage, split_only=True, quiet=True, mark_failure=False)
+
+            if not paper_dir.exists():
+                print(f"[setup] Expected per-paper folders at {paper_dir}. Rerun after generating CSV exports.")
+                return
+
+            if first_prep_run:
+                print(
+                    "[setup] First full_text run completed folder creation only. "
+                    "Upload one PDF per folder, then rerun main.py to start screening."
+                )
+                print("[next] After uploading PDFs, rerun: .venv\\Scripts\\python main.py")
+                return
+
+            missing = _missing_pdf_folders(paper_dir)
+            if missing:
+                print(
+                    f"[setup] PDFs missing for {len(missing)} folder(s) in {rule['pdf_dir']}. "
+                    "Upload all PDFs before screening can start."
+                )
+                for name in missing:
+                    print(f"  - {name}")
+                print("[next] After uploading PDFs, rerun: .venv\\Scripts\\python main.py")
+                return
+
+            print("[setup] All per-paper folders contain PDFs. Proceeding to screening flow.")
+
         if stage == "title_abstract":
             if QC_ENABLED:
                 if _run_qc_loop(stage, sample_rate, quiet=False):
@@ -1433,31 +1465,32 @@ class MainWorkflow:
             return
 
         if QC_ENABLED:
-            print(f"[main] Preparing per-paper folders for {stage} (no screening in this step)...")
-            _run_pipeline_guarded(stage=stage, split_only=True, quiet=True, mark_failure=False)
+            if stage != "full_text":
+                print(f"[main] Preparing per-paper folders for {stage} (no screening in this step)...")
+                _run_pipeline_guarded(stage=stage, split_only=True, quiet=True, mark_failure=False)
 
-            if stage == "data_extraction":
-                full_text_dir = csv_dir / "per_paper_full_text"
-                if not full_text_dir.exists():
-                    print(
-                        f"[warning] per_paper_full_text missing at {full_text_dir}. "
-                        "Run the full_text stage first (or rerun after creating full_text folders)."
-                    )
+                if stage == "data_extraction":
+                    full_text_dir = csv_dir / "per_paper_full_text"
+                    if not full_text_dir.exists():
+                        print(
+                            f"[warning] per_paper_full_text missing at {full_text_dir}. "
+                            "Run the full_text stage first (or rerun after creating full_text folders)."
+                        )
+                        return
+
+                paper_dir = csv_dir / rule["pdf_dir"]
+                if not paper_dir.exists():
+                    print(f"[setup] Expected per-paper folders at {paper_dir}. Rerun after generating CSV exports.")
                     return
 
-            paper_dir = csv_dir / rule["pdf_dir"]
-            if not paper_dir.exists():
-                print(f"[setup] Expected per-paper folders at {paper_dir}. Rerun after generating CSV exports.")
-                return
-
-            missing = _missing_pdf_folders(paper_dir)
-            if missing:
-                print(
-                    f"[setup] PDFs missing for {len(missing)} folder(s) in {rule['pdf_dir']}."
-                    " Screening will proceed; missing folders will be skipped and logged."
-                )
-                for name in missing:
-                    print(f"  - {name}")
+                missing = _missing_pdf_folders(paper_dir)
+                if missing:
+                    print(
+                        f"[setup] PDFs missing for {len(missing)} folder(s) in {rule['pdf_dir']}."
+                        " Screening will proceed; missing folders will be skipped and logged."
+                    )
+                    for name in missing:
+                        print(f"  - {name}")
 
             if _run_qc_loop(stage, sample_rate, quiet=False):
                 _run_pipeline_guarded(stage=stage, quiet=False, confirm_sampling=True, sample_rate=sample_rate, qc_only=False, qc_enabled=False)

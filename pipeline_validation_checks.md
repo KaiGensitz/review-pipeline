@@ -92,6 +92,7 @@ Required inputs:
 - `input/*_select_csv_*.csv`
 - `knowledge-base/full_text_pos-neg_examples.csv`
 - one PDF per paper folder in `input/per_paper_full_text/`
+- first-run rule: `main.py` creates per-paper folders and stops; screening starts only after all folders contain a PDF
 
 Expected outputs:
 - `output/full_text/full_text_eligibility_<qc_sample|remaining_sample>_*.jsonl`
