@@ -84,8 +84,7 @@ class EmbeddingBackend:
 		"""Return embeddings for texts plus usage metadata when the API provides it."""
 
 		results: list[np.ndarray | None] = [None] * len(texts)
-		missing: list[str] = []
-		missing_idx: list[int] = []
+		missing_positions: dict[str, list[int]] = {}
 		usage_totals: dict | None = None
 
 		for idx, text in enumerate(texts):
@@ -94,19 +93,17 @@ class EmbeddingBackend:
 				results[idx] = cached
 				self.cache.move_to_end(text)
 			else:
-				missing.append(text)
-				missing_idx.append(idx)
+				missing_positions.setdefault(text, []).append(idx)
 
-		if missing:
-			new_embeddings, usage_totals = self._embed_in_batches(missing)
-			normalized_batches: list[np.ndarray] = []
-			for text, embedding in zip(missing, new_embeddings):
+		if missing_positions:
+			missing_unique = list(missing_positions.keys())
+			new_embeddings, usage_totals = self._embed_in_batches(missing_unique)
+			for text, embedding in zip(missing_unique, new_embeddings):
 				normalized = _normalize(np.asarray(embedding, dtype=float))
 				self.cache[text] = normalized
 				self._maybe_evict_cache()
-				normalized_batches.append(normalized)
-			for idx, embedding in zip(missing_idx, normalized_batches):
-				results[idx] = embedding
+				for idx in missing_positions.get(text, []):
+					results[idx] = normalized
 
 		if any(embedding is None for embedding in results):
 			raise RuntimeError("Failed to populate all embeddings")
@@ -175,15 +172,21 @@ class RelevanceSelector:
 			neg_embeddings = [_normalize(vec) for vec in neg_vectors]
 			self.neg_centroid = _normalize(np.mean(neg_embeddings, axis=0))
 
-	def _score_vectors(self, vectors: list[np.ndarray]) -> list[float]:
-		"""Compute relevance scores for each vector."""
+	def _score_vectors(self, vectors: list[np.ndarray]) -> list[dict[str, float]]:
+		"""Compute detailed relevance metrics for each vector."""
 
-		scores: list[float] = []
+		scores: list[dict[str, float]] = []
 		for vec in vectors:
 			vec_norm = _normalize(np.asarray(vec, dtype=float))
 			pos_score = float(np.dot(vec_norm, self.pos_centroid))
 			neg_score = float(np.dot(vec_norm, self.neg_centroid)) if self.neg_centroid is not None else 0.0
-			scores.append(pos_score - neg_score)
+			scores.append(
+				{
+					"pos_score": pos_score,
+					"neg_score": neg_score,
+					"score": pos_score - neg_score,
+				}
+			)
 		return scores
 
 	def select(
@@ -198,13 +201,13 @@ class RelevanceSelector:
 		candidate_chunks = [chunk for chunk in chunks if chunk.get("kind") not in self.always_include_kinds]
 
 		usage = None
-		scores_by_chunk_id: dict[str, float] = {}
+		scores_by_chunk_id: dict[str, dict[str, float]] = {}
 		if candidate_chunks:
 			texts = [chunk["text"] for chunk in candidate_chunks]
 			embeddings, usage = self.embedder.embed_texts(texts)
 			candidate_scores = self._score_vectors(embeddings)
-			for chunk, score in zip(candidate_chunks, candidate_scores):
-				scores_by_chunk_id[str(chunk.get("chunk_id", ""))] = float(score)
+			for chunk, score_detail in zip(candidate_chunks, candidate_scores):
+				scores_by_chunk_id[str(chunk.get("chunk_id", ""))] = score_detail
 
 		enriched: list[dict] = []
 		for chunk in chunks:
@@ -212,8 +215,13 @@ class RelevanceSelector:
 			chunk_id = str(item.get("chunk_id", ""))
 			if chunk.get("kind") in self.always_include_kinds:
 				item["score"] = float(item.get("score", 0.0) or 0.0)
+				item["pos_score"] = float(item.get("pos_score", 0.0) or 0.0)
+				item["neg_score"] = float(item.get("neg_score", 0.0) or 0.0)
 			else:
-				item["score"] = float(scores_by_chunk_id.get(chunk_id, 0.0))
+				detail = scores_by_chunk_id.get(chunk_id, {"score": 0.0, "pos_score": 0.0, "neg_score": 0.0})
+				item["score"] = float(detail.get("score", 0.0))
+				item["pos_score"] = float(detail.get("pos_score", 0.0))
+				item["neg_score"] = float(detail.get("neg_score", 0.0))
 			enriched.append(item)
 
 		always = [c for c in enriched if c.get("kind") in self.always_include_kinds]

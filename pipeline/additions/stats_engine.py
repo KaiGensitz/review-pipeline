@@ -375,7 +375,14 @@ def _load_ai() -> tuple[pd.DataFrame, Path]:
         stage_files.extend(STAGE_OUTPUT_DIR.glob(pat))
 
     # Exclude split outputs to avoid double-counting per decision type.
-    stage_files = [p for p in stage_files if "eligibility_select" not in p.name and "eligibility_irrelevant" not in p.name]
+    stage_files = [
+        p
+        for p in stage_files
+        if "eligibility_select" not in p.name
+        and "eligibility_irrelevant" not in p.name
+        and "eligibility_included" not in p.name
+        and "eligibility_excluded" not in p.name
+    ]
 
     if not stage_files:
         raise FileNotFoundError(
@@ -634,19 +641,25 @@ def _plot_confusion(tp: int, tn: int, fp: int, fn: int, suffix: str | None = Non
 
 
 def _extract_timestamp_suffix(path: Path) -> str | None:
-    """Extract the YYYYMMDD_HH-MM suffix from a stage output filename."""
+    """Extract QC timestamp suffix from legacy and current eligibility filenames.
+
+    Accepted patterns include both:
+    - <stage>_eligibility_qc_sample_<YYYYMMDD_HH-MM>[...]
+    - <stage>_qc_sample_*_eligibility_<YYYYMMDD_HH-MM>[_<campaign>]
+    """
 
     name = path.stem
-    prefix = f"{CURRENT_STAGE}_eligibility_"
-    if not name.startswith(prefix):
-        return None
+    # 1) New naming in run_screening: <stage>_qc_sample_*_eligibility_<timestamp>[_campaign]
+    new_match = re.search(r"eligibility_(\d{8}_\d{2}-\d{2})(?:_[A-Fa-f0-9]{8,16})?$", name)
+    if new_match:
+        return new_match.group(1)
 
-    suffix = name.replace(prefix, "")
-    # Strip decision-split markers if present to keep validation names clean.
-    for token in ["select_", "irrelevant_", "included_", "excluded_"]:
-        if suffix.startswith(token):
-            suffix = suffix.replace(token, "", 1)
-    return suffix
+    # 2) Legacy naming: <stage>_eligibility_qc_sample_<timestamp>
+    legacy_match = re.search(r"eligibility_(?:select_|irrelevant_|included_|excluded_)?qc_sample_(\d{8}_\d{2}-\d{2})", name)
+    if legacy_match:
+        return legacy_match.group(1)
+
+    return None
 
 
 def _load_qc_sample_ids(suffix: str | None) -> set[str] | None:
@@ -871,10 +884,10 @@ def _parse_args():
 class ValidationEngine:
     """human readable hint: one-class validation orchestrator for screening and extraction stages."""
 
-    def __init__(self, stage: str = CURRENT_STAGE) -> None:
-        """human readable hint: __init__ stores the active stage used to route validation."""
+    def __init__(self) -> None:
+        """human readable hint: validation is intentionally bound to CURRENT_STAGE from config."""
 
-        self.stage = stage
+        self.stage = CURRENT_STAGE
 
     def run(self, args=None) -> None:
         """human readable hint: run the correct validation branch based on the configured stage."""

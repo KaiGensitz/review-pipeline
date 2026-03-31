@@ -10,7 +10,7 @@ Task description: Read the full-text evidence under the DATA section and the ELI
 1) DELIBERATION (Chain of Thought): Generate a brief logical analysis identifying the core focus from full-text evidence. Map the text to the core triad (Smartphone + AI + PA).
 2)  HIERARCHY OF IMPORTANCE (Simulated Human Nuance): While applying the criteria below, weigh the evidence according to this hierarchy:
    1. PRIMARY FOCUS (Intervention): Does the paper involve an autonomous digital system (smartphone/artificial intelligence) aiming to change human behavior? If YES, lean toward inclusion; if it lacks BOTH smartphone and artificial intelligence (AI), return false.
-   2. SECONDARY FOCUS (Outcome): Is that behavior related to physical activity (PA), exercise/movement, weight loss/control, or healthy lifestyle/living? DO NOT infer physical activity for interventions restricted to pure cognitive/mental health, dietary lapses, medication adherence, pure fall-detection/human activity regocgnition, or passive physiological monitoring. If the primary focus is not an intervention for physical activity or active lifestyle/living, return false.
+   2. SECONDARY FOCUS (Outcome): Is that behavior related to physical activity (PA), exercise/movement, weight loss/control, or healthy lifestyle/living? DO NOT infer physical activity for interventions restricted to pure cognitive/mental health, dietary lapses, medication adherence, pure fall-detection/human activity recognition, or passive physiological monitoring. If the primary focus is not an intervention for physical activity or active lifestyle/living, return false.
    3. TERTIARY FOCUS (Context): Adults and urban context may be variably reported in full texts. Use explicit context statements when available; if context remains mixed or unspecified, use the dedicated context flag and still make a strict final eligibility decision.
 3) APPLY BURDEN OF PROOF: Do not use paper with only an abstract present. If required evidence for inclusion is missing or contradictory in the full text, default to exclusion (false), though consider proxy terms when supported by full-text context.
 4) EVALUATE EXCLUSIONS: Evaluate the text against the discrete questions in the END GOAL section using the ELIGIBILITY CRITERIA. 
@@ -41,10 +41,10 @@ Field definitions and evaluation logic. You must output a single, flat JSON obje
 
 - "not_urban_context": 
    Question: "Is the study explicitly conducted OUTSIDE of urban areas?"
-   Logic: "Return true (Exclusion Met) ONLY IF matching the 'Exclude' Context criteria. Return false if explicitly urban. Return "NEUTRAL" if the setting is mixed or unspecified."
+   Logic: "Return true (Exclusion Met) ONLY IF matching the 'Exclude' Context criteria. Return false if explicitly urban. Return NEUTRAL if the setting is mixed or unspecified."
 
 - "wrong_publication_type": 
-   Question: "Does the record lack an empirical methodology?"
+   Question: "Does the record lack an empirical methodology or is not a journal article?"
    Logic: "Return true (Exclusion Met) ONLY IF explicitly matching the 'Exclude' Study Characteristics criteria (e.g., secondary reviews) or if purely simulated ABM methodology. Return false otherwise."
 
 - "insufficient_context": 
@@ -78,6 +78,10 @@ Formatting rules:
     - Do NOT use Markdown fences (e.g., ```json) around your output.
     - Return ONLY a single valid flat JSON object.
     - Start directly with '{' and end with '}'.
+   - Every string value must be valid JSON with double quotes and escaped inner quotes (\").
+   - confidence_score must be a numeric JSON literal between 0.0 and 1.0 (for example 0.87), never a string, never a percent, never with comma decimal.
+   - exclusion_reason_category must be null when is_eligible is true; otherwise one of: not_adult_population, no_smartphone_technology, no_artificial_intelligence, no_physical_activity, not_urban_context, wrong_publication_type, insufficient_context.
+   - If uncertain, still return syntactically valid JSON that follows all key constraints above.
 
 # CONTEXT
 ELIGIBILITY CRITERIA (include vs exclude):
@@ -86,7 +90,7 @@ Population
 - Exclude: child/children; youth; animals
 
 Intervention / Exposure
-- Include: smartphone/phone-based technology; online plattforms; mobile health (mHealth); digital health; digital behavior change intervention (DBCI); artificial intelligence (AI); machine learning (ML); deep learning (DL); neural networks (NN); reinforcement learning (RL); Q-learning; contextual bandits; generative AI; large language model (LLM); natural language processing (NLP); natural language understanding (NLU); adaptive algorithms; data mining; recommender systems; chatbots; conversational agent(s) (CAs); just-in-time adaptive interventions (JITAI); ecological momentary interventions (EMI)
+- Include: smartphone/phone-based technology; online platforms; mobile health (mHealth); digital health; digital behavior change intervention (DBCI); artificial intelligence (AI); machine learning (ML); deep learning (DL); neural networks (NN); reinforcement learning (RL); Q-learning; contextual bandits; generative AI; large language model (LLM); natural language processing (NLP); natural language understanding (NLU); adaptive algorithms; data mining; recommender systems; chatbots; conversational agent(s) (CAs); just-in-time adaptive interventions (JITAI); ecological momentary interventions (EMI)
 - Exclude: hard-coded algorithms; rule-based expert/recommender systems; not AI-based; not smartphone-based; desktop only; only wearables; no technology
 
 Comparator / Context
@@ -99,7 +103,7 @@ Outcome
 
 Study Characteristics
 - Include: RCT; randomized controlled trial; observation; qualitative; mixed-methods; study protocol; feasibility study; usability study
-- Exclude: review (e.g., systematic, rapid, narrative, critical, scoping, meta-analyses); comment; letter; editorial
+- Exclude: review (e.g., systematic, rapid, narrative, critical, scoping, meta-analyses); comment; letter; editorial; dissertation; thesis
 
 Other
 - Include: published from 2011 onwards

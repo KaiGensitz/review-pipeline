@@ -44,6 +44,14 @@ flowchart LR
    - Windows: `.venv\Scripts\python main.py`
    - macOS/Linux: `python main.py`
 
+## Dependency behavior (important)
+
+- `pdfplumber` is required for PDF-reading stages (`full_text`, `data_extraction`).
+- `codecarbon` is optional at runtime: if unavailable, screening still runs and emissions tracking is skipped with a warning.
+- Recommended reinstall command when dependencies drift:
+  - `python -m pip install --upgrade pip setuptools wheel`
+  - `python -m pip install -r requirement.txt`
+
 ## Required files by stage
 
 - `title_abstract`
@@ -72,6 +80,8 @@ Knowledge-base format for all stages: CSV with columns `label` (`POS`/`NEG`) and
 - QC is enabled by default (`QC_ENABLED=True`): pipeline generates a deterministic ~10% sample (`ceil(sample_rate * N)`).
 - `title_abstract` now uses asynchronous LLM batching with bounded concurrency and exponential backoff for transient API/rate-limit failures.
 - Screening responses are validated against a strict JSON schema (Pydantic); invalid JSON/missing fields trigger automatic retry up to 3 attempts.
+- Near-valid screening payload drift is normalized before validation (for example, `step_by_step_deliberation` returned as an object is flattened to a string), then validated strictly.
+- Full-text sentence chunking now uses a conservative text-normalization pass (spacing and punctuation cleanup) before sentence splitting to improve readability and LLM input consistency.
 - QC outputs are written to `output/<stage>/` as:
   - `<stage>_qc_sample_batch_<yyyymmdd>_<hh-mm>.csv`
   - `<stage>_qc_sample_batch_readable_<yyyymmdd>_<hh-mm>.txt`

@@ -18,8 +18,14 @@ Advanced technical reference for operators and maintainers.
 - `title_abstract` screening executes via asyncio with bounded request concurrency.
 - Transient API failures (rate limit/timeout/5xx) use exponential backoff with jitter.
 - Screening decisions are validated via a strict Pydantic schema before being accepted.
+- Prompt scripts are normalized to strict JSON-shape expectations to reduce malformed model outputs and retry churn.
+- Before schema validation, the pipeline performs a narrow normalization pass for known near-valid drift (for example, object-form `step_by_step_deliberation`), then applies strict validation.
 - Sync execution path reuses the same async paper-processing core to reduce duplicate decision logic.
 - Relevance selection skips embedding/scoring for always-included chunk kinds (for example title chunks), reducing avoidable embedding workload.
+- Full-text PDF loading avoids duplicate page-count reads when page-level text is already loaded, reducing per-paper I/O overhead.
+- A conservative text-normalization pass now runs before sentence splitting (whitespace cleanup, punctuation boundary spacing, soft-hyphen cleanup), improving chunk readability without changing eligibility decision rules.
+- A second conservative normalization pass is applied to full_text chunks immediately before prompt assembly to catch residual extraction artifacts from non-standard PDFs.
+- Optional runtime integrations are now resilient: missing CodeCarbon disables emissions tracking only, and missing PDF readers fail when PDF-read paths are invoked (not at module import).
 
 ## Pipeline behavior by stage
 

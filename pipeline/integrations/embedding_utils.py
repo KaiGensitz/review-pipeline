@@ -9,7 +9,11 @@ from __future__ import annotations
 import re
 
 import nltk
-import pdfplumber
+
+try:
+	import pdfplumber
+except Exception:  # pragma: no cover - optional dependency at import time
+	pdfplumber = None
 
 EN_STOPWORDS = {
 	"the",
@@ -50,6 +54,31 @@ class TextPdfUtils:
 	"""human readable hint: one utility class for language detection, PDF reading, and sentence splitting."""
 
 	@staticmethod
+	def normalize_extracted_text(text: str) -> str:
+		"""human readable hint: apply conservative cleanup to extracted PDF text before sentence splitting."""
+
+		value = text or ""
+		if not value:
+			return ""
+
+		# Remove invisible soft hyphen artifacts from PDF extraction.
+		value = value.replace("\u00ad", "")
+		# Join explicit line-break hyphenations (e.g., "micro-\nrandomized" -> "microrandomized").
+		value = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", value)
+		# Normalize line breaks/tabs to spaces.
+		value = re.sub(r"[\r\n\t]+", " ", value)
+		# Add missing space after sentence punctuation where extraction collapsed boundaries.
+		value = re.sub(r"([\.!\?;,:])(\w)", r"\1 \2", value)
+		# Add spacing between alpha-numeric boundaries for readability (e.g., "10degrees" / "Figure2").
+		value = re.sub(r"([A-Za-z])([0-9])", r"\1 \2", value)
+		value = re.sub(r"([0-9])([A-Za-z])", r"\1 \2", value)
+		# Add spacing at lower->Upper transitions (e.g., "degreesCelsius").
+		value = re.sub(r"([a-z])([A-Z])", r"\1 \2", value)
+		# Collapse repeated whitespace after all repairs.
+		value = re.sub(r"\s+", " ", value).strip()
+		return value
+
+	@staticmethod
 	def detect_language(text: str) -> str:
 		"""Detect whether text is English or German using stopword counts."""
 
@@ -70,6 +99,12 @@ class TextPdfUtils:
 	def read_pdf_file(file_path: str, max_pages: int | None = None) -> str:
 		"""Read PDF text and return a single combined string (optionally capped by max_pages)."""
 
+		if pdfplumber is None:
+			raise RuntimeError(
+				"pdfplumber is required for PDF reading but is not installed. "
+				"Install dependencies with: python -m pip install -r requirement.txt"
+			)
+
 		text_content = []
 		with pdfplumber.open(file_path) as pdf:
 			pages_iter = pdf.pages if max_pages is None else pdf.pages[:max_pages]
@@ -83,6 +118,12 @@ class TextPdfUtils:
 	def read_pdf_pages(file_path: str, max_pages: int | None = None) -> list[str]:
 		"""Read PDF text and return a list of page-level strings (optionally capped)."""
 
+		if pdfplumber is None:
+			raise RuntimeError(
+				"pdfplumber is required for PDF reading but is not installed. "
+				"Install dependencies with: python -m pip install -r requirement.txt"
+			)
+
 		pages: list[str] = []
 		with pdfplumber.open(file_path) as pdf:
 			pages_iter = pdf.pages if max_pages is None else pdf.pages[:max_pages]
@@ -95,10 +136,11 @@ class TextPdfUtils:
 	def split_text_into_sentences(text: str, language: str) -> list[str]:
 		"""Split text into sentences using NLTK."""
 
-		if not text or not text.strip():
+		normalized_text = TextPdfUtils.normalize_extracted_text(text)
+		if not normalized_text:
 			return []
-		selected_language = TextPdfUtils.detect_language(text) if language == "auto" else language
-		sentences = nltk.sent_tokenize(text, language=selected_language)
+		selected_language = TextPdfUtils.detect_language(normalized_text) if language == "auto" else language
+		sentences = nltk.sent_tokenize(normalized_text, language=selected_language)
 		return sentences
 
 
@@ -120,3 +162,8 @@ def read_pdf_pages(file_path: str, max_pages: int | None = None) -> list[str]:
 def split_text_into_sentences(text: str, language: str) -> list[str]:
 	"""Split text into sentences using NLTK."""
 	return TextPdfUtils.split_text_into_sentences(text, language)
+
+
+def normalize_extracted_text(text: str) -> str:
+	"""Apply conservative cleanup to extracted PDF text before downstream processing."""
+	return TextPdfUtils.normalize_extracted_text(text)

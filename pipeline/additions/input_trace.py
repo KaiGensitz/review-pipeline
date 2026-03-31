@@ -21,6 +21,7 @@ from typing import Optional
 from config.user_orchestrator import CURRENT_STAGE, PATH_SETTINGS, PROMPT_FILES
 
 ELIGIBILITY_CRITERIA_PLACEHOLDER = "{eligibility_criteria}"
+DEFAULT_OUTPUT_ROOT = Path(PATH_SETTINGS.get("output_root", "output"))
 
 
 def _sha256_text(value: str) -> str:
@@ -29,21 +30,58 @@ def _sha256_text(value: str) -> str:
     return hashlib.sha256((value or "").encode("utf-8")).hexdigest()
 
 
+def _candidate_stage_dirs(stage: str) -> list[Path]:
+    """human readable hint: find plausible output folders for a stage across naming variants."""
+
+    root = DEFAULT_OUTPUT_ROOT
+    preferred: list[Path] = []
+    primary = root / stage
+    legacy = root / f"{stage}_"
+    if primary.exists() and primary.is_dir():
+        preferred.append(primary)
+    if legacy.exists() and legacy.is_dir() and legacy not in preferred:
+        preferred.append(legacy)
+
+    discovered: list[Path] = []
+    if root.exists():
+        for child in sorted(root.iterdir()):
+            if not child.is_dir():
+                continue
+            if child.name.startswith(stage) and child not in preferred and child not in discovered:
+                discovered.append(child)
+
+    if preferred or discovered:
+        return preferred + discovered
+    return [primary]
+
+
+def _iter_eligibility_files(stage: str, stage_dirs: list[Path]) -> list[Path]:
+    """human readable hint: collect all non-split eligibility files from candidate stage folders."""
+
+    files: list[Path] = []
+    for stage_dir in stage_dirs:
+        candidates = list(stage_dir.glob(f"{stage}_*_eligibility_*.jsonl"))
+        for path in candidates:
+            name = path.name
+            if (
+                "eligibility_select" in name
+                or "eligibility_irrelevant" in name
+                or "eligibility_included" in name
+                or "eligibility_excluded" in name
+            ):
+                continue
+            files.append(path)
+    return files
+
+
 def _latest_eligibility_file(stage: str) -> Path:
     """human readable hint: pick the latest eligibility file (excluding split files)."""
 
-    stage_root = Path(PATH_SETTINGS.get("output_root", "output")) / stage
-    candidates = list(stage_root.glob(f"{stage}_*_eligibility_*.jsonl"))
-    candidates = [
-        p
-        for p in candidates
-        if "eligibility_select" not in p.name
-        and "eligibility_irrelevant" not in p.name
-        and "eligibility_included" not in p.name
-        and "eligibility_excluded" not in p.name
-    ]
+    stage_dirs = _candidate_stage_dirs(stage)
+    candidates = _iter_eligibility_files(stage, stage_dirs)
     if not candidates:
-        raise FileNotFoundError(f"No eligibility JSONL found in {stage_root} for stage '{stage}'.")
+        searched = ", ".join(str(p) for p in stage_dirs)
+        raise FileNotFoundError(f"No eligibility JSONL found for stage '{stage}'. Searched: {searched}")
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
@@ -113,8 +151,10 @@ def _format_chunks_for_prompt(stage: str, paper_id: str, title: str, authors: st
 def _title_abstract_context(stage: str, paper_id: str) -> str:
     """human readable hint: title_abstract stores the full model context in selected_chunks output."""
 
-    stage_root = Path(PATH_SETTINGS.get("output_root", "output")) / stage
-    files = sorted(stage_root.glob(f"{stage}_*_selected_chunks_*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    files: list[Path] = []
+    for stage_root in _candidate_stage_dirs(stage):
+        files.extend(stage_root.glob(f"{stage}_*_selected_chunks_*.jsonl"))
+    files = sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
 
     for file in files:
         with file.open("r", encoding="utf-8") as handle:
@@ -220,23 +260,75 @@ def _reconstruct_context(stage: str, paper_id: str, csv_root: Path) -> str:
     return _folder_stage_context(stage, paper_id, csv_root)
 
 
-def _load_prompt_template(stage: str) -> str:
+def _resolve_prompt_snapshot(stage: str, campaign_id: str, stage_dirs: list[Path]) -> Path | None:
+    """human readable hint: locate the persisted prompt snapshot for a campaign when available."""
+
+    if not campaign_id:
+        return None
+    modern_pattern = f"{stage}_prompt_template_*_{campaign_id}.txt"
+    legacy_name = f"{stage}_prompt_template_{campaign_id}.txt"
+    modern_candidates: list[Path] = []
+    for folder in stage_dirs:
+        modern_candidates.extend(folder.glob(modern_pattern))
+
+    if modern_candidates:
+        return max(modern_candidates, key=lambda path: path.stat().st_mtime)
+
+    for folder in stage_dirs:
+        candidate = folder / legacy_name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _load_prompt_template(stage: str, campaign_id: str = "") -> tuple[str, str]:
     """human readable hint: mirror runtime prompt assembly with optional eligibility criteria injection."""
 
-    prompt_template = PROMPT_FILES[stage].read_text(encoding="utf-8")
+    stage_dirs = _candidate_stage_dirs(stage)
+    snapshot = _resolve_prompt_snapshot(stage, campaign_id, stage_dirs)
+    template_path = snapshot if snapshot else PROMPT_FILES[stage]
+    prompt_template = template_path.read_text(encoding="utf-8")
+    source_label = str(template_path)
+
+    # Snapshot files are written from runtime's post-injection prompt and should be used as-is.
+    if snapshot:
+        return prompt_template.strip(), source_label
+
     if ELIGIBILITY_CRITERIA_PLACEHOLDER not in prompt_template:
-        return prompt_template
+        return prompt_template.strip(), source_label
 
     configured_path = PATH_SETTINGS.get("eligibility_criteria_file")
     if not configured_path:
-        return prompt_template.replace(ELIGIBILITY_CRITERIA_PLACEHOLDER, "")
+        return prompt_template.replace(ELIGIBILITY_CRITERIA_PLACEHOLDER, "").strip(), source_label
 
     criteria_path = Path(configured_path)
     if not criteria_path.exists():
-        return prompt_template.replace(ELIGIBILITY_CRITERIA_PLACEHOLDER, "")
+        return prompt_template.replace(ELIGIBILITY_CRITERIA_PLACEHOLDER, "").strip(), source_label
 
     criteria_text = criteria_path.read_text(encoding="utf-8").strip()
-    return prompt_template.replace(ELIGIBILITY_CRITERIA_PLACEHOLDER, criteria_text)
+    return prompt_template.replace(ELIGIBILITY_CRITERIA_PLACEHOLDER, criteria_text).strip(), source_label
+
+
+def _diagnose_mismatch(
+    context_ok: bool,
+    prompt_template_ok: bool,
+    full_prompt_ok: bool,
+    stored_full_prompt_hash: str,
+    full_prompt: str,
+) -> str:
+    """human readable hint: classify the likely cause of hash mismatches for operator debugging."""
+
+    if context_ok and prompt_template_ok and full_prompt_ok:
+        return "none"
+    if not context_ok:
+        return "context_drift"
+    if not prompt_template_ok:
+        return "prompt_template_drift"
+
+    normalized_hash = _sha256_text(full_prompt.strip())
+    if stored_full_prompt_hash and stored_full_prompt_hash == normalized_hash and not full_prompt_ok:
+        return "normalization_only_drift"
+    return "full_prompt_assembly_drift"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -280,36 +372,59 @@ class InputTraceRunner:
         diagnostics = record.get("diagnostics", {}) if isinstance(record.get("diagnostics"), dict) else {}
 
         stored_context_hash = str(diagnostics.get("llm_input_sha256", "")).strip().lower()
+        stored_prompt_template_hash = str(diagnostics.get("prompt_template_sha256", "")).strip().lower()
         stored_full_prompt_hash = str(diagnostics.get("full_prompt_sha256", "")).strip().lower()
+        stored_prompt_campaign_id = str(diagnostics.get("prompt_campaign_id", "")).strip()
         csv_root = Path(PATH_SETTINGS.get("csv_dir", "input"))
 
         context_text = _reconstruct_context(stage, paper_id, csv_root)
         recomputed_context_hash = _sha256_text(context_text)
 
-        prompt_template = _load_prompt_template(stage)
+        prompt_template, prompt_template_source = _load_prompt_template(stage, stored_prompt_campaign_id)
+        recomputed_prompt_template_hash = _sha256_text(prompt_template)
         full_prompt = prompt_template.replace("{data}", context_text)
         recomputed_full_prompt_hash = _sha256_text(full_prompt)
 
         context_ok = bool(stored_context_hash) and stored_context_hash == recomputed_context_hash
+        prompt_template_ok = bool(stored_prompt_template_hash) and stored_prompt_template_hash == recomputed_prompt_template_hash
         full_prompt_ok = bool(stored_full_prompt_hash) and stored_full_prompt_hash == recomputed_full_prompt_hash
+        mismatch_cause = _diagnose_mismatch(
+            context_ok=context_ok,
+            prompt_template_ok=prompt_template_ok,
+            full_prompt_ok=full_prompt_ok,
+            stored_full_prompt_hash=stored_full_prompt_hash,
+            full_prompt=full_prompt,
+        )
 
-        stage_root = Path(PATH_SETTINGS.get("output_root", "output")) / stage
+        stage_root = eligibility_file.parent
         ts = datetime.now().strftime("%Y%m%d_%H-%M-%S")
         default_name = f"{stage}_{paper_id}_input_trace_{ts}.txt"
         output_path = Path(args.output) if args.output else (stage_root / default_name)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if args.eligibility_file:
+            eligibility_resolution = "explicit"
+        else:
+            eligibility_resolution = "auto_latest"
 
         lines: list[str] = [
             "INPUT TRACE REPORT",
             f"stage: {stage}",
             f"paper_id: {paper_id}",
             f"eligibility_file: {eligibility_file}",
+            f"eligibility_resolution: {eligibility_resolution}",
             f"stored_llm_input_sha256: {stored_context_hash or 'NA'}",
             f"recomputed_llm_input_sha256: {recomputed_context_hash}",
             f"context_hash_match: {context_ok}",
+            f"stored_prompt_template_sha256: {stored_prompt_template_hash or 'NA'}",
+            f"recomputed_prompt_template_sha256: {recomputed_prompt_template_hash}",
+            f"prompt_template_hash_match: {prompt_template_ok}",
+            f"stored_prompt_campaign_id: {stored_prompt_campaign_id or 'NA'}",
+            f"prompt_template_source: {prompt_template_source}",
             f"stored_full_prompt_sha256: {stored_full_prompt_hash or 'NA'}",
             f"recomputed_full_prompt_sha256: {recomputed_full_prompt_hash}",
             f"full_prompt_hash_match: {full_prompt_ok}",
+            f"mismatch_cause: {mismatch_cause}",
             "",
             "=== Reconstructed LLM Input Context ===",
             context_text,
@@ -323,7 +438,10 @@ class InputTraceRunner:
         print("Input trace completed.")
         print(f"- report: {output_path}")
         print(f"- context hash match: {context_ok}")
+        print(f"- prompt template hash match: {prompt_template_ok}")
         print(f"- full prompt hash match: {full_prompt_ok}")
+        if mismatch_cause != "none":
+            print(f"- mismatch cause: {mismatch_cause}")
 
 
 def run_trace() -> None:

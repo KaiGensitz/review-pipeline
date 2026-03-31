@@ -4,7 +4,7 @@ import os
 import sys
 import subprocess
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import nltk
@@ -183,6 +183,7 @@ def _write_retry_csv(source_csv: Path, target_dir: Path, paper_ids: set[str], st
 
     id_keys = ["paper_id", "Covidence #", "Covidence#", "Ref", "Study", "ID", "id"]
     rows_written = 0
+    written_ids: set[str] = set()
     try:
         with source_csv.open("r", encoding="utf-8") as src:
             reader = csv.DictReader(src)
@@ -196,9 +197,10 @@ def _write_retry_csv(source_csv: Path, target_dir: Path, paper_ids: set[str], st
                         if key in row and row[key]:
                             pid = str(row[key]).strip()
                             break
-                    if pid in paper_ids:
+                    if pid in paper_ids and pid not in written_ids:
                         writer.writerow(row)
                         rows_written += 1
+                        written_ids.add(pid)
     except Exception as exc:  # pylint: disable=broad-except
         print(f"[retry] failed to write retry CSV: {exc}")
         return None
@@ -212,6 +214,37 @@ def _write_retry_csv(source_csv: Path, target_dir: Path, paper_ids: set[str], st
         return None
 
     return target_path
+
+
+def _prepare_isolated_retry_run_dir(stage: str, retry_csv: Path) -> Path | None:
+    """human readable hint: run retries from a clean one-file folder to avoid processing old retry CSVs."""
+
+    if not retry_csv.exists():
+        return None
+
+    retry_root = Path(PATH_SETTINGS["csv_dir"]) / "retry_runs"
+    isolated_dir = retry_root / f"_active_retry_{stage}"
+    isolated_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        for stale_csv in isolated_dir.glob("*.csv"):
+            stale_csv.unlink(missing_ok=True)
+        target_csv = isolated_dir / retry_csv.name
+        shutil.copy2(retry_csv, target_csv)
+        return isolated_dir
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"[retry] failed to prepare isolated retry run folder: {exc}")
+        return None
+
+
+def _retry_pdf_root(stage: str) -> str | None:
+    """human readable hint: retries should still resolve PDFs from the main input folder tree."""
+
+    rule = STAGE_RULES.get(stage, {}) if isinstance(STAGE_RULES, dict) else {}
+    pdf_dir = rule.get("pdf_dir")
+    if not pdf_dir:
+        return None
+    return str(Path(PATH_SETTINGS["csv_dir"]) / str(pdf_dir))
 
 
 def _retry_output_paths(stage: str, run_label: str, attempt_index: int) -> dict:
@@ -457,7 +490,7 @@ def _record_retry_manifest(
         "stage": stage,
         "run_label": run_label,
         "attempt_index": attempt_default,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "source_csv": str(source_csv) if source_csv else None,
         "paper_count": len(paper_ids),
         "paper_ids": sorted(paper_ids),
@@ -703,7 +736,7 @@ def _append_index_row(
         "p50_seconds": p50,
         "p95_seconds": p95,
         "max_seconds": pmax,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "file_path": str(path),
         "total_paper_count": total_paper_count or 0,
         "percent_of_input_file": percent_of_input,
@@ -990,8 +1023,11 @@ def _error_ids_by_type(error_log_path: Path, blocked_types: set[str]) -> set[str
     return blocked_ids
 
 
-def _prompt_retry_if_needed(stage: str, artifact: dict | None) -> None:
+def _prompt_retry_if_needed(stage: str, artifact: dict | None, depth: int = 0) -> None:
     """Prompt for re-screening when errors are present for this stage."""
+    if depth >= 2:
+        print("[retry] Maximum automatic retry depth reached for this run. Stop and inspect the error log before retrying again.")
+        return
     if not artifact:
         return
 
@@ -1016,7 +1052,10 @@ def _prompt_retry_if_needed(stage: str, artifact: dict | None) -> None:
             print("[retry] All error cases contain is_eligible; no retry suggested.")
             return
 
-        blocked_ids = _error_ids_by_type(error_path, {"llm_output_token_limit", "context_overflow"})
+        blocked_ids = _error_ids_by_type(
+            error_path,
+            {"llm_output_token_limit", "context_overflow", "pdf_missing", "no_chunks"},
+        )
         blocked_candidates = {pid for pid in candidates if pid in blocked_ids}
         if blocked_candidates:
             print(
@@ -1075,13 +1114,18 @@ def _prompt_retry_if_needed(stage: str, artifact: dict | None) -> None:
     retry_csv = _write_retry_csv(source_csv, target_dir, candidates, stage, run_label)
     if not retry_csv:
         return
+    retry_run_dir = _prepare_isolated_retry_run_dir(stage, retry_csv)
+    if not retry_run_dir:
+        print("[retry] Could not prepare isolated retry run folder. Aborting retry step.")
+        return
 
     attempt_for_run = max(attempt_map.values()) if attempt_map else 1
     out_paths = _retry_output_paths(stage, run_label, attempt_for_run)
     print(f"[retry] Created retry CSV at {retry_csv}. Running re-screen (QC disabled for retry)...")
     retry_artifact = run_pipeline(
         stage=stage,
-        csv_dir=str(target_dir),
+        csv_dir=str(retry_run_dir),
+        pdf_root=_retry_pdf_root(stage),
         qc_enabled=False,
         confirm_sampling=False,
         quiet=False,
@@ -1114,7 +1158,7 @@ def _prompt_retry_if_needed(stage: str, artifact: dict | None) -> None:
 
         # human readable hint: if the retry still has errors, offer another retry prompt instead of stopping silently.
         if retry_artifact_dict.get("error_log_path"):
-            _prompt_retry_if_needed(stage, retry_artifact_dict)
+            _prompt_retry_if_needed(stage, retry_artifact_dict, depth=depth + 1)
     else:
         print("[retry] Re-screen failed. Check the retry error log for details.")
 
@@ -1391,10 +1435,15 @@ class MainWorkflow:
                             print("[retry] Could not build a filtered retry CSV; aborting retry step.")
                             return
                         retry_csv = filtered_retry_csv
+                        retry_run_dir = _prepare_isolated_retry_run_dir(stage, retry_csv)
+                        if not retry_run_dir:
+                            print("[retry] Could not prepare isolated retry run folder; aborting retry step.")
+                            return
                         retry_out = _retry_output_paths(stage, run_label, attempt_for_run)
                         _run_pipeline_guarded(
                             stage=stage,
-                            csv_dir=str(retry_csv.parent),
+                            csv_dir=str(retry_run_dir),
+                            pdf_root=_retry_pdf_root(stage),
                             qc_enabled=False,
                             confirm_sampling=False,
                             quiet=False,
@@ -1517,8 +1566,11 @@ if __name__ == "__main__":
         if _PROMPT_STATE.get("all_yes", False):
             resp = input("\nDo you want to back up your changes to GitHub now? (y/n): ").strip().lower()
             if resp == "y":
-                import subprocess
-                import sys
-                subprocess.run([sys.executable, "backup_to_github.py"])
+                result = subprocess.run([sys.executable, "backup_to_github.py"], check=False)
+                if result.returncode != 0:
+                    print(
+                        f"[warning] Backup script exited with code {result.returncode}. "
+                        "Run backup_to_github.py manually after checking git status."
+                    )
     except Exception:
         print("[warning] Could not trigger backup script. Please run backup_to_github.py manually if needed.")

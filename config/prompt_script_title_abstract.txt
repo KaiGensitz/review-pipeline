@@ -41,7 +41,7 @@ Field definitions and evaluation logic. You must output a single, flat JSON obje
 
 - "not_urban_context": 
    Question: "Is the study explicitly conducted OUTSIDE of urban areas?"
-   Logic: "Return true (Exclusion Met) ONLY IF matching the 'Exclude' Context criteria. Return false if explicitly urban. Return "NEUTRAL" if the setting is mixed or unspecified."
+   Logic: "Return true (Exclusion Met) ONLY IF matching the 'Exclude' Context criteria. Return false if explicitly urban. Return NEUTRAL if the setting is mixed or unspecified."
 
 - "wrong_publication_type": 
    Question: "Does the record lack an empirical methodology?"
@@ -57,7 +57,7 @@ Field definitions and evaluation logic. You must output a single, flat JSON obje
 
 - "is_eligible": 
    Question: "What is the final status of this paper for the scoping review?"
-   Logic: "Return false (Exclude) ONLY IF any of the definitive exclusion flags above are true. Return true (Include) ONLY IF the paper explicitly contains adults, smartphone tech, AI, PA, and an empirical design. Return "NEUTRAL" (Maybe) if the paper intersects health and digital technology but lacks sufficient detail to definitively prove all criteria."
+   Logic: "Return false (Exclude) ONLY IF any of the definitive exclusion flags above are true. Return true (Include) ONLY IF the paper explicitly contains adults, smartphone tech, AI, PA, and an empirical design. Return NEUTRAL (Maybe) if the paper intersects health and digital technology but lacks sufficient detail to definitively prove all criteria."
 
 - "confidence_score": 
    Question: "How certain are you of the decision?"
@@ -65,15 +65,18 @@ Field definitions and evaluation logic. You must output a single, flat JSON obje
 
 - "exclusion_reason_category": 
    Question: "Which criteria caused the exclusion?"
-   Logic: "If is_eligible is false, return the string name of the triggering flag (e.g., 'no_artificial_intelligence'). If is_eligible is true or "NEUTRAL", return null."
+   Logic: "If is_eligible is false, return the string name of the triggering flag (e.g., 'no_artificial_intelligence'). If is_eligible is true or NEUTRAL, return null."
 
 # NARROWING
 Formatting rules:
-    - Do NOT output the Questions or Logic instructions. Output ONLY the exact JSON keys (true|false|"NEUTRAL") and their evaluated values.
+   - Do NOT output the Questions or Logic instructions. Output ONLY the exact JSON keys and evaluated values.
     - Do NOT use nested JSON objects for the boolean flags.
     - Do NOT use Markdown fences (e.g., ```json) around your output.
     - Return ONLY a single valid flat JSON object.
     - Start directly with '{' and end with '}'.
+   - For flags that allow uncertainty, use the JSON string "NEUTRAL" (uppercase).
+   - Every string value must use JSON double quotes.
+   - confidence_score must be a numeric JSON literal between 0.0 and 1.0 (never a string).
 
 # CONTEXT
 ELIGIBILITY CRITERIA (include vs exclude):
@@ -95,7 +98,7 @@ Outcome
 
 Study Characteristics
 - Include: RCT; randomized controlled trial; observation; qualitative; mixed-methods; study protocol; feasibility study; usability study
-- Exclude: review (e.g., systematic, rapid, narrative, critical, scoping, meta-analyses); comment; letter; editorial
+- Exclude: review (e.g., systematic, rapid, narrative, critical, scoping, meta-analyses); comment; letter; editorial; dissertation; thesis
 
 Other
 - Include: published from 2011 onwards

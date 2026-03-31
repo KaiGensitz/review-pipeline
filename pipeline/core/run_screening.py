@@ -10,7 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from pipeline.core.pipeline import PaperScreeningPipeline
+from pipeline.core.pipeline import PaperScreeningPipeline, _load_stage_prompt_template
 from pipeline.selection.selector import load_labeled_examples
 from config.user_orchestrator import (
     PATH_SETTINGS,
@@ -329,14 +329,21 @@ def run_pipeline(
     run_label = run_label_override or ("qc_sample" if qc_only else "remaining_sample")
     sample_tag = run_label.replace("_sample", "") if run_label.endswith("_sample") else run_label
     base_prefix = f"{stage_prefix}{sample_tag}_sample_main"
-    eligibility_output = eligibility_output or stage_root / f"{base_prefix}_eligibility_{timestamp_label}.jsonl"
-    chunks_output = chunks_output or stage_root / f"{base_prefix}_selected_chunks_{timestamp_label}.jsonl"
-    text_output = text_output or stage_root / f"{base_prefix}_screening_results_readable_{timestamp_label}.txt"
-    error_log = error_log or stage_root / f"{base_prefix}_error_log_{timestamp_label}.txt"
+    prompt_campaign_id = "unknown"
+    try:
+        prompt_campaign_id = PaperScreeningPipeline._sha256_text(_load_stage_prompt_template(stage))[:12]
+    except Exception:
+        prompt_campaign_id = "unknown"
+
+    campaign_suffix = f"{timestamp_label}_{prompt_campaign_id}"
+    eligibility_output = eligibility_output or stage_root / f"{base_prefix}_eligibility_{campaign_suffix}.jsonl"
+    chunks_output = chunks_output or stage_root / f"{base_prefix}_selected_chunks_{campaign_suffix}.jsonl"
+    text_output = text_output or stage_root / f"{base_prefix}_screening_results_readable_{campaign_suffix}.txt"
+    error_log = error_log or stage_root / f"{base_prefix}_error_log_{campaign_suffix}.txt"
     resource_log_path = _stage_prefixed(
         Path(resource_log)
         if resource_log
-        else Path(stage_root / f"{base_prefix}_resource_usage_{timestamp_label}.log"),
+        else Path(stage_root / f"{base_prefix}_resource_usage_{campaign_suffix}.log"),
         stage,
     )
     existing_qc_path, existing_qc_readable = _existing_qc_files(stage_root, stage_prefix) if not force_new_qc else (None, None)
@@ -455,7 +462,7 @@ def run_pipeline(
     if stage in {"title_abstract", "full_text"}:
         print("Eligibility results:", "successfully done" if elig_path.exists() else "see error log", elig_path)
         print("Readable summary:", "successfully done" if text_path.exists() else "see error log", text_path)
-    if stage == "title_abstract":
+    if stage in {"title_abstract", "full_text"}:
         print("Chunk records:", "successfully done" if chunks_path.exists() else "see error log", chunks_path)
     print("Resource summary:", "successfully done" if resource_log_resolved.exists() else "see error log", resource_log_resolved)
 
@@ -499,6 +506,8 @@ def run_pipeline(
         "resource_log_path": str(resource_log_resolved),
         "run_label": run_label,
         "stage": stage,
+        "prompt_campaign_id": prompt_campaign_id,
+        "prompt_template_snapshot_path": str(pipeline._prompt_snapshot_path) if getattr(pipeline, "_prompt_snapshot_path", None) else None,
         "qc_sample_path": str(qc_sample_path) if qc_sample_path else None,
         "stage_csv_files": stage_csvs,
         "error_ids": sorted(error_ids),

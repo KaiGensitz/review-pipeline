@@ -23,11 +23,25 @@ class BackupToGitHub:
             print(f"Command failed: {' '.join(cmd)}")
             sys.exit(result.returncode)
 
+    def has_staged_changes(self) -> bool:
+        """human readable hint: detect whether there is anything staged before committing."""
+
+        result = subprocess.run(["git", "diff", "--cached", "--quiet"], check=False)
+        if result.returncode == 0:
+            return False
+        if result.returncode == 1:
+            return True
+        print("Command failed: git diff --cached --quiet")
+        sys.exit(result.returncode)
+
     def run_backup(self) -> None:
         """human readable hint: execute pull, add, commit, and push in safe sequence."""
 
         self.run_command(["git", "pull"])
         self.run_command(["git", "add", "."])
+        if not self.has_staged_changes():
+            print("No staged changes detected. Skipping commit and push.")
+            return
         self.run_command(["git", "commit", "-m", self.backup_message])
         self.run_command(["git", "push"])
         print("Backup complete! Your changes are now on GitHub.")

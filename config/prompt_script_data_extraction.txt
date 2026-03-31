@@ -33,6 +33,8 @@ Formatting rules:
     2) No Markdown fences.
     3) Start with '{' and end with '}'.
     4) Use null (not "N/A" or "Not mentioned") for missing data.
+  5) Every key and string value must use double quotes.
+  6) No trailing commas.
 
 EVIDENCE (PDF content):
 {data}
@@ -41,7 +43,7 @@ Response shape:
 {
   "study_id": {
     "first_author": "String",
-    "year": "Integer",
+    "year": "Integer or null",
     "country": "String"
   },
   "methods": {
@@ -55,7 +57,7 @@ Response shape:
   },
   "urban_context": {
     "value": "String (e.g., 'High-density metropolitan area, New York City')",
-    "provenance": "String (Quote defining the setting)"
+    "provenance": "String (Quote defining the setting)",
     "definition_type": "String (e.g., Administrative, Density, Unspecified)",
     "specific_location": "String",
     "environmental_inputs": ["List (e.g., Weather, Walkability, Pollution)"]
@@ -90,8 +92,8 @@ Response shape:
     },
     "sustainability_aspects": {
       "value": "String (e.g., 'Energy-efficient code', 'Nature-based routing')",
-      "provenance": "String (Quote)"
-      "sustainability_features": ["List (e.g., Battery Opt, Green Exercise, None)"],
+      "provenance": "String (Quote)",
+      "sustainability_features": ["List (e.g., Battery Opt, Green Exercise, None)"]
     }
   },
   "outcomes": {

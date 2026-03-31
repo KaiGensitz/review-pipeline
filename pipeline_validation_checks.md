@@ -24,7 +24,12 @@ Use this checklist before running `main.py`.
 - Eligibility diagnostics include per-paper hashes (`llm_input_sha256`, `full_prompt_sha256`) for reproducibility audits.
 - `LLM_SETTINGS` async controls are set to endpoint-safe values (`async_max_concurrency`, retry/backoff settings).
 - Screening JSON responses are schema-validated (Pydantic); repeated validation failures are visible in error logs.
+- Known near-valid shape drift is normalized before schema validation (for example, object-form `step_by_step_deliberation`), then strict validation is applied.
 - Placeholder rule is respected: criteria file is only used when `{eligibility_criteria}` is present in the active prompt.
+- Full-text retrieval now drops low-information extraction noise chunks (for example punctuation/dot leader fragments) before embedding selection.
+- Full-text retrieval now applies adaptive fallback (`top_k` expansion and threshold relaxation) when primary evidence is too weak.
+- Selected chunks include per-chunk certainty metrics (`relevance_score`, `retrieval_rank`, `certainty_percentile`, `certainty_label`, `selection_sources`) for human audit.
+- Eligibility diagnostics include selected-chunk quality/coverage summaries (`selected_score_stats`, `selected_page_coverage`, `selection_trace`).
 
 ## Integrity checks
 
@@ -99,6 +104,7 @@ Expected outputs:
 - split files:
   - `..._eligibility_included_...jsonl`
   - `..._eligibility_excluded_...jsonl`
+- `output/full_text/full_text_<qc_sample|remaining_sample>_selected_chunks_*.jsonl`
 - `..._screening_results_readable_...txt`
 - `..._resource_usage_...log`
 - validation files (`alignment`, `stats_report`, `matrix`)

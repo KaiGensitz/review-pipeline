@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
@@ -237,7 +237,8 @@ def _count_qc_papers(qc_sample_path: Path | None) -> int:
 try:
 	from codecarbon import EmissionsTracker, OfflineEmissionsTracker  # type: ignore[import-not-found]
 except Exception:  # pragma: no cover - optional dependency
-	raise RuntimeError("CodeCarbon is required but not installed; install codecarbon before running the pipeline.")
+	EmissionsTracker = None
+	OfflineEmissionsTracker = None
 
 
 @dataclass
@@ -277,6 +278,12 @@ class CarbonTrackerManager:
 	def _init_tracker(self) -> None:
 		if not self._enabled:
 			raise RuntimeError("CodeCarbon tracking was requested but disabled at construction time.")
+
+		if EmissionsTracker is None:
+			raise RuntimeError(
+				"CodeCarbon tracking requested but package is not installed. "
+				"Install with: python -m pip install codecarbon"
+			)
 
 		try:
 			output_dir = Path(CARBON_CONFIG["output_dir"])
@@ -421,8 +428,17 @@ class ResourceUsageTracker:
 		if not self.config.enable_tracking or not self.config.enable_codecarbon:
 			return
 		if self._carbon_tracker is None:
-			self._carbon_tracker = CarbonTrackerManager(enabled=True)
-		self._carbon_tracker.start()
+			try:
+				self._carbon_tracker = CarbonTrackerManager(enabled=True)
+			except Exception as exc:  # pylint: disable=broad-except
+				logging.warning("CodeCarbon disabled for this run: %s", exc)
+				self._carbon_tracker = None
+				return
+		try:
+			self._carbon_tracker.start()
+		except Exception as exc:  # pylint: disable=broad-except
+			logging.warning("CodeCarbon start failed; continuing without emissions tracking: %s", exc)
+			self._carbon_tracker = None
 
 	def set_qc_count(self, qc_count: int) -> None:
 		"""Allow callers to set QC paper count without re-reading the QC CSV."""
@@ -479,7 +495,7 @@ class ResourceUsageTracker:
 			"embedding_tokens_source": embedding_tokens_source,
 			"pdf_text_tokens": pdf_text_tokens,
 			"pdf_visual_tokens": pdf_visual_tokens,
-			"timestamp": datetime.utcnow().isoformat(),
+			"timestamp": datetime.now(timezone.utc).isoformat(),
 			"paper_seconds": paper_seconds,
 		}
 		self._paper_records.append(record)
@@ -502,7 +518,7 @@ class ResourceUsageTracker:
 	) -> None:
 		"""Append buffered per-paper entries plus per-run totals in one write."""
 
-		timestamp = datetime.utcnow().isoformat()
+		timestamp = datetime.now(timezone.utc).isoformat()
 		total_runtime_avg_seconds_per_paper = (total_runtime_seconds / paper_count) if paper_count else 0.0
 		self_enabled = getattr(self.config, "enable_time_savings", False)
 		human_rate_min_per_paper = None

@@ -48,6 +48,8 @@ python -m pip install -r requirement.txt
 Notes:
 - Wait until installation completes successfully.
 - First run may download NLTK tokenizer data.
+- `pdfplumber` is required for PDF stages.
+- If `codecarbon` is unavailable, the pipeline now continues without emissions tracking (warning only).
 
 ## 4) Add API key
 
