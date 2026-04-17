@@ -241,7 +241,7 @@ class RelevanceSelector:
 		selected = list(merged.values())
 		selected.sort(
 			key=lambda item: (
-				item.get("kind") != "title",
+				item.get("kind") not in self.always_include_kinds,
 				-item.get("score", 0.0),
 				item.get("page_start") or 0,
 				item.get("line_start") or 0,

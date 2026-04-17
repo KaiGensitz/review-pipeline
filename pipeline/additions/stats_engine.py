@@ -98,13 +98,26 @@ def _clean_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _normalize_covidence_id_value(value: object) -> str:
+    """human readable hint: normalize ID formatting so '#250', '250', and '250.0' map to the same key."""
+
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return ""
+
+    text = text.lstrip("#")
+    if re.fullmatch(r"\d+\.0", text):
+        text = text[:-2]
+    return text
+
+
 def _normalize_id_column(df: pd.DataFrame) -> pd.Series:
     """Find the best ID column and return it as strings."""
 
     candidates = ["Covidence #", "Covidence#", "paper_id", "id", "ID"]
     for col in candidates:
         if col in df.columns:
-            return df[col].astype(str).str.strip().str.lstrip("#")
+            return df[col].apply(_normalize_covidence_id_value)
     raise KeyError("Could not find an ID column in Covidence export")
 
 
@@ -400,7 +413,7 @@ def _load_ai() -> tuple[pd.DataFrame, Path]:
                     if not line.strip() or '"meta":' in line:
                         continue
                     payload = json.loads(line)
-                    paper_id = str(payload.get("paper_id", "")).strip().lstrip("#")
+                    paper_id = _normalize_covidence_id_value(payload.get("paper_id", ""))
                     if not paper_id:
                         continue
                     decision_raw = payload.get("llm_decision")
@@ -688,7 +701,12 @@ def _load_qc_sample_ids(suffix: str | None) -> set[str] | None:
         print(f"[qc] QC sample missing 'paper_id' column at {qc_path}. Validation will use overlap IDs instead.")
         return None
 
-    return {str(val) for val in df["paper_id"].dropna().astype(str).tolist()}
+    normalized = {
+        _normalize_covidence_id_value(val)
+        for val in df["paper_id"].dropna().tolist()
+    }
+    normalized.discard("")
+    return normalized
 
 
 def validate_screening(stage: str, args) -> None:
@@ -701,7 +719,14 @@ def validate_screening(stage: str, args) -> None:
     suffix = _extract_timestamp_suffix(ai_path)
     qc_ids = _load_qc_sample_ids(suffix)
     if qc_ids:
-        merged = merged[merged["covidence_id"].isin(qc_ids)].copy()
+        filtered = merged[merged["covidence_id"].isin(qc_ids)].copy()
+        if filtered.empty:
+            print(
+                "[qc] QC-ID filtering produced zero overlap (likely ID-format mismatch across files). "
+                "Proceeding with unfiltered AI-human overlap."
+            )
+        else:
+            merged = filtered
     if merged.empty:
         print("[qc] No overlapping IDs after filtering; validation outputs will report zero totals.")
 

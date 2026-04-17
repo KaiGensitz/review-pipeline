@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import csv
-from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import math
@@ -25,7 +24,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Generator, Iterable, Tuple, TextIO
+from typing import Generator, Iterable, Mapping, Tuple, TextIO
 from typing import Any, Literal
 from statistics import mean, median, pstdev
 
@@ -41,6 +40,7 @@ from pipeline.integrations.embedding_utils import (
     read_pdf_file,
     read_pdf_pages,
     detect_language,
+    detect_language_code,
     normalize_extracted_text,
 )
 from pipeline.integrations.llm_client import OpenAIResponder
@@ -51,6 +51,7 @@ from config.user_orchestrator import (
     PATH_SETTINGS,
     PROMPT_FILES,
     SCREENING_DEFAULTS,
+    STUDY_TAGS_INCLUDE,
     STAGE_RULES,
     require_setting,
 )
@@ -68,6 +69,22 @@ use_api = require_setting(LLM_SETTINGS, "use_api", "LLM_SETTINGS")
 gpustack_model = require_setting(LLM_SETTINGS, "screening_model", "LLM_SETTINGS")
 gpustack_base_url = require_setting(LLM_SETTINGS, "gpustack_base_url", "LLM_SETTINGS")
 llm_max_tokens = require_setting(LLM_SETTINGS, "max_tokens", "LLM_SETTINGS", int)
+llm_context_window_total_tokens = require_setting(
+    LLM_SETTINGS,
+    "context_window_total_tokens",
+    "LLM_SETTINGS",
+    int,
+)
+
+if llm_max_tokens <= 0:
+    raise ValueError("LLM_SETTINGS['max_tokens'] must be a positive integer.")
+if llm_context_window_total_tokens <= 0:
+    raise ValueError("LLM_SETTINGS['context_window_total_tokens'] must be a positive integer.")
+if llm_max_tokens >= llm_context_window_total_tokens:
+    raise ValueError(
+        "LLM_SETTINGS['max_tokens'] must be smaller than "
+        "LLM_SETTINGS['context_window_total_tokens'] so prompt tokens can fit in context."
+    )
 
 BATCH_SIZE_DEFAULT = require_setting(SCREENING_DEFAULTS, "batch_size", "SCREENING_DEFAULTS")
 SAMPLE_SIZE_DEFAULT = require_setting(SCREENING_DEFAULTS, "sample_size", "SCREENING_DEFAULTS")
@@ -81,7 +98,8 @@ SAMPLE_SEED_DEFAULT = require_setting(SCREENING_DEFAULTS, "sample_seed", "SCREEN
 
 TOKENS_PER_WORD = 1.3
 TOKENS_PER_PAGE_IMAGE = 258
-CONTEXT_WINDOW = 78_000
+CONTEXT_WINDOW = int(llm_context_window_total_tokens)
+PROMPT_TOKEN_BUDGET = max(1, CONTEXT_WINDOW - int(llm_max_tokens))
 TITLE_TRUNC = 50  # short folder names to avoid Windows path limits
 PAPER_PDF_NAME = "paper.pdf"
 ELIGIBILITY_CRITERIA_PLACEHOLDER = "{eligibility_criteria}"
@@ -89,6 +107,28 @@ RETRIEVAL_FALLBACK_TOP_K = 20
 RETRIEVAL_WEAK_MIN_NON_TITLE = 3
 RETRIEVAL_WEAK_MIN_WORDS = 280
 RETRIEVAL_FRAGMENTED_MAX_SHARE = 0.40
+RETRIEVAL_MIN_NON_TITLE_TARGET = 2
+RETRIEVAL_MIN_METHOD_TARGET = 1
+RETRIEVAL_DATA_PROMPT_BUDGET_RATIO = 0.60
+RETRIEVAL_DATA_PROMPT_BUDGET_MIN_TOKENS = 12_000
+RETRIEVAL_ASSUMED_CHUNK_TOKENS = 420
+RETRIEVAL_MAX_NON_TITLE_CHUNKS = 24
+RETRIEVAL_CHUNK_PROMPT_OVERHEAD_TOKENS = 28
+RETRIEVAL_DIVERSITY_SECTION_SOFT_CAP = 2
+RETRIEVAL_DIVERSITY_PAGE_WINDOW_SIZE = 2
+RETRIEVAL_DIVERSITY_PAGE_WINDOW_SOFT_CAP = 2
+RETRIEVAL_DIVERSITY_NEAR_DUPLICATE_JACCARD = 0.82
+RETRIEVAL_COUNTEREVIDENCE_MAX_PAIRS = 2
+RETRIEVAL_COUNTEREVIDENCE_MAX_SCORE = 0.08
+RETRIEVAL_COUNTEREVIDENCE_MIN_NEG_SCORE = 0.02
+RETRIEVAL_COUNTEREVIDENCE_PAGE_DISTANCE = 4
+RETRIEVAL_COUNTEREVIDENCE_MIN_PRIMARY_SCORE = 0.02
+RETRIEVAL_COUNTEREVIDENCE_MIN_NON_TITLE_CAP = 6
+RETRIEVAL_PRECISION_MEDIUM_NON_TITLE_CAP = 4
+RETRIEVAL_MONITORING_ONLY_PENALTY = 0.10
+FULLTEXT_SENTENCE_TARGET = int(EMBEDDING_SETTINGS.get("chunk_size", 20) or 20)
+RETRIEVAL_MIN_SENTENCE_FLOOR = max(6, int(FULLTEXT_SENTENCE_TARGET * 0.6))
+SUPPORTED_FULLTEXT_LANGUAGE_CODES = {"en", "de"}
 FULLTEXT_BORDERLINE_CONFIDENCE_MIN = 0.45
 FULLTEXT_BORDERLINE_CONFIDENCE_MAX = 0.75
 SECTION_RESCUE_KEYWORDS = (
@@ -119,10 +159,14 @@ SECTION_RESCUE_KEYWORDS = (
 SECTION_PRIORITY = ("introduction", "method", "results", "discussion", "conclusion")
 SECTION_INFERENCE_PATTERNS: dict[str, re.Pattern[str]] = {
     "introduction": re.compile(r"\b(introduction|background)\b", re.IGNORECASE),
-    "method": re.compile(r"\b(methods?|methodology|materials?\s+and\s+methods?|study\s+design)\b", re.IGNORECASE),
+    "method": re.compile(
+        r"\b(methods?|methodology|materials?\s+and\s+methods?|study\s+design|participants?|intervention|procedure|protocol|randomi[sz]ed)\b",
+        re.IGNORECASE,
+    ),
     "results": re.compile(r"\b(results?|findings)\b", re.IGNORECASE),
     "discussion": re.compile(r"\bdiscussion\b", re.IGNORECASE),
     "conclusion": re.compile(r"\b(conclusion|conclusions|summary)\b", re.IGNORECASE),
+    "reference": re.compile(r"\b(references?|bibliography|acknowledg(?:e)?ments?)\b", re.IGNORECASE),
 }
 PUBLISHER_BOILERPLATE_STRONG_PATTERNS = [
     re.compile(pattern, re.IGNORECASE)
@@ -152,6 +196,607 @@ PUBLISHER_BOILERPLATE_WEAK_PATTERNS = [
         r"license",
     )
 ]
+ALWAYS_INCLUDED_CHUNK_KINDS = frozenset({"title"})
+DEFAULT_INTERVENTION_SIGNAL_TERMS = (
+    "intervention",
+    "trial",
+    "protocol",
+    "just-in-time",
+    "adaptive",
+    "personalized",
+    "feedback",
+    "coaching",
+    "rehabilitation",
+    "physical therapy",
+)
+DEFAULT_PRIMARY_TOPIC_SIGNAL_TERMS = (
+    "artificial intelligence",
+    "machine learning",
+    "deep learning",
+    "neural network",
+    "reinforcement learning",
+    "q-learning",
+    "contextual bandit",
+    "nlp",
+    "nlu",
+    "llm",
+    "cnn",
+    "model training",
+)
+DEFAULT_SECONDARY_TOPIC_SIGNAL_TERMS = (
+    "physical activity",
+    "exercise",
+    "workout",
+    "active mobility",
+    "walking",
+    "running",
+    "cycling",
+    "movement",
+    "motor fitness",
+    "sedentary",
+    "range of motion",
+    "fitness",
+)
+INTERVENTION_SIGNAL_PATTERN = re.compile(
+    r"\b(intervention|trial|protocol|just[- ]?in[- ]?time|adaptive|personalized|feedback|coaching|rehabilitation|physical\s+therapy)\b",
+    re.IGNORECASE,
+)
+AI_SIGNAL_PATTERN = re.compile(
+    r"\b(artificial\s+intelligence|machine\s+learning|deep\s+learning|neural\s+network|reinforcement\s+learning|q-learning|contextual\s+bandit|nlp|nlu|llm|cnn|model\s+training)\b",
+    re.IGNORECASE,
+)
+PA_SIGNAL_PATTERN = re.compile(
+    r"\b(physical\s+activity|exercise|workout|active\s+mobility|walking|running|cycling|movement|motor\s+fitness|sedentary|range\s+of\s+motion|fitness)\b",
+    re.IGNORECASE,
+)
+REFERENCE_HEAVY_PATTERN = re.compile(r"\b(references|bibliography|acknowledg(?:e)?ments?)\b", re.IGNORECASE)
+INLINE_CITATION_PATTERN = re.compile(r"\[[0-9,\s\-]+\]|\([12][0-9]{3}\)")
+METHOD_EVIDENCE_PATTERN = re.compile(
+    r"\b(methods?|methodology|materials?\s+and\s+methods?|study\s+design|participants?|recruit(?:ed|ment)?|intervention|procedure|protocol|randomi[sz]ed|outcome\s+measure|baseline|follow[- ]?up)\b",
+    re.IGNORECASE,
+)
+MONITORING_OR_PROTOCOL_PATTERN = re.compile(
+    r"\b(monitor(?:ing)?|assessment|evaluation|feasibility|usability|acceptability|observational|classification|prediction|detection|framework|protocol|pilot)\b",
+    re.IGNORECASE,
+)
+INTERVENTION_ACTION_PATTERN = re.compile(
+    r"\b(intervention|randomi[sz]ed|trial|assigned|arm|program|coaching|feedback|counsel(?:ing|ling)|behavior(?:al)?\s+change|exercise\s+prescription|treatment|support)\b",
+    re.IGNORECASE,
+)
+MONITORING_SIGNAL_SEED_PATTERN = re.compile(
+    r"\b(monitor|assess|evaluat|feasib|usabil|acceptab|observ|classif|predict|detect|framework|protocol|pilot|measur|diagnos|benchmark)\w*\b",
+    re.IGNORECASE,
+)
+INTERVENTION_ACTION_SEED_PATTERN = re.compile(
+    r"\b(interven|randomi|trial|assign|arm|program|coach|feedback|counsel|behavior|exercise|treat|support|nudge|goal|recommend|prescrib|prompt|deliver)\w*\b",
+    re.IGNORECASE,
+)
+KB_SIGNAL_CONTEXT_STOPWORDS = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "with",
+        "without",
+        "from",
+        "into",
+        "onto",
+        "this",
+        "that",
+        "these",
+        "those",
+        "only",
+        "using",
+        "used",
+        "via",
+        "among",
+        "between",
+        "within",
+        "across",
+        "about",
+        "their",
+        "there",
+        "where",
+        "which",
+        "while",
+        "during",
+        "after",
+        "before",
+    }
+)
+NEVER_MATCH_PATTERN = re.compile(r"(?!)")
+SUBSTANTIVE_MAIN_TEXT_PATTERN = re.compile(
+    r"\b(results?|findings|analysis|effect|improv(?:ed|ement)|increase|decrease|significant|comparison|group|sample|participants?|outcome|baseline|follow[- ]?up)\b",
+    re.IGNORECASE,
+)
+CORE_SCREENING_SCHEMA_FIELDS = {
+    "step_by_step_deliberation",
+    "is_eligible",
+    "confidence_score",
+    "justification",
+    "exclusion_reason_category",
+    "seed_references",
+}
+EXCLUSION_FIELD_PREFIXES = (
+    "no_",
+    "not_",
+    "wrong_",
+    "insufficient_",
+    "language_",
+    "full_",
+    "outside_",
+    "without_",
+    "exclude_",
+    "non_",
+)
+LEGACY_DEFAULT_EXCLUSION_KEYS = (
+    "not_adult_population",
+    "no_smartphone_technology",
+    "no_artificial_intelligence",
+    "no_physical_activity",
+    "not_urban_context",
+    "wrong_publication_type",
+    "insufficient_context",
+)
+
+
+def _normalize_schema_key(value: str) -> str:
+    """Normalize human-readable labels into stable snake_case schema keys."""
+
+    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", str(value or "").strip().lower())
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    return normalized
+
+
+def _build_study_tag_field_keys(tags: Iterable[str]) -> tuple[str, ...]:
+    """Convert STUDY_TAGS_INCLUDE labels into canonical schema key candidates."""
+
+    keys = {
+        _normalize_schema_key(tag)
+        for tag in tags
+        if _normalize_schema_key(tag)
+    }
+    return tuple(sorted(keys))
+
+
+def _looks_like_exclusion_field(field_name: str) -> bool:
+    """Heuristic detector for exclusion-flag style schema keys."""
+
+    key = _normalize_schema_key(field_name)
+    if not key or key in CORE_SCREENING_SCHEMA_FIELDS:
+        return False
+    if key.startswith(EXCLUSION_FIELD_PREFIXES):
+        return True
+    if key.endswith("_context"):
+        return True
+    return False
+
+
+def _select_topic_absence_reason_key(
+    reason_keys: Iterable[str],
+    topic_terms: Iterable[str],
+    preferred_key: str,
+) -> str | None:
+    """Pick the best reason key for topic-absence checks using configured topic terms."""
+
+    normalized_keys = [key for key in {_normalize_schema_key(k) for k in reason_keys} if key]
+    if preferred_key in normalized_keys:
+        return preferred_key
+
+    topic_tokens = {
+        token
+        for term in topic_terms
+        for token in re.findall(r"[a-z0-9]+", str(term).lower())
+        if len(token) >= 3
+    }
+    for key in normalized_keys:
+        if not key.startswith("no_"):
+            continue
+        key_tokens = set(key.split("_"))
+        if key_tokens & topic_tokens:
+            return key
+    return None
+
+
+def _normalize_prompt_heading(value: str) -> str:
+    """Normalize prompt section headings for resilient matching."""
+
+    heading = re.sub(r"\s+", " ", (value or "").strip().lower()).strip(":")
+    heading = heading.replace("\\", "/")
+    heading = heading.replace(" / ", "/").replace("/ ", "/").replace(" /", "/")
+    return heading
+
+
+def _split_prompt_terms(value: str) -> list[str]:
+    """Split prompt include/exclude lists into normalized term candidates."""
+
+    if not value:
+        return []
+
+    raw = str(value).replace("\u2013", ",").replace("\u2014", ",")
+    parts = [part.strip() for part in raw.split(";")]
+    if len(parts) == 1:
+        parts = [part.strip() for part in raw.split(",")]
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        term = re.sub(r"\s+", " ", part).strip(" .:-")
+        term = re.sub(r"^(?:for example|e\.g\.)\s+", "", term, flags=re.IGNORECASE)
+        term = term.strip()
+        if len(term) < 3 or len(term) > 120:
+            continue
+        lowered = term.lower()
+        if lowered in {"include", "exclude", "and", "or"}:
+            continue
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        cleaned.append(lowered)
+    return cleaned
+
+
+def _extract_prompt_rule_terms(
+    prompt_template: str,
+    section_aliases: set[str],
+    rule_label: str,
+) -> list[str]:
+    """Extract '- <rule>:' term lists from named sections in the active prompt."""
+
+    aliases = {_normalize_prompt_heading(alias) for alias in section_aliases}
+    rule = str(rule_label or "").strip().lower()
+    if not rule:
+        return []
+
+    active_section: str | None = None
+    extracted: list[str] = []
+
+    for raw_line in (prompt_template or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            continue
+
+        if not line.startswith("-"):
+            heading = _normalize_prompt_heading(line)
+            active_section = heading if heading in aliases else None
+            continue
+
+        if active_section is None:
+            continue
+
+        match = re.match(
+            rf"^-\s*{re.escape(rule)}\s*:\s*(.+)$",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            continue
+        extracted.extend(_split_prompt_terms(match.group(1)))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for term in extracted:
+        if term in seen:
+            continue
+        seen.add(term)
+        deduped.append(term)
+    return deduped
+
+
+def _extract_prompt_include_terms(prompt_template: str, section_aliases: set[str]) -> list[str]:
+    """Extract '- Include:' term lists from named sections in the active prompt."""
+
+    return _extract_prompt_rule_terms(prompt_template, section_aliases, "include")
+
+
+def _extract_prompt_exclude_terms(prompt_template: str, section_aliases: set[str]) -> list[str]:
+    """Extract '- Exclude:' term lists from named sections in the active prompt."""
+
+    return _extract_prompt_rule_terms(prompt_template, section_aliases, "exclude")
+
+
+def _normalize_signal_term(term: str) -> str:
+    """Normalize one lexical signal term before regex compilation."""
+
+    value = re.sub(r"\s+", " ", str(term or "").strip().lower())
+    value = value.strip(" .;:,")
+    if not value or len(value) < 3 or len(value) > 80:
+        return ""
+    if re.fullmatch(r"[\W_]+", value):
+        return ""
+    return value
+
+
+def _compile_signal_pattern_from_terms(
+    terms: Iterable[str],
+    fallback_pattern: re.Pattern[str],
+    max_terms: int = 120,
+) -> tuple[re.Pattern[str], tuple[str, ...]]:
+    """Compile a safe regex from term candidates; fall back when empty/invalid."""
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        cleaned = _normalize_signal_term(str(term))
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        normalized.append(cleaned)
+
+    if not normalized:
+        return fallback_pattern, tuple()
+
+    fragments = [re.escape(term).replace(r"\ ", r"\s+") for term in normalized]
+    fragments = sorted(set(fragments), key=len, reverse=True)[: max(1, int(max_terms))]
+
+    try:
+        compiled = re.compile(r"(?<!\\w)(?:" + "|".join(fragments) + r")(?!\\w)", re.IGNORECASE)
+    except re.error:
+        return fallback_pattern, tuple()
+
+    return compiled, tuple(normalized[: max(1, int(max_terms))])
+
+
+def _dedupe_signal_terms(terms: Iterable[str], max_terms: int = 120) -> tuple[str, ...]:
+    """Normalize and deduplicate lexical terms while preserving input order."""
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        cleaned = _normalize_signal_term(str(term))
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        deduped.append(cleaned)
+        if len(deduped) >= max(1, int(max_terms)):
+            break
+    return tuple(deduped)
+
+
+def _collect_kb_seed_terms(
+    examples: Iterable[Any],
+    *,
+    target_label: str,
+    seed_pattern: re.Pattern[str],
+    max_terms: int = 80,
+    min_count: int = 1,
+) -> tuple[str, ...]:
+    """Harvest cue terms from KB examples using lightweight stem-based matching."""
+
+    label = str(target_label or "").strip().upper()
+    if not label:
+        return tuple()
+
+    counts: dict[str, int] = {}
+    for example in examples:
+        if not isinstance(example, Mapping):
+            continue
+        if str(example.get("label") or "").strip().upper() != label:
+            continue
+
+        text = str(example.get("text") or "")
+        if not text:
+            continue
+
+        tokens = re.findall(r"[a-z][a-z0-9\-]{2,}", text.lower())
+        for idx, token in enumerate(tokens):
+            if not seed_pattern.search(token):
+                continue
+
+            candidates = [token]
+            if idx > 0 and tokens[idx - 1] not in KB_SIGNAL_CONTEXT_STOPWORDS:
+                candidates.append(f"{tokens[idx - 1]} {token}")
+            if idx + 1 < len(tokens) and tokens[idx + 1] not in KB_SIGNAL_CONTEXT_STOPWORDS:
+                candidates.append(f"{token} {tokens[idx + 1]}")
+
+            for candidate in candidates:
+                cleaned = _normalize_signal_term(candidate)
+                if not cleaned or len(cleaned) > 60:
+                    continue
+                counts[cleaned] = counts.get(cleaned, 0) + 1
+
+    ranked = [
+        term
+        for term, count in sorted(
+            counts.items(),
+            key=lambda item: (-item[1], -len(item[0]), item[0]),
+        )
+        if count >= max(1, int(min_count))
+    ]
+    return tuple(ranked[: max(1, int(max_terms))])
+
+
+def _build_section_rescue_keywords(prompt_terms: Iterable[str]) -> tuple[str, ...]:
+    """Build section-rescue keywords by extending base keywords with concise prompt terms."""
+
+    keywords: set[str] = set(SECTION_RESCUE_KEYWORDS)
+    for term in prompt_terms:
+        cleaned = _normalize_signal_term(str(term))
+        if not cleaned:
+            continue
+        if len(cleaned.split()) > 4:
+            continue
+        if len(cleaned) > 40:
+            continue
+        keywords.add(cleaned)
+    return tuple(sorted(keywords))
+
+
+def _build_prompt_signal_config(prompt_template: str) -> dict[str, Any]:
+    """Derive topic-sensitive retrieval signals from the active prompt template."""
+
+    intervention_include = _extract_prompt_include_terms(
+        prompt_template,
+        {"intervention / exposure", "intervention/exposure", "intervention", "exposure"},
+    )
+    outcome_include = _extract_prompt_include_terms(prompt_template, {"outcome", "outcomes"})
+
+    intervention_seed_terms = list(DEFAULT_INTERVENTION_SIGNAL_TERMS) + intervention_include
+    primary_seed_terms = intervention_include if intervention_include else list(DEFAULT_PRIMARY_TOPIC_SIGNAL_TERMS)
+    secondary_seed_terms = outcome_include if outcome_include else list(DEFAULT_SECONDARY_TOPIC_SIGNAL_TERMS)
+
+    intervention_pattern, intervention_terms = _compile_signal_pattern_from_terms(
+        intervention_seed_terms,
+        INTERVENTION_SIGNAL_PATTERN,
+    )
+    primary_pattern, primary_terms = _compile_signal_pattern_from_terms(
+        primary_seed_terms,
+        AI_SIGNAL_PATTERN,
+    )
+    secondary_pattern, secondary_terms = _compile_signal_pattern_from_terms(
+        secondary_seed_terms,
+        PA_SIGNAL_PATTERN,
+    )
+
+    source = "prompt_criteria" if intervention_include or outcome_include else "default_signals"
+    section_rescue_keywords = _build_section_rescue_keywords(
+        list(intervention_include) + list(outcome_include)
+    )
+
+    return {
+        "source": source,
+        "intervention_pattern": intervention_pattern,
+        "primary_pattern": primary_pattern,
+        "secondary_pattern": secondary_pattern,
+        "intervention_terms": intervention_terms,
+        "primary_terms": primary_terms,
+        "secondary_terms": secondary_terms,
+        "section_rescue_keywords": section_rescue_keywords,
+    }
+
+
+def _build_monitoring_signal_config(
+    prompt_template: str,
+    topic_signal_config: dict[str, Any],
+    kb_examples: Iterable[Any],
+) -> dict[str, Any]:
+    """Build monitoring/action cues from prompt + user KB to avoid case-specific hardcoding."""
+
+    intervention_section_aliases = {
+        "intervention / exposure",
+        "intervention/exposure",
+        "intervention",
+        "exposure",
+    }
+    outcome_section_aliases = {"outcome", "outcomes"}
+
+    prompt_intervention_terms = _extract_prompt_include_terms(
+        prompt_template,
+        intervention_section_aliases,
+    )
+    prompt_outcome_terms = _extract_prompt_include_terms(prompt_template, outcome_section_aliases)
+    prompt_outcome_exclude_terms = _extract_prompt_exclude_terms(prompt_template, outcome_section_aliases)
+
+    kb_examples_list = [dict(item) for item in kb_examples if isinstance(item, Mapping)]
+    kb_pos_count = sum(1 for item in kb_examples_list if str(item.get("label") or "").strip().upper() == "POS")
+    kb_neg_count = sum(1 for item in kb_examples_list if str(item.get("label") or "").strip().upper() == "NEG")
+
+    kb_pos_action_terms = _collect_kb_seed_terms(
+        kb_examples_list,
+        target_label="POS",
+        seed_pattern=INTERVENTION_ACTION_SEED_PATTERN,
+        max_terms=80,
+        min_count=1,
+    )
+    kb_neg_monitor_terms = _collect_kb_seed_terms(
+        kb_examples_list,
+        target_label="NEG",
+        seed_pattern=MONITORING_SIGNAL_SEED_PATTERN,
+        max_terms=80,
+        min_count=1,
+    )
+    kb_pos_monitor_terms = set(
+        _collect_kb_seed_terms(
+            kb_examples_list,
+            target_label="POS",
+            seed_pattern=MONITORING_SIGNAL_SEED_PATTERN,
+            max_terms=80,
+            min_count=2,
+        )
+    )
+
+    topic_intervention_terms = tuple(topic_signal_config.get("intervention_terms") or ())
+    action_seed_terms = [
+        term
+        for term in list(prompt_intervention_terms) + list(topic_intervention_terms)
+        if INTERVENTION_ACTION_SEED_PATTERN.search(term)
+    ]
+    action_seed_terms.extend(kb_pos_action_terms)
+    action_seed_terms = list(_dedupe_signal_terms(action_seed_terms, max_terms=120))
+
+    intervention_action_pattern, intervention_action_terms = _compile_signal_pattern_from_terms(
+        action_seed_terms,
+        topic_signal_config.get("intervention_pattern") or INTERVENTION_ACTION_PATTERN,
+        max_terms=120,
+    )
+
+    monitoring_prompt_terms = [
+        term
+        for term in (list(prompt_outcome_terms) + list(prompt_outcome_exclude_terms))
+        if MONITORING_SIGNAL_SEED_PATTERN.search(term)
+    ]
+    monitoring_seed_terms = list(monitoring_prompt_terms) + list(kb_neg_monitor_terms)
+
+    action_term_set = {
+        _normalize_signal_term(term)
+        for term in list(intervention_action_terms) + list(topic_intervention_terms)
+        if _normalize_signal_term(term)
+    }
+    filtered_monitoring_terms = []
+    for term in monitoring_seed_terms:
+        cleaned = _normalize_signal_term(term)
+        if not cleaned:
+            continue
+        if cleaned in action_term_set:
+            continue
+        if cleaned in kb_pos_monitor_terms:
+            continue
+        filtered_monitoring_terms.append(cleaned)
+    filtered_monitoring_terms = list(_dedupe_signal_terms(filtered_monitoring_terms, max_terms=120))
+
+    monitoring_pattern, monitoring_terms = _compile_signal_pattern_from_terms(
+        filtered_monitoring_terms,
+        NEVER_MATCH_PATTERN,
+        max_terms=120,
+    )
+
+    prompt_requires_intervention = bool(prompt_intervention_terms) or bool(
+        re.search(r"\bintervention(?:[- ]first)?\b", prompt_template, re.IGNORECASE)
+    )
+    kb_has_contrastive_examples = kb_pos_count > 0 and kb_neg_count > 0
+    enabled = bool(
+        prompt_requires_intervention
+        and kb_has_contrastive_examples
+        and monitoring_terms
+        and (intervention_action_terms or topic_intervention_terms)
+    )
+
+    if enabled:
+        source = "prompt_kb_dynamic"
+    elif not prompt_requires_intervention:
+        source = "disabled_prompt_no_intervention_scope"
+    elif not kb_has_contrastive_examples:
+        source = "disabled_kb_missing_pos_neg"
+    elif not monitoring_terms:
+        source = "disabled_no_monitoring_terms"
+    else:
+        source = "disabled_no_intervention_action_terms"
+
+    if not enabled:
+        monitoring_pattern = NEVER_MATCH_PATTERN
+
+    return {
+        "source": source,
+        "enabled": enabled,
+        "monitoring_pattern": monitoring_pattern,
+        "monitoring_terms": tuple(monitoring_terms),
+        "intervention_action_pattern": intervention_action_pattern,
+        "intervention_action_terms": tuple(intervention_action_terms),
+        "kb_pos_count": kb_pos_count,
+        "kb_neg_count": kb_neg_count,
+    }
 
 
 def _load_optional_eligibility_criteria_text() -> str:
@@ -209,13 +854,6 @@ class _ScreeningDecisionBaseModel(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     step_by_step_deliberation: str
-    not_adult_population: bool
-    no_smartphone_technology: bool
-    no_artificial_intelligence: bool
-    no_physical_activity: bool
-    not_urban_context: bool | Literal["NEUTRAL"]
-    wrong_publication_type: bool
-    insufficient_context: bool
     confidence_score: float = Field(ge=0.0, le=1.0)
     justification: str = Field(min_length=1)
     exclusion_reason_category: str | None
@@ -238,16 +876,22 @@ class TitleAbstractScreeningDecisionModel(_ScreeningDecisionBaseModel):
 class FullTextScreeningDecisionModel(_ScreeningDecisionBaseModel):
     """human readable hint: full_text requires a strict boolean eligibility outcome."""
 
-    seed_references: bool
+    seed_references: bool | None = None
     is_eligible: bool
 
     @model_validator(mode="after")
     def _check_seed_references_threshold(self):
-        """human readable hint: seed_references can be true only when confidence_score is strictly greater than 0.98."""
+        """human readable hint: enforce strict seed-reference semantics for high-confidence full_text inclusions."""
 
-        if self.seed_references and not (self.confidence_score > 0.98):
+        if self.seed_references is True and not (self.confidence_score > 0.98):
             raise ValueError(
                 "seed_references can be true only when confidence_score is strictly greater than 0.98"
+            )
+        if self.seed_references is True and self.is_eligible is not True:
+            raise ValueError("seed_references can be true only when is_eligible is true")
+        if self.is_eligible is True and self.confidence_score > 0.98 and self.seed_references is None:
+            raise ValueError(
+                "seed_references must be explicitly true/false when confidence_score is strictly greater than 0.98 and is_eligible is true"
             )
         return self
 
@@ -306,6 +950,7 @@ class PaperScreeningPipeline:
         split_only: bool = False,
         quiet: bool = False,
         summary_to_console: bool = True,
+        artifact_mode: str | None = None,
     ) -> None:
         """
         Initialize the screening/extraction pipeline with configuration.
@@ -351,8 +996,15 @@ class PaperScreeningPipeline:
         self.split_only = split_only
         self.quiet = quiet
         self.summary_to_console = summary_to_console
+        mode_raw = str(artifact_mode if artifact_mode is not None else SCREENING_DEFAULTS.get("artifact_mode", "full"))
+        mode_normalized = mode_raw.strip().lower()
+        self.artifact_mode = mode_normalized if mode_normalized in {"full", "compact"} else "full"
+        self.compact_keep_legacy_selected_chunks = bool(
+            SCREENING_DEFAULTS.get("compact_keep_legacy_selected_chunks", False)
+        )
         self.language_setting = str(EMBEDDING_SETTINGS.get("data_language", "en")) or "en"
         self._detect_language = detect_language
+        self._detect_language_code = detect_language_code
         self._llm_model = str(gpustack_model)
         self._llm_base_url = str(gpustack_base_url) if gpustack_base_url is not None else None
         self._openai_client = None
@@ -367,6 +1019,7 @@ class PaperScreeningPipeline:
         self._async_heartbeat_seconds = max(5.0, float(LLM_SETTINGS.get("async_heartbeat_seconds", 30) or 30))
         self._async_enable_full_text = bool(LLM_SETTINGS.get("async_enable_full_text", True))
         self._async_enable_data_extraction = bool(LLM_SETTINGS.get("async_enable_data_extraction", True))
+        self._always_include_kinds = tuple(sorted(ALWAYS_INCLUDED_CHUNK_KINDS))
         self._validation_max_retries = 3
         # human readable hint: tracking response times to surface p50/p95 for operators.
         self._paper_times: list[float] = []
@@ -378,10 +1031,29 @@ class PaperScreeningPipeline:
         self._qc_sample_ids: set[str] = set()
         self._stage_csv_cache: dict[bool, list[Path]] = {}
         self.prompt_template = _load_stage_prompt_template(self.stage)
+        topic_signal_config = _build_prompt_signal_config(self.prompt_template)
+        self._topic_signal_source = str(topic_signal_config.get("source") or "default_signals")
+        self._intervention_signal_pattern = topic_signal_config["intervention_pattern"]
+        self._topic_primary_signal_pattern = topic_signal_config["primary_pattern"]
+        self._topic_secondary_signal_pattern = topic_signal_config["secondary_pattern"]
+        self._topic_intervention_terms = tuple(topic_signal_config.get("intervention_terms") or ())
+        self._topic_primary_terms = tuple(topic_signal_config.get("primary_terms") or ())
+        self._topic_secondary_terms = tuple(topic_signal_config.get("secondary_terms") or ())
+        self._section_rescue_keywords = tuple(topic_signal_config.get("section_rescue_keywords") or SECTION_RESCUE_KEYWORDS)
+        self._monitoring_deprioritization_enabled = False
+        self._monitoring_signal_source = "disabled_not_configured"
+        self._monitoring_signal_pattern = NEVER_MATCH_PATTERN
+        self._intervention_action_pattern = self._intervention_signal_pattern
+        self._monitoring_signal_terms: tuple[str, ...] = tuple()
+        self._intervention_action_terms: tuple[str, ...] = tuple()
+        self._monitoring_kb_pos_count = 0
+        self._monitoring_kb_neg_count = 0
         self._prompt_template_hash = self._sha256_text(self.prompt_template)
         self._prompt_campaign_id = self._prompt_template_hash[:12]
         self._prompt_snapshot_path: Path | None = None
         self._prompt_required_json_fields = self._extract_required_json_fields_from_prompt(self.prompt_template)
+        self._configure_dynamic_screening_schema()
+        self._print_dynamic_schema_summary()
         self._extraction_criteria = self._extract_criteria_from_prompt(self.prompt_template)
 
         # Resource usage tracker logs tokens and energy for each run.
@@ -423,10 +1095,32 @@ class PaperScreeningPipeline:
         else:
             kb_examples = load_labeled_examples(str(self.knowledge_base_path))
 
+        monitoring_signal_config = _build_monitoring_signal_config(
+            prompt_template=self.prompt_template,
+            topic_signal_config=topic_signal_config,
+            kb_examples=kb_examples,
+        )
+        self._monitoring_deprioritization_enabled = bool(monitoring_signal_config.get("enabled"))
+        self._monitoring_signal_source = str(
+            monitoring_signal_config.get("source") or "disabled_not_configured"
+        )
+        self._monitoring_signal_pattern = monitoring_signal_config.get("monitoring_pattern") or NEVER_MATCH_PATTERN
+        self._intervention_action_pattern = (
+            monitoring_signal_config.get("intervention_action_pattern")
+            or self._intervention_signal_pattern
+        )
+        self._monitoring_signal_terms = tuple(monitoring_signal_config.get("monitoring_terms") or ())
+        self._intervention_action_terms = tuple(
+            monitoring_signal_config.get("intervention_action_terms") or ()
+        )
+        self._monitoring_kb_pos_count = int(monitoring_signal_config.get("kb_pos_count") or 0)
+        self._monitoring_kb_neg_count = int(monitoring_signal_config.get("kb_neg_count") or 0)
+
         if self.selection_engine is None:
             self.selection_engine = SelectionEngine(
                 examples=kb_examples,
                 batch_size=self.batch_size,
+                always_include_kinds=self._always_include_kinds,
                 embedder=self.embedder,
             )
 
@@ -484,6 +1178,20 @@ class PaperScreeningPipeline:
 
         try:
             self.stage_output_dir.mkdir(parents=True, exist_ok=True)
+            # human readable hint: reuse an existing same-campaign snapshot when content is identical.
+            existing_campaign_snapshots = sorted(
+                self.stage_output_dir.glob(f"{self.stage}_prompt_template_*_{self._prompt_campaign_id}.txt"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+            for candidate in existing_campaign_snapshots:
+                try:
+                    if candidate.read_text(encoding="utf-8") == self.prompt_template:
+                        self._prompt_snapshot_path = candidate
+                        return
+                except Exception:
+                    continue
+
             stem = self.chunks_output_path.stem
             stamp_match = re.search(
                 rf"_(\d{{8}}_\d{{2}}-\d{{2}})_{re.escape(self._prompt_campaign_id)}$",
@@ -518,9 +1226,11 @@ class PaperScreeningPipeline:
             else:
                 print(f"[pipeline] Screening from CSV dir: {self.csv_dir.resolve()}")
 
-        self._persist_prompt_template_snapshot()
-
-        self._warn_prompt_hash_drift_in_stage_outputs()
+        if not self.split_only:
+            self._persist_prompt_template_snapshot()
+            self._warn_prompt_hash_drift_in_stage_outputs()
+        else:
+            self._prompt_snapshot_path = None
 
         if self.stage == "full_text":
             self._materialize_paper_folders_full_text()
@@ -622,7 +1332,6 @@ class PaperScreeningPipeline:
         split_buffers: dict[bool, list[str]] = {True: [], False: []}
         chunk_buffer: list[str] = []
         index_entries: list[dict[str, object]] = []
-        executor: ThreadPoolExecutor | None = None
 
         if self.stage in {"title_abstract", "full_text"}:
             self.eligibility_output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -676,12 +1385,21 @@ class PaperScreeningPipeline:
             )
 
         times_by_decision: dict[bool, list[float]] = {True: [], False: []}
+        sync_loop: asyncio.AbstractEventLoop | None = None
+        if self.stage != "title_abstract" and not self._use_async_stage_processing():
+            # human readable hint: reuse one event loop in sync mode to avoid per-paper asyncio.run overhead.
+            sync_loop = asyncio.new_event_loop()
 
         def _process_with_timing(paper_item: PaperRecord) -> tuple[PaperRecord, dict, dict, dict | None, float]:
             """human readable hint: keep per-paper runtime while allowing optional concurrent processing."""
 
             paper_start_ts = time.time()
-            record_obj, token_stats_obj, extraction_obj = self._process_paper(paper_item)
+            if sync_loop is not None:
+                record_obj, token_stats_obj, extraction_obj = sync_loop.run_until_complete(
+                    self._process_paper_async(paper_item)
+                )
+            else:
+                record_obj, token_stats_obj, extraction_obj = self._process_paper(paper_item)
             return paper_item, record_obj, token_stats_obj, extraction_obj, (time.time() - paper_start_ts)
 
         if self.stage == "title_abstract":
@@ -943,8 +1661,8 @@ class PaperScreeningPipeline:
                     chunk_writer.write("".join(chunk_buffer))
                     chunk_buffer.clear()
                 chunk_writer.close()
-            if executor is not None:
-                executor.shutdown(wait=True)
+            if sync_loop is not None:
+                sync_loop.close()
 
         self._total_runtime_seconds = time.time() - start_time
 
@@ -1290,11 +2008,22 @@ class PaperScreeningPipeline:
         queue: Queue = Queue()
 
         async def _runner() -> None:
-            semaphore = asyncio.Semaphore(max(1, self._async_max_concurrency))
             total = len(planned_papers)
             completed = 0
             warn_count = 0
             last_completion_ts = time.time()
+            runner_error: Exception | None = None
+            next_index = 0
+            index_lock = asyncio.Lock()
+
+            async def _next_paper() -> PaperRecord | None:
+                nonlocal next_index
+                async with index_lock:
+                    if next_index >= total:
+                        return None
+                    paper_item = planned_papers[next_index]
+                    next_index += 1
+                    return paper_item
 
             async def _heartbeat() -> None:
                 """human readable hint: emit periodic progress so operators can see async work is alive."""
@@ -1310,21 +2039,26 @@ class PaperScreeningPipeline:
                         flush=True,
                     )
 
-            async def _run_one(paper_item: PaperRecord) -> tuple[PaperRecord, dict, dict, dict | None, float]:
-                paper_start_ts = time.time()
-                async with semaphore:
+            async def _worker() -> None:
+                nonlocal completed, warn_count, last_completion_ts
+
+                while True:
+                    paper_item = await _next_paper()
+                    if paper_item is None:
+                        return
+
+                    paper_start_ts = time.time()
                     record_obj, token_stats_obj, extraction_obj = await processor(paper_item)
-                return paper_item, record_obj, token_stats_obj, extraction_obj, (time.time() - paper_start_ts)
+                    result = (
+                        paper_item,
+                        record_obj,
+                        token_stats_obj,
+                        extraction_obj,
+                        (time.time() - paper_start_ts),
+                    )
 
-            tasks = [asyncio.create_task(_run_one(paper)) for paper in planned_papers]
-            heartbeat_task = asyncio.create_task(_heartbeat())
-
-            try:
-                for finished in asyncio.as_completed(tasks):
-                    result = await finished
                     completed += 1
                     last_completion_ts = time.time()
-                    paper_item, record_obj, _, _, _ = result
                     decision_obj = record_obj.get("llm_decision")
                     diagnostics_obj = record_obj.get("diagnostics", {}) or {}
                     decision_incomplete = bool(diagnostics_obj.get("llm_decision_incomplete"))
@@ -1343,20 +2077,32 @@ class PaperScreeningPipeline:
                                 flush=True,
                             )
                     queue.put(("result", result))
+
+            heartbeat_task = asyncio.create_task(_heartbeat())
+            worker_count = max(1, min(self._async_max_concurrency, total if total > 0 else 1))
+            worker_tasks = [asyncio.create_task(_worker()) for _ in range(worker_count)]
+
+            try:
+                await asyncio.gather(*worker_tasks)
+            except Exception as exc:  # pylint: disable=broad-except
+                runner_error = exc
             finally:
+                # human readable hint: cancel any pending workers explicitly so large async runs do not leave dangling tasks.
+                for task in worker_tasks:
+                    if not task.done():
+                        task.cancel()
+                if worker_tasks:
+                    await asyncio.gather(*worker_tasks, return_exceptions=True)
+
                 heartbeat_task.cancel()
-                try:
-                    await heartbeat_task
-                except asyncio.CancelledError:
-                    pass
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
+
+                if runner_error is not None:
+                    queue.put(("error", runner_error))
                 queue.put(("done", None))
 
         def _thread_target() -> None:
-            try:
-                asyncio.run(_runner())
-            except Exception as exc:  # pylint: disable=broad-except
-                queue.put(("error", exc))
-                queue.put(("done", None))
+            asyncio.run(_runner())
 
         worker = Thread(target=_thread_target, daemon=True)
         worker.start()
@@ -1579,6 +2325,20 @@ class PaperScreeningPipeline:
         selection_trace: dict = {
             "fallback_triggered": False,
             "effective_top_k": self.top_k,
+            "topic_signal_source": self._topic_signal_source,
+            "topic_intervention_term_count": len(self._topic_intervention_terms),
+            "topic_primary_term_count": len(self._topic_primary_terms),
+            "topic_secondary_term_count": len(self._topic_secondary_terms),
+            "topic_primary_terms_preview": list(self._topic_primary_terms[:8]),
+            "topic_secondary_terms_preview": list(self._topic_secondary_terms[:8]),
+            "monitoring_signal_source": self._monitoring_signal_source,
+            "monitoring_deprioritization_enabled": self._monitoring_deprioritization_enabled,
+            "monitoring_term_count": len(self._monitoring_signal_terms),
+            "intervention_action_term_count": len(self._intervention_action_terms),
+            "monitoring_kb_pos_count": self._monitoring_kb_pos_count,
+            "monitoring_kb_neg_count": self._monitoring_kb_neg_count,
+            "schema_exclusion_tag_count": len(self._active_exclusion_flag_keys),
+            "schema_exclusion_tags_preview": list(self._active_exclusion_flag_keys[:8]),
         }
         publication_prefilter: dict[str, Any] = {
             "likely_non_empirical_publication": False,
@@ -1612,6 +2372,20 @@ class PaperScreeningPipeline:
                     "fallback_triggered": False,
                     "effective_top_k": self.top_k,
                     "source": "preselected_chunks",
+                    "topic_signal_source": self._topic_signal_source,
+                    "topic_intervention_term_count": len(self._topic_intervention_terms),
+                    "topic_primary_term_count": len(self._topic_primary_terms),
+                    "topic_secondary_term_count": len(self._topic_secondary_terms),
+                    "topic_primary_terms_preview": list(self._topic_primary_terms[:8]),
+                    "topic_secondary_terms_preview": list(self._topic_secondary_terms[:8]),
+                    "monitoring_signal_source": self._monitoring_signal_source,
+                    "monitoring_deprioritization_enabled": self._monitoring_deprioritization_enabled,
+                    "monitoring_term_count": len(self._monitoring_signal_terms),
+                    "intervention_action_term_count": len(self._intervention_action_terms),
+                    "monitoring_kb_pos_count": self._monitoring_kb_pos_count,
+                    "monitoring_kb_neg_count": self._monitoring_kb_neg_count,
+                    "schema_exclusion_tag_count": len(self._active_exclusion_flag_keys),
+                    "schema_exclusion_tags_preview": list(self._active_exclusion_flag_keys[:8]),
                 }
 
         if not preselected:
@@ -1621,11 +2395,13 @@ class PaperScreeningPipeline:
                 self._prepare_chunks,
                 paper,
             )
+
             raw_chunk_count = len(chunks)
+            dropped_low_quality_candidates: list[dict] = []
             if pdf_visual_tokens:
                 page_count = max(int(pdf_visual_tokens / TOKENS_PER_PAGE_IMAGE), 0)
             if self.stage in {"full_text", "data_extraction"} and chunks:
-                chunks, dropped_low_quality_chunks = self._filter_low_quality_chunks(chunks)
+                chunks, dropped_low_quality_chunks, dropped_low_quality_candidates = self._filter_low_quality_chunks(chunks)
             if self.stage in {"full_text", "data_extraction"} and not chunks:
                 llm_decision = "LLM skipped: PDF missing or unreadable; see error log."
                 estimated_input_tokens = pdf_text_tokens + pdf_visual_tokens
@@ -1653,9 +2429,22 @@ class PaperScreeningPipeline:
                 selected, embed_usage, selection_trace = await asyncio.to_thread(
                     self._select_chunks_with_rescue,
                     chunks,
+                    dropped_low_quality_candidates,
                 )
                 selected, selected_score_stats = self._attach_chunk_certainty_metrics(selected)
                 selected_page_coverage = self._build_selected_coverage_metrics(selected, page_count=page_count)
+
+            if self.stage == "full_text":
+                normalized_language = str(language_used or "").strip().lower()
+                detected_language_code: str | None = None
+                if normalized_language and normalized_language not in {"english", "german"}:
+                    detected_language_code = normalized_language
+                selection_trace["language_gate_excluded"] = False
+                selection_trace["detected_language_code"] = detected_language_code
+                if detected_language_code:
+                    selection_trace["detected_language_supported"] = (
+                        detected_language_code in SUPPORTED_FULLTEXT_LANGUAGE_CODES
+                    )
 
             if embed_usage:
                 embed_tokens = int(
@@ -1668,7 +2457,16 @@ class PaperScreeningPipeline:
             else:
                 embed_tokens = int(sum(len((c.get("text") or "").split()) for c in chunks) * TOKENS_PER_WORD)
 
-            llm_input = self._format_chunks_for_prompt(paper, selected)
+            prompt_language_hint: str | None = None
+            if self.stage == "full_text":
+                raw_hint = selection_trace.get("detected_language_code")
+                if isinstance(raw_hint, str) and raw_hint.strip():
+                    prompt_language_hint = raw_hint.strip().lower()
+            llm_input = self._format_chunks_for_prompt(
+                paper,
+                selected,
+                detected_language_code=prompt_language_hint,
+            )
             prompt_tokens = len((llm_input or "").split())
             estimated_input_tokens = prompt_tokens + pdf_text_tokens + pdf_visual_tokens
 
@@ -1682,11 +2480,13 @@ class PaperScreeningPipeline:
             )
 
         if llm_decision is None:
-            if estimated_input_tokens > CONTEXT_WINDOW:
+            estimated_total_tokens = int(prompt_tokens) + int(llm_max_tokens)
+            if estimated_total_tokens > CONTEXT_WINDOW:
                 llm_decision = (
-                    f"LLM skipped: estimated input {estimated_input_tokens} tokens exceeds context window {CONTEXT_WINDOW}."
+                    "LLM skipped: prompt and output token budget exceed context window "
+                    f"({prompt_tokens} + {llm_max_tokens} = {estimated_total_tokens} > {CONTEXT_WINDOW})."
                 )
-                self._log_overflow(paper.paper_id, estimated_input_tokens)
+                self._log_overflow(paper.paper_id, estimated_total_tokens)
             elif api_disabled:
                 llm_decision = "LLM disabled: use_api=False; no API call made."
                 prompt_tokens = len((llm_input or "").split())
@@ -1751,6 +2551,8 @@ class PaperScreeningPipeline:
                                 validated_payload,
                                 contradictions,
                                 publication_prefilter,
+                                selected,
+                                selection_trace,
                             )
 
                             decision_guardrails = {
@@ -1775,10 +2577,8 @@ class PaperScreeningPipeline:
                                 continue
 
                             if self.stage == "full_text" and bool(borderline.get("needs_adjudication")):
-                                raise ValueError(
-                                    "Full-text decision remained contradictory/borderline after adjudication: "
-                                    + ", ".join(list(borderline.get("reasons") or []))
-                                )
+                                # human readable hint: after the final adjudication pass, keep a valid payload but tag it for audit.
+                                decision_guardrails["adjudication_resolution"] = "borderline_after_final_adjudication_pass"
 
                             llm_decision = json.dumps(validated_payload, ensure_ascii=False)
                             llm_decision_incomplete = False
@@ -1931,7 +2731,12 @@ class PaperScreeningPipeline:
 
         return asyncio.run(self._process_paper_async(paper))
 
-    def _format_chunks_for_prompt(self, paper: PaperRecord, chunks: list[dict]) -> str:
+    def _format_chunks_for_prompt(
+        self,
+        paper: PaperRecord,
+        chunks: list[dict],
+        detected_language_code: str | None = None,
+    ) -> str:
         """Format selected chunks into a readable prompt section."""
 
         if not chunks:
@@ -1944,7 +2749,15 @@ class PaperScreeningPipeline:
             title_text = self._strip_author_mentions(title_text, authors)
 
         parts: list[str] = [f"Paper ID: {paper.paper_id}", f"Title: {title_text}".strip()]
-        for idx, chunk in enumerate(chunks, start=1):
+        if self.stage == "full_text" and detected_language_code:
+            # human readable hint: expose language detector output to the LLM as context instead of hard gating.
+            parts.append(f"Detected full-text language code (auto): {detected_language_code}")
+
+        prompt_chunks = [
+            chunk for chunk in chunks if str(chunk.get("kind") or "") != "title"
+        ]
+
+        for idx, chunk in enumerate(prompt_chunks, start=1):
             text = str(chunk.get("text", "")).strip()
             if self.stage in {"title_abstract", "full_text"}:
                 text = self._strip_author_mentions(text, authors)
@@ -1964,6 +2777,9 @@ class PaperScreeningPipeline:
                     prefix_parts.append(f"page {page_start}")
                 else:
                     prefix_parts.append(f"pages {page_start}-{page_end}")
+            sentence_count = chunk.get("sentence_count")
+            if isinstance(sentence_count, int) and sentence_count > 0:
+                prefix_parts.append(f"sentences {sentence_count}")
             prefix = "[" + ", ".join(prefix_parts) + "]"
             parts.append(f"{prefix}\n{text}")
         return "\n\n".join(parts)
@@ -2064,6 +2880,8 @@ class PaperScreeningPipeline:
             return True
         if PaperScreeningPipeline._is_publisher_boilerplate_text(value):
             return True
+        if PaperScreeningPipeline._is_reference_dominant_text(value):
+            return True
 
         metrics = PaperScreeningPipeline._chunk_readability_metrics(value)
 
@@ -2144,21 +2962,109 @@ class PaperScreeningPipeline:
             "readability_score": float(readability),
         }
 
-    def _filter_low_quality_chunks(self, chunks: list[dict]) -> tuple[list[dict], int]:
-        """Drop low-information full-text chunks while always preserving title chunks."""
+    @staticmethod
+    def _has_substantive_main_text(text: str) -> bool:
+        """Detect whether citation-heavy text still contains substantive method/results narrative."""
+
+        value = (text or "").strip()
+        if not value:
+            return False
+
+        metrics = PaperScreeningPipeline._chunk_readability_metrics(value)
+        word_count = int(metrics.get("word_count") or 0)
+        unique_alpha_words = int(metrics.get("unique_alpha_word_count") or 0)
+        readability = float(metrics.get("readability_score") or 0.0)
+        if word_count < 25 or unique_alpha_words < 10 or readability < 0.40:
+            return False
+
+        citation_hits = len(INLINE_CITATION_PATTERN.findall(value))
+        citation_density = citation_hits / max(word_count, 1)
+        if citation_density > 0.45:
+            return False
+
+        long_alpha_tokens = len(re.findall(r"\b[A-Za-z]{5,}\b", value))
+        has_substantive_signals = bool(
+            METHOD_EVIDENCE_PATTERN.search(value) or SUBSTANTIVE_MAIN_TEXT_PATTERN.search(value)
+        )
+        return bool(has_substantive_signals or long_alpha_tokens >= 12)
+
+    @staticmethod
+    def _is_reference_dominant_text(text: str) -> bool:
+        """Detect chunks dominated by references/citations instead of evidence narrative."""
+
+        value = (text or "").strip()
+        if not value:
+            return False
+
+        compact = " ".join(value.split())
+        lower = compact.lower()
+        head = " ".join(compact.split()[:35])
+        has_substantive_main_text = PaperScreeningPipeline._has_substantive_main_text(compact)
+        if REFERENCE_HEAVY_PATTERN.search(head) and not has_substantive_main_text:
+            return True
+
+        citation_hits = len(INLINE_CITATION_PATTERN.findall(compact))
+        doi_hits = lower.count("doi")
+        et_al_hits = lower.count("et al")
+        pmid_hits = lower.count("pmid")
+        year_hits = len(re.findall(r"\b(?:19|20)\d{2}\b", compact))
+        reference_entry_hits = len(
+            re.findall(r"\b[A-Z][a-z]+\s*(?:et\s+al\.?|,\s*[A-Z]\.)\s*\(?[12][0-9]{3}\)?", compact)
+        )
+
+        if citation_hits >= 8 and not has_substantive_main_text:
+            return True
+        if citation_hits >= 4 and (doi_hits + et_al_hits + pmid_hits) >= 3 and not has_substantive_main_text:
+            return True
+        if year_hits >= 10 and citation_hits >= 3 and not has_substantive_main_text:
+            return True
+        if reference_entry_hits >= 6 and not has_substantive_main_text:
+            return True
+
+        return False
+
+    @staticmethod
+    def _estimate_chunk_prompt_tokens(row: dict) -> int:
+        """Estimate prompt token impact for one selected chunk row."""
+
+        text = str(row.get("text") or "")
+        word_count = int(row.get("word_count") or 0)
+        if word_count <= 0:
+            word_count = len(text.split())
+
+        text_tokens = int(math.ceil(max(word_count, 0) * TOKENS_PER_WORD))
+        meta_tokens = RETRIEVAL_CHUNK_PROMPT_OVERHEAD_TOKENS
+        if row.get("page_start") is not None:
+            meta_tokens += 4
+        sentence_count = int(row.get("sentence_count") or 0)
+        if sentence_count > 0:
+            meta_tokens += 4
+
+        return max(32, text_tokens + meta_tokens)
+
+    @staticmethod
+    def _is_always_included_chunk_kind(kind: str | None) -> bool:
+        """Check whether a chunk kind bypasses relevance scoring and denoising."""
+
+        return str(kind or "") in ALWAYS_INCLUDED_CHUNK_KINDS
+
+    def _filter_low_quality_chunks(self, chunks: list[dict]) -> tuple[list[dict], int, list[dict]]:
+        """Drop low-information chunks while retaining dropped rows for last-resort retrieval backfill."""
 
         filtered: list[dict] = []
         dropped = 0
+        dropped_rows: list[dict] = []
         for chunk in chunks:
             kind = str(chunk.get("kind") or "")
-            if kind == "title":
+            if self._is_always_included_chunk_kind(kind):
                 filtered.append(chunk)
                 continue
             if self._is_low_quality_evidence_text(str(chunk.get("text") or "")):
                 dropped += 1
+                dropped_rows.append(dict(chunk))
                 continue
             filtered.append(chunk)
-        return filtered, dropped
+        return filtered, dropped, dropped_rows
 
     @staticmethod
     def _merge_usage_dicts(left: dict | None, right: dict | None) -> dict | None:
@@ -2172,8 +3078,358 @@ class PaperScreeningPipeline:
                 merged[key] = float(merged.get(key, 0.0)) + float(value or 0.0)
         return merged
 
-    def _select_chunks_with_rescue(self, chunks: list[dict]) -> tuple[list[dict], dict | None, dict]:
-        """Select chunks with adaptive fallback to improve recall on long/noisy manuscripts."""
+    def _enforce_non_title_context_quota(
+        self,
+        selected_rows: list[dict],
+        candidate_rows: list[dict],
+        min_non_title: int,
+    ) -> tuple[list[dict], dict[str, int]]:
+        """Ensure a minimum non-title evidence quota to reduce title-only exclusions."""
+
+        ensured: list[dict] = [dict(row) for row in selected_rows]
+        seen_ids = {str(row.get("chunk_id") or "") for row in ensured if str(row.get("chunk_id") or "")}
+        non_title_count = sum(
+            1
+            for row in ensured
+            if not self._is_always_included_chunk_kind(str(row.get("kind") or ""))
+        )
+        forced_added = 0
+        forced_low_quality = 0
+
+        if non_title_count >= min_non_title:
+            return ensured, {
+                "forced_context_chunks_added": 0,
+                "forced_low_quality_added": 0,
+                "final_non_title_count": non_title_count,
+            }
+
+        ranked_candidates = sorted(
+            [
+                row
+                for row in candidate_rows
+                if not self._is_always_included_chunk_kind(str(row.get("kind") or ""))
+            ],
+            key=self._method_priority_sort_key,
+        )
+
+        def _append_candidates(allow_low_quality: bool) -> None:
+            nonlocal non_title_count, forced_added, forced_low_quality
+            for row in ranked_candidates:
+                if non_title_count >= min_non_title:
+                    break
+                cid = str(row.get("chunk_id") or "")
+                if not cid or cid in seen_ids:
+                    continue
+                if self._is_reference_dominant_text(str(row.get("text") or "")):
+                    continue
+                is_low_quality = self._is_low_quality_evidence_text(str(row.get("text") or ""))
+                if is_low_quality and not allow_low_quality:
+                    continue
+                ensured.append(dict(row))
+                seen_ids.add(cid)
+                non_title_count += 1
+                forced_added += 1
+                if is_low_quality:
+                    forced_low_quality += 1
+
+        _append_candidates(allow_low_quality=False)
+        if non_title_count < min_non_title:
+            _append_candidates(allow_low_quality=True)
+
+        return ensured, {
+            "forced_context_chunks_added": forced_added,
+            "forced_low_quality_added": forced_low_quality,
+            "final_non_title_count": non_title_count,
+        }
+
+    def _method_signal_flags(self, text: str) -> tuple[bool, bool, bool, bool]:
+        """Extract prompt-driven intervention/topic cue flags used by full-text ranking."""
+
+        value = (text or "").strip()
+        has_intervention = bool(self._intervention_signal_pattern.search(value))
+        has_primary_topic = bool(self._topic_primary_signal_pattern.search(value))
+        has_secondary_topic = bool(self._topic_secondary_signal_pattern.search(value))
+        has_triad = has_intervention and has_primary_topic and has_secondary_topic
+        return has_intervention, has_primary_topic, has_secondary_topic, has_triad
+
+    def _is_monitoring_only_text(self, text: str) -> bool:
+        """Detect assessment/monitoring content that lacks explicit intervention mechanics."""
+
+        if not self._monitoring_deprioritization_enabled:
+            return False
+
+        value = (text or "").strip()
+        if not value:
+            return False
+
+        has_intervention, has_primary_topic, has_secondary_topic, _ = self._method_signal_flags(value)
+        if not (has_primary_topic or has_secondary_topic):
+            return False
+
+        has_monitoring_cues = bool(self._monitoring_signal_pattern.search(value))
+        if not has_monitoring_cues:
+            return False
+
+        has_intervention_action = bool(
+            self._intervention_action_pattern.search(value)
+            or has_intervention
+            or self._intervention_signal_pattern.search(value)
+        )
+        return has_monitoring_cues and not has_intervention_action
+
+    def _hybrid_chunk_score(self, row: dict) -> float:
+        """human readable hint: combine embedding relevance with semantic/readability signals for robust retrieval."""
+
+        text = str(row.get("text") or "")
+        base_score = float(row.get("score", 0.0) or 0.0)
+        section_label = self._infer_chunk_section_label(row)
+        has_intervention, has_ai, has_pa, has_triad = self._method_signal_flags(text)
+        readability = self._chunk_readability_metrics(text)
+        sentence_count = int(row.get("sentence_count") or 0)
+
+        hybrid_score = base_score
+        if section_label == "method":
+            hybrid_score += 0.05
+        if has_triad:
+            hybrid_score += 0.08
+        elif has_intervention and (has_ai or has_pa):
+            hybrid_score += 0.04
+
+        hybrid_score += 0.04 * float(readability["readability_score"])
+
+        if sentence_count > 0:
+            completeness = min(float(sentence_count) / max(FULLTEXT_SENTENCE_TARGET, 1), 1.0)
+            hybrid_score += 0.06 * completeness
+            if sentence_count < RETRIEVAL_MIN_SENTENCE_FLOOR:
+                hybrid_score -= 0.08
+
+        digit_ratio = sum(1 for ch in text if ch.isdigit()) / max(len(text), 1)
+        if digit_ratio > 0.20:
+            hybrid_score -= 0.05
+
+        citation_hits = len(INLINE_CITATION_PATTERN.findall(text))
+        has_substantive_main_text = self._has_substantive_main_text(text)
+        if citation_hits >= 6 and not has_substantive_main_text:
+            hybrid_score -= 0.04
+
+        if self._is_monitoring_only_text(text):
+            hybrid_score -= RETRIEVAL_MONITORING_ONLY_PENALTY
+
+        if section_label == "reference" or (
+            REFERENCE_HEAVY_PATTERN.search(" ".join(text.split()[:25])) and not has_substantive_main_text
+        ):
+            hybrid_score -= 0.10
+
+        if self._is_low_quality_evidence_text(text):
+            hybrid_score -= 0.15
+
+        return float(hybrid_score)
+
+    def _method_priority_sort_key(self, row: dict) -> tuple[Any, ...]:
+        """Rank rows with method evidence first in full_text, then triad-rich evidence."""
+
+        score = float(row.get("score", 0.0) or 0.0)
+        page_start = row.get("page_start") or 0
+        line_start = row.get("line_start") or 0
+        chunk_id = str(row.get("chunk_id") or "")
+
+        if self.stage != "full_text":
+            return (True, True, True, -score, page_start, line_start, chunk_id)
+
+        section_label = self._infer_chunk_section_label(row)
+        text = str(row.get("text") or "")
+        is_reference_dominant = bool(
+            section_label == "reference" or self._is_reference_dominant_text(text)
+        )
+        is_monitoring_only = self._is_monitoring_only_text(text)
+        has_method_evidence = bool(section_label == "method" or METHOD_EVIDENCE_PATTERN.search(text))
+        has_intervention, has_ai, has_pa, has_triad = self._method_signal_flags(text)
+        has_dual = has_intervention and (has_ai or has_pa)
+        hybrid_score = self._hybrid_chunk_score(row)
+
+        return (
+            is_reference_dominant,
+            is_monitoring_only,
+            not has_method_evidence,
+            section_label != "method",
+            not has_triad,
+            not has_dual,
+            -hybrid_score,
+            -score,
+            page_start,
+            line_start,
+            chunk_id,
+        )
+
+    def _is_method_evidence_chunk(self, row: dict) -> bool:
+        """Return true when a chunk likely contains method-level evidence."""
+
+        if self._is_always_included_chunk_kind(str(row.get("kind") or "")):
+            return False
+
+        section_label = self._infer_chunk_section_label(row)
+        if section_label == "method":
+            if self._is_monitoring_only_text(str(row.get("text") or "")):
+                return False
+            return True
+
+        text = str(row.get("text") or "")
+        if self._is_reference_dominant_text(text):
+            return False
+        if self._is_monitoring_only_text(text):
+            return False
+        return bool(METHOD_EVIDENCE_PATTERN.search(text))
+
+    def _enforce_method_context_quota(
+        self,
+        selected_rows: list[dict],
+        candidate_rows: list[dict],
+        min_method: int,
+    ) -> tuple[list[dict], dict[str, int]]:
+        """Guarantee method-section evidence when method chunks are available."""
+
+        ensured: list[dict] = [dict(row) for row in selected_rows]
+        seen_ids = {str(row.get("chunk_id") or "") for row in ensured if str(row.get("chunk_id") or "")}
+        method_count = sum(
+            1
+            for row in ensured
+            if self._is_method_evidence_chunk(row)
+        )
+
+        if min_method <= 0 or self.stage != "full_text":
+            return ensured, {
+                "method_chunk_available": 0,
+                "method_chunks_added": 0,
+                "method_low_quality_added": 0,
+                "final_method_chunk_count": method_count,
+            }
+
+        method_candidates = [
+            row
+            for row in candidate_rows
+            if self._is_method_evidence_chunk(row)
+        ]
+        method_available = len(
+            {
+                str(row.get("chunk_id") or "")
+                for row in method_candidates
+                if str(row.get("chunk_id") or "")
+            }
+        )
+
+        if method_count >= min_method or method_available == 0:
+            return ensured, {
+                "method_chunk_available": method_available,
+                "method_chunks_added": 0,
+                "method_low_quality_added": 0,
+                "final_method_chunk_count": method_count,
+            }
+
+        ranked_method_candidates = sorted(method_candidates, key=self._method_priority_sort_key)
+        forced_added = 0
+        forced_low_quality = 0
+
+        def _append_candidates(allow_low_quality: bool) -> None:
+            nonlocal method_count, forced_added, forced_low_quality
+            for row in ranked_method_candidates:
+                if method_count >= min_method:
+                    break
+                cid = str(row.get("chunk_id") or "")
+                if not cid or cid in seen_ids:
+                    continue
+                if self._is_reference_dominant_text(str(row.get("text") or "")):
+                    continue
+                is_low_quality = self._is_low_quality_evidence_text(str(row.get("text") or ""))
+                if is_low_quality and not allow_low_quality:
+                    continue
+                ensured.append(dict(row))
+                seen_ids.add(cid)
+                method_count += 1
+                forced_added += 1
+                if is_low_quality:
+                    forced_low_quality += 1
+
+        _append_candidates(allow_low_quality=False)
+        if method_count < min_method:
+            _append_candidates(allow_low_quality=True)
+
+        return ensured, {
+            "method_chunk_available": method_available,
+            "method_chunks_added": forced_added,
+            "method_low_quality_added": forced_low_quality,
+            "final_method_chunk_count": method_count,
+        }
+
+    def _select_chunks_with_rescue(
+        self,
+        chunks: list[dict],
+        supplemental_rows: list[dict] | None = None,
+    ) -> tuple[list[dict], dict | None, dict]:
+        """Select chunks with adaptive fallback and backfill-to-target evidence coverage."""
+
+        supplemental_candidates = [
+            dict(row)
+            for row in (supplemental_rows or [])
+            if not self._is_always_included_chunk_kind(str(row.get("kind") or ""))
+        ]
+        supplemental_candidate_ids = {
+            str(row.get("chunk_id") or "")
+            for row in supplemental_candidates
+            if str(row.get("chunk_id") or "")
+        }
+
+        all_candidate_rows = [dict(row) for row in chunks]
+        all_candidate_rows.extend(supplemental_candidates)
+
+        selected_all_ranked: list[dict] = []
+        usage_all_ranked: dict | None = None
+        if all_candidate_rows:
+            selected_all_ranked, _, usage_all_ranked = self.selector.select(
+                all_candidate_rows,
+                top_k=None,
+                score_threshold=None,
+            )
+
+        all_non_title_ranked = [
+            dict(row)
+            for row in selected_all_ranked
+            if (
+                not self._is_always_included_chunk_kind(str(row.get("kind") or ""))
+                and not self._is_reference_dominant_text(str(row.get("text") or ""))
+            )
+        ]
+        all_non_title_ranked.sort(key=self._method_priority_sort_key)
+
+        available_non_title_count = len(
+            {
+                str(row.get("chunk_id") or "")
+                for row in all_non_title_ranked
+                if str(row.get("chunk_id") or "")
+            }
+        )
+        data_prompt_budget_tokens = min(
+            PROMPT_TOKEN_BUDGET,
+            max(
+                RETRIEVAL_DATA_PROMPT_BUDGET_MIN_TOKENS,
+                int(PROMPT_TOKEN_BUDGET * RETRIEVAL_DATA_PROMPT_BUDGET_RATIO),
+            ),
+        )
+        budget_non_title_cap = max(
+            RETRIEVAL_MIN_NON_TITLE_TARGET,
+            min(
+                RETRIEVAL_MAX_NON_TITLE_CHUNKS,
+                int(data_prompt_budget_tokens / max(RETRIEVAL_ASSUMED_CHUNK_TOKENS, 1)),
+            ),
+        )
+        configured_top_k = None if self.top_k is None else max(int(self.top_k or 0), 0)
+        if configured_top_k is None:
+            target_non_title_count = min(budget_non_title_cap, available_non_title_count)
+        else:
+            target_non_title_count = min(
+                configured_top_k,
+                budget_non_title_cap,
+                available_non_title_count,
+            )
 
         selected_primary, _, usage_primary = self.selector.select(
             chunks,
@@ -2181,20 +3437,45 @@ class PaperScreeningPipeline:
             self.score_threshold,
         )
 
-        non_title_primary = [c for c in selected_primary if c.get("kind") != "title"]
-        primary_words = sum(len(str(c.get("text") or "").split()) for c in non_title_primary)
-        primary_max_score = max([float(c.get("score", 0.0) or 0.0) for c in non_title_primary], default=0.0)
+        primary_scored = [
+            c for c in selected_primary if not self._is_always_included_chunk_kind(str(c.get("kind") or ""))
+        ]
+        primary_words = sum(len(str(c.get("text") or "").split()) for c in primary_scored)
+        primary_max_score = max([float(c.get("score", 0.0) or 0.0) for c in primary_scored], default=0.0)
         primary_fragmented = sum(
             1
-            for c in non_title_primary
+            for c in primary_scored
             if self._is_low_quality_evidence_text(str(c.get("text") or ""))
         )
-        primary_fragmented_share = primary_fragmented / max(len(non_title_primary), 1)
+        primary_fragmented_share = primary_fragmented / max(len(primary_scored), 1)
         weak_evidence = (
-            len(non_title_primary) < RETRIEVAL_WEAK_MIN_NON_TITLE
+            len(primary_scored) < RETRIEVAL_WEAK_MIN_NON_TITLE
             or primary_words < RETRIEVAL_WEAK_MIN_WORDS
             or primary_max_score < 0.02
             or primary_fragmented_share > RETRIEVAL_FRAGMENTED_MAX_SHARE
+        )
+        configured_score_threshold = float(self.score_threshold) if self.score_threshold is not None else 0.0
+
+        if target_non_title_count <= 0:
+            precision_non_title_cap = 0
+        elif weak_evidence:
+            precision_non_title_cap = min(target_non_title_count, RETRIEVAL_MIN_NON_TITLE_TARGET)
+        else:
+            strong_threshold = max(configured_score_threshold + 0.02, 0.04)
+            medium_threshold = max(configured_score_threshold + 0.01, 0.02)
+            if primary_max_score >= strong_threshold and len(primary_scored) >= max(RETRIEVAL_WEAK_MIN_NON_TITLE, 4):
+                precision_non_title_cap = target_non_title_count
+            elif primary_max_score >= medium_threshold and len(primary_scored) >= RETRIEVAL_MIN_NON_TITLE_TARGET:
+                precision_non_title_cap = min(target_non_title_count, RETRIEVAL_PRECISION_MEDIUM_NON_TITLE_CAP)
+            else:
+                precision_non_title_cap = min(target_non_title_count, RETRIEVAL_MIN_NON_TITLE_TARGET)
+
+        min_non_title_target = min(precision_non_title_cap, RETRIEVAL_MIN_NON_TITLE_TARGET)
+        counterevidence_enabled = bool(
+            self.stage == "full_text"
+            and not weak_evidence
+            and precision_non_title_cap >= RETRIEVAL_COUNTEREVIDENCE_MIN_NON_TITLE_CAP
+            and primary_max_score >= max(configured_score_threshold + 0.01, RETRIEVAL_COUNTEREVIDENCE_MIN_PRIMARY_SCORE)
         )
 
         sources_by_chunk: dict[str, set[str]] = {}
@@ -2206,6 +3487,520 @@ class PaperScreeningPipeline:
                     continue
                 sources_by_chunk.setdefault(cid, set()).add(source_name)
 
+        def _non_title_rows(rows: list[dict]) -> list[dict]:
+            return [
+                row
+                for row in rows
+                if not self._is_always_included_chunk_kind(str(row.get("kind") or ""))
+            ]
+
+        def _non_title_id_set(rows: list[dict]) -> set[str]:
+            return {
+                str(row.get("chunk_id") or "")
+                for row in _non_title_rows(rows)
+                if str(row.get("chunk_id") or "")
+            }
+
+        signature_cache: dict[str, set[str]] = {}
+        diversity_trace: dict[str, Any] = {
+            "diversity_section_unique": 0,
+            "diversity_page_window_unique": 0,
+            "diversity_near_duplicate_skipped": 0,
+            "diversity_section_softcap_skipped": 0,
+            "diversity_page_softcap_skipped": 0,
+            "diversity_counterevidence_required": 0,
+            "diversity_counterevidence_kept": 0,
+        }
+
+        def _row_signature_tokens(row: dict) -> set[str]:
+            """Build compact lexical signatures used for near-duplicate suppression."""
+
+            cid = str(row.get("chunk_id") or "")
+            cache_key = cid or hashlib.sha256(str(row.get("text") or "").encode("utf-8")).hexdigest()
+            cached = signature_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+            text = str(row.get("text") or "").lower()
+            tokens = re.findall(r"\b[a-z]{3,}\b", text)
+            stopwords = {
+                "the",
+                "and",
+                "for",
+                "with",
+                "that",
+                "this",
+                "from",
+                "were",
+                "was",
+                "are",
+                "have",
+                "has",
+                "had",
+                "into",
+                "using",
+                "used",
+                "than",
+                "their",
+                "which",
+                "when",
+                "while",
+                "also",
+            }
+            signature = {
+                token
+                for token in tokens
+                if token not in stopwords
+            }
+            if len(signature) > 90:
+                signature = set(sorted(signature)[:90])
+            signature_cache[cache_key] = signature
+            return signature
+
+        def _jaccard_similarity(left: set[str], right: set[str]) -> float:
+            if not left or not right:
+                return 0.0
+            union = left | right
+            if not union:
+                return 0.0
+            return len(left & right) / len(union)
+
+        def _row_page_window_key(row: dict) -> int | None:
+            page_start = row.get("page_start")
+            if not isinstance(page_start, int) or page_start <= 0:
+                return None
+            return (page_start - 1) // max(RETRIEVAL_DIVERSITY_PAGE_WINDOW_SIZE, 1)
+
+        def _select_diverse_non_title(
+            rows: list[dict],
+            target: int,
+            required_ids: set[str] | None = None,
+        ) -> tuple[list[dict], dict[str, int]]:
+            """Prefer section/page-diverse evidence and suppress semantic near-duplicates."""
+
+            deduped_by_id: dict[str, dict] = {}
+            for row in rows:
+                cid = str(row.get("chunk_id") or "")
+                if not cid:
+                    continue
+                current = deduped_by_id.get(cid)
+                if current is None or self._method_priority_sort_key(row) < self._method_priority_sort_key(current):
+                    deduped_by_id[cid] = dict(row)
+
+            ranked = sorted(deduped_by_id.values(), key=self._method_priority_sort_key)
+            if target < 0:
+                target = len(ranked)
+            target = min(max(target, 0), len(ranked))
+            if target == 0:
+                return [], {
+                    "diversity_section_unique": 0,
+                    "diversity_page_window_unique": 0,
+                    "diversity_near_duplicate_skipped": 0,
+                    "diversity_section_softcap_skipped": 0,
+                    "diversity_page_softcap_skipped": 0,
+                    "diversity_counterevidence_required": len(required_ids or set()),
+                    "diversity_counterevidence_kept": 0,
+                }
+
+            if self.stage != "full_text":
+                passthrough = [dict(row) for row in ranked[:target]]
+                return passthrough, {
+                    "diversity_section_unique": 0,
+                    "diversity_page_window_unique": 0,
+                    "diversity_near_duplicate_skipped": 0,
+                    "diversity_section_softcap_skipped": 0,
+                    "diversity_page_softcap_skipped": 0,
+                    "diversity_counterevidence_required": len(required_ids or set()),
+                    "diversity_counterevidence_kept": sum(
+                        1
+                        for row in passthrough
+                        if str(row.get("chunk_id") or "") in (required_ids or set())
+                    ),
+                }
+
+            required_lookup = set(required_ids or set())
+            selected: list[dict] = []
+            seen_ids: set[str] = set()
+            section_counts: dict[str, int] = {}
+            page_window_counts: dict[int, int] = {}
+            near_duplicate_skipped = 0
+            section_softcap_skipped = 0
+            page_softcap_skipped = 0
+
+            def _add_row(row: dict) -> None:
+                cid = str(row.get("chunk_id") or "")
+                if not cid or cid in seen_ids:
+                    return
+                selected.append(dict(row))
+                seen_ids.add(cid)
+
+                section_label = self._infer_chunk_section_label(row)
+                if section_label in SECTION_PRIORITY:
+                    section_counts[section_label] = section_counts.get(section_label, 0) + 1
+
+                window_key = _row_page_window_key(row)
+                if window_key is not None:
+                    page_window_counts[window_key] = page_window_counts.get(window_key, 0) + 1
+
+            def _is_near_duplicate(candidate: dict) -> bool:
+                candidate_sig = _row_signature_tokens(candidate)
+                if not candidate_sig:
+                    return False
+                for existing in selected:
+                    if _jaccard_similarity(candidate_sig, _row_signature_tokens(existing)) >= RETRIEVAL_DIVERSITY_NEAR_DUPLICATE_JACCARD:
+                        return True
+                return False
+
+            for row in ranked:
+                if len(selected) >= target:
+                    break
+                cid = str(row.get("chunk_id") or "")
+                if cid in required_lookup:
+                    _add_row(row)
+
+            for section_label in SECTION_PRIORITY:
+                if len(selected) >= target:
+                    break
+                for row in ranked:
+                    if len(selected) >= target:
+                        break
+                    cid = str(row.get("chunk_id") or "")
+                    if not cid or cid in seen_ids:
+                        continue
+                    if self._infer_chunk_section_label(row) != section_label:
+                        continue
+                    if self._is_reference_dominant_text(str(row.get("text") or "")):
+                        continue
+                    if _is_near_duplicate(row):
+                        near_duplicate_skipped += 1
+                        continue
+                    _add_row(row)
+                    break
+
+            for relax_level in (0, 1, 2):
+                if len(selected) >= target:
+                    break
+                for row in ranked:
+                    if len(selected) >= target:
+                        break
+                    cid = str(row.get("chunk_id") or "")
+                    if not cid or cid in seen_ids:
+                        continue
+                    if self._is_reference_dominant_text(str(row.get("text") or "")):
+                        continue
+
+                    section_label = self._infer_chunk_section_label(row)
+                    window_key = _row_page_window_key(row)
+
+                    if relax_level == 0:
+                        if section_label in SECTION_PRIORITY and section_counts.get(section_label, 0) >= RETRIEVAL_DIVERSITY_SECTION_SOFT_CAP:
+                            section_softcap_skipped += 1
+                            continue
+                        if window_key is not None and page_window_counts.get(window_key, 0) >= RETRIEVAL_DIVERSITY_PAGE_WINDOW_SOFT_CAP:
+                            page_softcap_skipped += 1
+                            continue
+                    elif relax_level == 1:
+                        if window_key is not None and page_window_counts.get(window_key, 0) >= (RETRIEVAL_DIVERSITY_PAGE_WINDOW_SOFT_CAP + 1):
+                            page_softcap_skipped += 1
+                            continue
+
+                    if relax_level <= 1 and _is_near_duplicate(row):
+                        near_duplicate_skipped += 1
+                        continue
+
+                    _add_row(row)
+
+            if len(selected) < target:
+                for row in ranked:
+                    if len(selected) >= target:
+                        break
+                    cid = str(row.get("chunk_id") or "")
+                    if not cid or cid in seen_ids:
+                        continue
+                    _add_row(row)
+
+            kept_required = sum(
+                1
+                for row in selected
+                if str(row.get("chunk_id") or "") in required_lookup
+            )
+
+            return selected[:target], {
+                "diversity_section_unique": len(section_counts),
+                "diversity_page_window_unique": len(page_window_counts),
+                "diversity_near_duplicate_skipped": near_duplicate_skipped,
+                "diversity_section_softcap_skipped": section_softcap_skipped,
+                "diversity_page_softcap_skipped": page_softcap_skipped,
+                "diversity_counterevidence_required": len(required_lookup),
+                "diversity_counterevidence_kept": kept_required,
+            }
+
+        def _inject_counterevidence_pairs(
+            selected_rows: list[dict],
+            candidate_rows: list[dict],
+            target_non_title: int,
+            enabled: bool,
+        ) -> tuple[list[dict], dict[str, int]]:
+            """Add nearby counterevidence chunks so the LLM sees supporting and conflicting signals."""
+
+            ensured = [dict(row) for row in selected_rows]
+            if not enabled:
+                return ensured, {
+                    "counterevidence_target": 0,
+                    "counterevidence_added": 0,
+                    "counterevidence_candidate_pool": 0,
+                    "counterevidence_anchor_pool": 0,
+                }
+
+            if self.stage != "full_text":
+                return ensured, {
+                    "counterevidence_target": 0,
+                    "counterevidence_added": 0,
+                    "counterevidence_candidate_pool": 0,
+                    "counterevidence_anchor_pool": 0,
+                }
+
+            if target_non_title < 4:
+                return ensured, {
+                    "counterevidence_target": 0,
+                    "counterevidence_added": 0,
+                    "counterevidence_candidate_pool": 0,
+                    "counterevidence_anchor_pool": 0,
+                }
+
+            desired_pairs = min(
+                RETRIEVAL_COUNTEREVIDENCE_MAX_PAIRS,
+                max(1, target_non_title // 6),
+            )
+
+            seen_ids = {
+                str(row.get("chunk_id") or "")
+                for row in ensured
+                if str(row.get("chunk_id") or "")
+            }
+            selected_non_title = [
+                row
+                for row in ensured
+                if not self._is_always_included_chunk_kind(str(row.get("kind") or ""))
+            ]
+            anchor_pool = sorted(
+                [
+                    row
+                    for row in selected_non_title
+                    if float(row.get("score", 0.0) or 0.0) >= 0.04
+                ],
+                key=self._method_priority_sort_key,
+            )
+            if not anchor_pool:
+                anchor_pool = sorted(selected_non_title, key=self._method_priority_sort_key)
+
+            candidate_pool: list[dict] = []
+            candidate_seen: set[str] = set()
+            for row in sorted(candidate_rows, key=self._method_priority_sort_key):
+                if self._is_always_included_chunk_kind(str(row.get("kind") or "")):
+                    continue
+                cid = str(row.get("chunk_id") or "")
+                if not cid or cid in candidate_seen or cid in seen_ids:
+                    continue
+                if self._is_reference_dominant_text(str(row.get("text") or "")):
+                    continue
+                if self._is_low_quality_evidence_text(str(row.get("text") or "")):
+                    continue
+
+                neg_score = float(row.get("neg_score", 0.0) or 0.0)
+                pos_score = float(row.get("pos_score", 0.0) or 0.0)
+                score = float(row.get("score", 0.0) or 0.0)
+                if neg_score < RETRIEVAL_COUNTEREVIDENCE_MIN_NEG_SCORE:
+                    continue
+                if score > RETRIEVAL_COUNTEREVIDENCE_MAX_SCORE and neg_score <= pos_score:
+                    continue
+
+                candidate_pool.append(dict(row))
+                candidate_seen.add(cid)
+
+            added = 0
+            used_candidates: set[str] = set()
+            for anchor in anchor_pool:
+                if added >= desired_pairs:
+                    break
+
+                anchor_id = str(anchor.get("chunk_id") or "")
+                anchor_section = self._infer_chunk_section_label(anchor)
+                anchor_page = anchor.get("page_start")
+                anchor_sig = _row_signature_tokens(anchor)
+
+                best: dict | None = None
+                best_rank: tuple[Any, ...] | None = None
+
+                for candidate in candidate_pool:
+                    cid = str(candidate.get("chunk_id") or "")
+                    if not cid or cid in used_candidates:
+                        continue
+
+                    cand_section = self._infer_chunk_section_label(candidate)
+                    cand_page = candidate.get("page_start")
+                    page_distance = (
+                        abs(int(anchor_page) - int(cand_page))
+                        if isinstance(anchor_page, int) and isinstance(cand_page, int)
+                        else None
+                    )
+                    lexical_overlap = _jaccard_similarity(anchor_sig, _row_signature_tokens(candidate))
+
+                    same_section = bool(anchor_section and cand_section == anchor_section)
+                    nearby = bool(page_distance is not None and page_distance <= RETRIEVAL_COUNTEREVIDENCE_PAGE_DISTANCE)
+                    if not (same_section or nearby or lexical_overlap >= 0.10):
+                        continue
+
+                    neg_score = float(candidate.get("neg_score", 0.0) or 0.0)
+                    pos_score = float(candidate.get("pos_score", 0.0) or 0.0)
+                    score = float(candidate.get("score", 0.0) or 0.0)
+                    rank = (
+                        not same_section,
+                        0 if nearby else 1,
+                        -(neg_score - pos_score),
+                        abs(score),
+                        -lexical_overlap,
+                        *self._method_priority_sort_key(candidate),
+                    )
+                    if best_rank is None or rank < best_rank:
+                        best = candidate
+                        best_rank = rank
+
+                if best is None:
+                    continue
+
+                best_id = str(best.get("chunk_id") or "")
+                if not best_id:
+                    continue
+                ensured.append(dict(best))
+                used_candidates.add(best_id)
+                seen_ids.add(best_id)
+                sources_by_chunk.setdefault(best_id, set()).add("counterevidence")
+                if anchor_id:
+                    sources_by_chunk.setdefault(anchor_id, set()).add("counterevidence_anchor")
+                added += 1
+
+            return ensured, {
+                "counterevidence_target": desired_pairs,
+                "counterevidence_added": added,
+                "counterevidence_candidate_pool": len(candidate_pool),
+                "counterevidence_anchor_pool": len(anchor_pool),
+            }
+
+        def _trim_to_non_title_target(selected_rows: list[dict], target: int) -> list[dict]:
+            nonlocal diversity_trace
+            always_rows = [
+                dict(row)
+                for row in selected_rows
+                if self._is_always_included_chunk_kind(str(row.get("kind") or ""))
+            ]
+            non_title_selected = [
+                dict(row)
+                for row in selected_rows
+                if not self._is_always_included_chunk_kind(str(row.get("kind") or ""))
+            ]
+            required_counterevidence_ids = {
+                cid
+                for cid, source_marks in sources_by_chunk.items()
+                if "counterevidence" in source_marks
+            }
+            non_title_selected, diversity_trace = _select_diverse_non_title(
+                non_title_selected,
+                target,
+                required_counterevidence_ids,
+            )
+            return always_rows + non_title_selected
+
+        def _trim_to_context_budget(
+            selected_rows: list[dict],
+            target: int,
+        ) -> tuple[list[dict], dict[str, int | bool]]:
+            nonlocal diversity_trace
+            always_rows = [
+                dict(row)
+                for row in selected_rows
+                if self._is_always_included_chunk_kind(str(row.get("kind") or ""))
+            ]
+            non_title_selected = [
+                dict(row)
+                for row in selected_rows
+                if not self._is_always_included_chunk_kind(str(row.get("kind") or ""))
+            ]
+            required_counterevidence_ids = {
+                cid
+                for cid, source_marks in sources_by_chunk.items()
+                if "counterevidence" in source_marks
+            }
+            non_title_selected, diversity_trace = _select_diverse_non_title(
+                non_title_selected,
+                target,
+                required_counterevidence_ids,
+            )
+
+            min_keep = min(RETRIEVAL_MIN_NON_TITLE_TARGET, len(non_title_selected))
+            kept_non_title: list[dict] = []
+            estimated_tokens = 0
+            for row in non_title_selected:
+                row_tokens = self._estimate_chunk_prompt_tokens(row)
+                if len(kept_non_title) < min_keep or (estimated_tokens + row_tokens) <= data_prompt_budget_tokens:
+                    kept_non_title.append(dict(row))
+                    estimated_tokens += row_tokens
+
+            if len(kept_non_title) < min_keep:
+                kept_non_title = [dict(row) for row in non_title_selected[:min_keep]]
+                estimated_tokens = sum(self._estimate_chunk_prompt_tokens(row) for row in kept_non_title)
+
+            dropped_for_budget = max(0, len(non_title_selected) - len(kept_non_title))
+            return always_rows + kept_non_title, {
+                "context_window_tokens": CONTEXT_WINDOW,
+                "max_output_tokens": int(llm_max_tokens),
+                "prompt_token_budget_tokens": PROMPT_TOKEN_BUDGET,
+                "data_prompt_budget_tokens": data_prompt_budget_tokens,
+                "budget_non_title_cap": budget_non_title_cap,
+                "estimated_selected_prompt_tokens": estimated_tokens,
+                "context_budget_trimmed_chunks": dropped_for_budget,
+                "trimmed_for_context_budget": dropped_for_budget > 0,
+            }
+
+        def _build_backfill_stats(before_rows: list[dict], after_rows: list[dict]) -> dict[str, int]:
+            before_ids = _non_title_id_set(before_rows)
+            after_ids = _non_title_id_set(after_rows)
+            added_ids = after_ids - before_ids
+            threshold_value = float(self.score_threshold) if self.score_threshold is not None else None
+
+            rows_by_id: dict[str, dict] = {}
+            for row in all_non_title_ranked + after_rows:
+                cid = str(row.get("chunk_id") or "")
+                if not cid:
+                    continue
+                rows_by_id[cid] = row
+
+            added_low_quality = 0
+            added_from_supplemental = 0
+            added_below_threshold = 0
+            added_reference_dominant = 0
+
+            for cid in added_ids:
+                row = rows_by_id.get(cid)
+                if not row:
+                    continue
+                if self._is_reference_dominant_text(str(row.get("text") or "")):
+                    added_reference_dominant += 1
+                if self._is_low_quality_evidence_text(str(row.get("text") or "")):
+                    added_low_quality += 1
+                if cid in supplemental_candidate_ids:
+                    added_from_supplemental += 1
+                if threshold_value is not None and float(row.get("score", 0.0) or 0.0) < threshold_value:
+                    added_below_threshold += 1
+
+            return {
+                "backfill_total_added": len(added_ids),
+                "backfill_low_quality_added": added_low_quality,
+                "backfill_reference_dominant_added": added_reference_dominant,
+                "backfill_from_supplemental_pool": added_from_supplemental,
+                "backfill_below_threshold_added": added_below_threshold,
+            }
+
         _mark_sources(selected_primary, "primary")
 
         def _post_selection_denoise(selected_rows: list[dict]) -> tuple[list[dict], int]:
@@ -2214,21 +4009,38 @@ class PaperScreeningPipeline:
             cleaned: list[dict] = []
             dropped = 0
             for row in selected_rows:
-                if row.get("kind") == "title":
+                if self._is_always_included_chunk_kind(str(row.get("kind") or "")):
                     cleaned.append(row)
                     continue
 
                 text = str(row.get("text") or "")
                 metrics = self._chunk_readability_metrics(text)
-                keep = not self._is_low_quality_evidence_text(text)
+                sentence_count = int(row.get("sentence_count") or 0)
+                word_count = int(row.get("word_count") or 0)
+                is_reference_dominant = self._is_reference_dominant_text(text)
+                is_substantive_main_text = self._has_substantive_main_text(text)
+                keep = not self._is_low_quality_evidence_text(text) and not is_reference_dominant
+
+                if (
+                    not keep
+                    and is_substantive_main_text
+                    and not self._is_publisher_boilerplate_text(text)
+                ):
+                    keep = True
+
+                if keep and sentence_count > 0 and sentence_count < RETRIEVAL_MIN_SENTENCE_FLOOR:
+                    if word_count < max(40, RETRIEVAL_MIN_SENTENCE_FLOOR * 5):
+                        keep = False
 
                 sources = sources_by_chunk.get(str(row.get("chunk_id") or ""), set())
                 if not keep and "section_rescue" in sources:
                     # Keep rescue evidence only if it remains reasonably readable and informative.
                     keep = bool(
-                        metrics["readability_score"] >= 0.45
-                        and metrics["word_count"] >= 20
+                        not is_reference_dominant
+                        and metrics["readability_score"] >= 0.45
+                        and metrics["word_count"] >= max(35, RETRIEVAL_MIN_SENTENCE_FLOOR * 4)
                         and metrics["single_char_token_ratio"] <= 0.25
+                        and sentence_count >= max(4, RETRIEVAL_MIN_SENTENCE_FLOOR // 2)
                     )
 
                 if keep:
@@ -2238,26 +4050,148 @@ class PaperScreeningPipeline:
 
             return cleaned, dropped
 
+        def _raw_non_title_rescue_candidates(limit: int) -> list[dict]:
+            """human readable hint: safety net for readable non-title evidence from filtered chunks."""
+
+            rescued: list[dict] = []
+            seen_ids: set[str] = set()
+            target = max(0, int(limit or 0))
+            if target == 0:
+                return rescued
+
+            for row in sorted(chunks, key=self._method_priority_sort_key):
+                if self._is_always_included_chunk_kind(str(row.get("kind") or "")):
+                    continue
+                cid = str(row.get("chunk_id") or "")
+                if not cid or cid in seen_ids:
+                    continue
+                if self._is_reference_dominant_text(str(row.get("text") or "")):
+                    continue
+                if self._is_low_quality_evidence_text(str(row.get("text") or "")):
+                    continue
+                candidate = dict(row)
+                candidate["score"] = float(candidate.get("score", 0.0) or 0.0)
+                candidate["pos_score"] = float(candidate.get("pos_score", 0.0) or 0.0)
+                candidate["neg_score"] = float(candidate.get("neg_score", 0.0) or 0.0)
+                rescued.append(candidate)
+                seen_ids.add(cid)
+                if len(rescued) >= target:
+                    break
+            return rescued
+
+        method_target = min(
+            RETRIEVAL_MIN_METHOD_TARGET if self.stage == "full_text" else 0,
+            precision_non_title_cap,
+        )
+        quota_candidates = all_non_title_ranked or sorted(
+            [dict(item) for item in primary_scored],
+            key=self._method_priority_sort_key,
+        )
+
         if not weak_evidence:
             final_selected, dropped_after_merge = _post_selection_denoise([dict(item) for item in selected_primary])
+            raw_non_title_rescue_added = 0
+            if min_non_title_target > 0 and not _non_title_rows(final_selected):
+                seen_ids = {
+                    str(item.get("chunk_id") or "")
+                    for item in final_selected
+                    if str(item.get("chunk_id") or "")
+                }
+                for candidate in _raw_non_title_rescue_candidates(min_non_title_target):
+                    cid = str(candidate.get("chunk_id") or "")
+                    if not cid or cid in seen_ids:
+                        continue
+                    final_selected.append(candidate)
+                    seen_ids.add(cid)
+                    sources_by_chunk.setdefault(cid, set()).add("raw_rescue")
+                    raw_non_title_rescue_added += 1
+
+            pre_backfill_selected = [dict(item) for item in final_selected]
+            final_selected, method_stats = self._enforce_method_context_quota(
+                final_selected,
+                quota_candidates,
+                method_target,
+            )
+            final_selected, quota_stats = self._enforce_non_title_context_quota(
+                final_selected,
+                quota_candidates,
+                min_non_title_target,
+            )
+            counterevidence_candidates = all_non_title_ranked or quota_candidates
+            final_selected, counterevidence_stats = _inject_counterevidence_pairs(
+                final_selected,
+                counterevidence_candidates,
+                precision_non_title_cap,
+                counterevidence_enabled,
+            )
+            final_selected = _trim_to_non_title_target(final_selected, precision_non_title_cap)
+            final_selected, context_budget_stats = _trim_to_context_budget(
+                final_selected,
+                precision_non_title_cap,
+            )
+            backfill_stats = _build_backfill_stats(pre_backfill_selected, final_selected)
+
+            final_selected.sort(
+                key=lambda item: (
+                    not self._is_always_included_chunk_kind(str(item.get("kind") or "")),
+                    *self._method_priority_sort_key(item),
+                )
+            )
             for item in final_selected:
                 cid = str(item.get("chunk_id") or "")
+                item["hybrid_score"] = round(self._hybrid_chunk_score(item), 6)
                 item["selection_sources"] = sorted(sources_by_chunk.get(cid, {"primary"}))
+            final_sentence_counts = [
+                int(row.get("sentence_count") or 0)
+                for row in final_selected
+                if not self._is_always_included_chunk_kind(str(row.get("kind") or ""))
+            ]
             trace = {
                 "fallback_triggered": False,
+                "configured_top_k": configured_top_k,
+                "monitoring_signal_source": self._monitoring_signal_source,
+                "monitoring_deprioritization_enabled": self._monitoring_deprioritization_enabled,
+                "monitoring_term_count": len(self._monitoring_signal_terms),
+                "intervention_action_term_count": len(self._intervention_action_terms),
+                "monitoring_kb_pos_count": self._monitoring_kb_pos_count,
+                "monitoring_kb_neg_count": self._monitoring_kb_neg_count,
+                "available_non_title_count": available_non_title_count,
+                "target_non_title_count": target_non_title_count,
+                "applied_non_title_cap": precision_non_title_cap,
+                "configured_score_threshold": configured_score_threshold,
+                "supplemental_low_quality_pool": len(supplemental_candidate_ids),
                 "primary_selected_count": len(selected_primary),
-                "primary_non_title_count": len(non_title_primary),
+                "primary_non_title_count": len(primary_scored),
                 "primary_non_title_word_count": primary_words,
                 "primary_max_score": primary_max_score,
                 "primary_fragmented_share": round(float(primary_fragmented_share), 6),
                 "post_selection_dropped_fragments": dropped_after_merge,
+                "raw_non_title_rescue_added": raw_non_title_rescue_added,
+                "min_non_title_target": min_non_title_target,
+                "min_method_target": method_target,
+                "target_chunk_sentence_count": FULLTEXT_SENTENCE_TARGET,
+                "selected_sentence_count_min": min(final_sentence_counts) if final_sentence_counts else 0,
+                "selected_sentence_count_mean": round(mean(final_sentence_counts), 4) if final_sentence_counts else 0.0,
+                **method_stats,
+                **quota_stats,
+                **counterevidence_stats,
+                **diversity_trace,
+                **context_budget_stats,
+                **backfill_stats,
                 "final_selected_count": len(final_selected),
-                "effective_top_k": self.top_k,
+                "effective_top_k": configured_top_k,
             }
-            return final_selected, usage_primary, trace
+            merged_usage = self._merge_usage_dicts(usage_all_ranked, usage_primary)
+            return final_selected, merged_usage, trace
 
-        fallback_top_k = max(int(self.top_k or 0), RETRIEVAL_FALLBACK_TOP_K)
-        fallback_threshold = 0.0 if self.score_threshold is None else min(float(self.score_threshold), 0.0)
+        if configured_top_k is None:
+            fallback_top_k = min(
+                RETRIEVAL_FALLBACK_TOP_K,
+                max(target_non_title_count, RETRIEVAL_MIN_NON_TITLE_TARGET),
+            )
+        else:
+            fallback_top_k = max(configured_top_k, 0)
+        fallback_threshold = configured_score_threshold
         selected_fallback, _, usage_fallback = self.selector.select(
             chunks,
             fallback_top_k,
@@ -2265,9 +4199,10 @@ class PaperScreeningPipeline:
         )
         _mark_sources(selected_fallback, "fallback")
 
-        keyword_pattern = re.compile("|".join(re.escape(k) for k in SECTION_RESCUE_KEYWORDS), re.IGNORECASE)
+        keyword_terms = self._section_rescue_keywords or SECTION_RESCUE_KEYWORDS
+        keyword_pattern = re.compile("|".join(re.escape(k) for k in keyword_terms), re.IGNORECASE)
         for row in selected_fallback:
-            if row.get("kind") == "title":
+            if self._is_always_included_chunk_kind(str(row.get("kind") or "")):
                 continue
             cid = str(row.get("chunk_id") or "")
             if not cid:
@@ -2287,15 +4222,21 @@ class PaperScreeningPipeline:
             if existing is None or float(row.get("score", 0.0) or 0.0) > float(existing.get("score", 0.0) or 0.0):
                 merged_map[cid] = dict(row)
 
-        titles = [row for row in merged_map.values() if row.get("kind") == "title"]
-        non_titles = [row for row in merged_map.values() if row.get("kind") != "title"]
+        always_included = [
+            row for row in merged_map.values() if self._is_always_included_chunk_kind(str(row.get("kind") or ""))
+        ]
+        non_titles = [
+            row
+            for row in merged_map.values()
+            if (
+                not self._is_always_included_chunk_kind(str(row.get("kind") or ""))
+                and not self._is_reference_dominant_text(str(row.get("text") or ""))
+            )
+        ]
         non_titles.sort(
             key=lambda item: (
                 "section_rescue" not in sources_by_chunk.get(str(item.get("chunk_id") or ""), set()),
-                -float(item.get("score", 0.0) or 0.0),
-                item.get("page_start") or 0,
-                item.get("line_start") or 0,
-                item.get("chunk_id", ""),
+                *self._method_priority_sort_key(item),
             )
         )
 
@@ -2333,33 +4274,101 @@ class PaperScreeningPipeline:
             seen_ids.add(cid)
 
         non_titles = balanced_non_titles[:fallback_top_k]
+        ranked_non_titles = [dict(item) for item in non_titles]
 
-        final_selected = titles + non_titles
+        final_selected = always_included + non_titles
         final_selected, dropped_after_merge = _post_selection_denoise(final_selected)
+        raw_non_title_rescue_added = 0
 
-        # Keep at least a small non-title context to avoid over-pruning into title-only prompts.
-        non_title_after = [row for row in final_selected if row.get("kind") != "title"]
-        if not non_title_after:
-            rescue_candidates = [row for row in non_titles if not self._is_low_quality_evidence_text(str(row.get("text") or ""))]
-            final_selected.extend(rescue_candidates[: min(3, len(rescue_candidates))])
+        # Keep at least a small non-title context to avoid over-pruning into empty evidence.
+        scored_after = _non_title_rows(final_selected)
+        if min_non_title_target > 0 and not scored_after:
+            rescue_candidates = [
+                row
+                for row in non_titles
+                if (
+                    not self._is_low_quality_evidence_text(str(row.get("text") or ""))
+                    and not self._is_reference_dominant_text(str(row.get("text") or ""))
+                )
+            ]
+            final_selected.extend(rescue_candidates[: min(min_non_title_target, len(rescue_candidates))])
+
+            scored_after = _non_title_rows(final_selected)
+            if not scored_after:
+                seen_ids = {
+                    str(item.get("chunk_id") or "")
+                    for item in final_selected
+                    if str(item.get("chunk_id") or "")
+                }
+                for candidate in _raw_non_title_rescue_candidates(min_non_title_target):
+                    cid = str(candidate.get("chunk_id") or "")
+                    if not cid or cid in seen_ids:
+                        continue
+                    final_selected.append(candidate)
+                    seen_ids.add(cid)
+                    sources_by_chunk.setdefault(cid, set()).add("raw_rescue")
+                    raw_non_title_rescue_added += 1
+
+        pre_backfill_selected = [dict(item) for item in final_selected]
+        quota_candidates = all_non_title_ranked or ranked_non_titles
+        final_selected, method_stats = self._enforce_method_context_quota(
+            final_selected,
+            quota_candidates,
+            method_target,
+        )
+        final_selected, quota_stats = self._enforce_non_title_context_quota(
+            final_selected,
+            quota_candidates,
+            min_non_title_target,
+        )
+        counterevidence_candidates = all_non_title_ranked or quota_candidates
+        final_selected, counterevidence_stats = _inject_counterevidence_pairs(
+            final_selected,
+            counterevidence_candidates,
+            precision_non_title_cap,
+            False,
+        )
+        final_selected = _trim_to_non_title_target(final_selected, precision_non_title_cap)
+        final_selected, context_budget_stats = _trim_to_context_budget(
+            final_selected,
+            precision_non_title_cap,
+        )
+        backfill_stats = _build_backfill_stats(pre_backfill_selected, final_selected)
+
         final_selected.sort(
             key=lambda item: (
-                item.get("kind") != "title",
-                -float(item.get("score", 0.0) or 0.0),
-                item.get("page_start") or 0,
-                item.get("line_start") or 0,
-                item.get("chunk_id", ""),
+                not self._is_always_included_chunk_kind(str(item.get("kind") or "")),
+                *self._method_priority_sort_key(item),
             )
         )
 
         for item in final_selected:
             cid = str(item.get("chunk_id") or "")
+            item["hybrid_score"] = round(self._hybrid_chunk_score(item), 6)
             item["selection_sources"] = sorted(sources_by_chunk.get(cid, {"fallback"}))
+
+        final_sentence_counts = [
+            int(row.get("sentence_count") or 0)
+            for row in final_selected
+            if not self._is_always_included_chunk_kind(str(row.get("kind") or ""))
+        ]
 
         trace = {
             "fallback_triggered": True,
+            "configured_top_k": configured_top_k,
+            "monitoring_signal_source": self._monitoring_signal_source,
+            "monitoring_deprioritization_enabled": self._monitoring_deprioritization_enabled,
+            "monitoring_term_count": len(self._monitoring_signal_terms),
+            "intervention_action_term_count": len(self._intervention_action_terms),
+            "monitoring_kb_pos_count": self._monitoring_kb_pos_count,
+            "monitoring_kb_neg_count": self._monitoring_kb_neg_count,
+            "available_non_title_count": available_non_title_count,
+            "target_non_title_count": target_non_title_count,
+            "applied_non_title_cap": precision_non_title_cap,
+            "configured_score_threshold": configured_score_threshold,
+            "supplemental_low_quality_pool": len(supplemental_candidate_ids),
             "primary_selected_count": len(selected_primary),
-            "primary_non_title_count": len(non_title_primary),
+            "primary_non_title_count": len(primary_scored),
             "primary_non_title_word_count": primary_words,
             "primary_max_score": primary_max_score,
             "primary_fragmented_share": round(float(primary_fragmented_share), 6),
@@ -2369,21 +4378,34 @@ class PaperScreeningPipeline:
             "section_rescue_hits": sum(
                 1 for row in final_selected if "section_rescue" in set(row.get("selection_sources") or [])
             ),
+            "raw_non_title_rescue_added": raw_non_title_rescue_added,
             "section_balance_hits": [
                 section
                 for section in SECTION_PRIORITY
                 if any(
                     self._infer_chunk_section_label(row) == section
                     for row in final_selected
-                    if row.get("kind") != "title"
+                    if not self._is_always_included_chunk_kind(str(row.get("kind") or ""))
                 )
             ],
             "post_selection_dropped_fragments": dropped_after_merge,
+            "min_non_title_target": min_non_title_target,
+            "min_method_target": method_target,
+            "target_chunk_sentence_count": FULLTEXT_SENTENCE_TARGET,
+            "selected_sentence_count_min": min(final_sentence_counts) if final_sentence_counts else 0,
+            "selected_sentence_count_mean": round(mean(final_sentence_counts), 4) if final_sentence_counts else 0.0,
+            **method_stats,
+            **quota_stats,
+            **counterevidence_stats,
+            **diversity_trace,
+            **context_budget_stats,
+            **backfill_stats,
             "final_selected_count": len(final_selected),
-            "effective_top_k": fallback_top_k,
+            "effective_top_k": configured_top_k,
         }
 
-        merged_usage = self._merge_usage_dicts(usage_primary, usage_fallback)
+        merged_usage = self._merge_usage_dicts(usage_all_ranked, usage_primary)
+        merged_usage = self._merge_usage_dicts(merged_usage, usage_fallback)
         return final_selected, merged_usage, trace
 
     @staticmethod
@@ -2399,8 +4421,10 @@ class PaperScreeningPipeline:
                 "score_std": 0.0,
             }
 
-        non_title = [c for c in selected if c.get("kind") != "title"]
-        scores = [float(c.get("score", 0.0) or 0.0) for c in non_title]
+        scored_chunks = [
+            c for c in selected if not PaperScreeningPipeline._is_always_included_chunk_kind(str(c.get("kind") or ""))
+        ]
+        scores = [float(c.get("score", 0.0) or 0.0) for c in scored_chunks]
         score_min = min(scores) if scores else 0.0
         score_max = max(scores) if scores else 0.0
         score_mean = mean(scores) if scores else 0.0
@@ -2409,10 +4433,10 @@ class PaperScreeningPipeline:
 
         ranked_ids: list[str] = [
             str(c.get("chunk_id") or "")
-            for c in sorted(non_title, key=lambda x: -float(x.get("score", 0.0) or 0.0))
+            for c in sorted(scored_chunks, key=lambda x: -float(x.get("score", 0.0) or 0.0))
         ]
         rank_map = {cid: idx + 1 for idx, cid in enumerate(ranked_ids)}
-        non_title_count = len(non_title)
+        non_title_count = len(scored_chunks)
 
         enriched: list[dict] = []
         for chunk in selected:
@@ -2420,16 +4444,21 @@ class PaperScreeningPipeline:
             cid = str(item.get("chunk_id") or "")
             score = float(item.get("score", 0.0) or 0.0)
             readability = PaperScreeningPipeline._chunk_readability_metrics(str(item.get("text") or ""))
+            sentence_count = int(item.get("sentence_count") or 0)
+            word_count = int(item.get("word_count") or readability["word_count"])
             item["relevance_score"] = score
             item["relevance_margin"] = score
             item["positive_alignment_score"] = float(item.get("pos_score", 0.0) or 0.0)
             item["negative_alignment_score"] = float(item.get("neg_score", 0.0) or 0.0)
+            item["hybrid_score"] = round(float(item.get("hybrid_score", score) or score), 6)
+            item["sentence_count"] = sentence_count
+            item["word_count"] = word_count
             item["readability_score"] = round(float(readability["readability_score"]), 4)
             item["single_char_token_ratio"] = round(float(readability["single_char_token_ratio"]), 4)
             item["avg_alpha_word_length"] = round(float(readability["avg_alpha_word_length"]), 4)
 
-            if item.get("kind") == "title":
-                # human readable hint: title chunks are forced-in context and are intentionally unscored.
+            if PaperScreeningPipeline._is_always_included_chunk_kind(str(item.get("kind") or "")):
+                # human readable hint: always-included context chunks bypass relevance scoring by design.
                 item["score"] = None
                 item["pos_score"] = None
                 item["neg_score"] = None
@@ -2439,7 +4468,7 @@ class PaperScreeningPipeline:
                 item["negative_alignment_score"] = None
                 item["retrieval_rank"] = 0
                 item["certainty_percentile"] = 1.0
-                item["certainty_label"] = "always_included_title"
+                item["certainty_label"] = "always_included_context"
             else:
                 rank = int(rank_map.get(cid, non_title_count or 1))
                 if denom > 0:
@@ -2473,7 +4502,7 @@ class PaperScreeningPipeline:
 
         pages: set[int] = set()
         for chunk in selected:
-            if chunk.get("kind") == "title":
+            if PaperScreeningPipeline._is_always_included_chunk_kind(str(chunk.get("kind") or "")):
                 continue
             start = chunk.get("page_start")
             end = chunk.get("page_end")
@@ -2515,6 +4544,8 @@ class PaperScreeningPipeline:
             return "results"
         if label in {"conclusions", "summary"}:
             return "conclusion"
+        if label in {"references", "reference", "bibliography", "acknowledgements", "acknowledgments"}:
+            return "reference"
         return None
 
     @staticmethod
@@ -2548,18 +4579,29 @@ class PaperScreeningPipeline:
         """Create evidence chunks, token counts, and resolved language for one paper."""
 
         language_setting = self.language_setting
-        resolved_language = language_setting or "en"
+        language_setting_lower = str(language_setting or "").strip().lower()
+        resolved_language = "german" if language_setting_lower in {"de", "german"} else "english"
 
         if self.stage in {"full_text", "data_extraction"}:
             resolved_path = self._resolve_pdf_path(paper)
-            pdf_text, page_count, used_path, page_texts = self._load_pdf_text(paper, resolved_path, include_pages=True)
+            pdf_text, page_count, _used_path, page_texts = self._load_pdf_text(paper, resolved_path, include_pages=True)
             if not pdf_text:
                 return [], 0, 0, resolved_language
-            if language_setting in {"auto_first", "auto-first"}:
-                sample_text = f"{paper.title}\n{pdf_text[:4000]}" if pdf_text else f"{paper.title}\n{paper.abstract}"
-                resolved_language = self._detect_language(sample_text)
-            elif language_setting == "auto":
-                resolved_language = "auto"
+
+            sample_text = f"{paper.title}\n{pdf_text[:4000]}" if pdf_text else f"{paper.title}\n{paper.abstract}"
+            detected_language_code = (self._detect_language_code(sample_text) or "").strip().lower()
+
+            if detected_language_code.startswith("de"):
+                resolved_language = "german"
+            elif detected_language_code.startswith("en"):
+                resolved_language = "english"
+            elif language_setting_lower in {"auto_first", "auto-first", "auto"}:
+                # human readable hint: keep tokenizer stable when language detection is uncertain.
+                resolved_language = "english"
+
+            pdf_text_tokens = self._estimate_text_tokens(pdf_text)
+            pdf_visual_tokens = page_count * TOKENS_PER_PAGE_IMAGE
+
             chunks = chunk_fulltext_sentences(
                 paper.paper_id,
                 paper.title,
@@ -2573,12 +4615,105 @@ class PaperScreeningPipeline:
                 for chunk in chunks:
                     chunk_text = str(chunk.get("text", ""))
                     chunk["text"] = self._strip_author_mentions(chunk_text, authors)
-            pdf_text_tokens = self._estimate_text_tokens(pdf_text)
-            pdf_visual_tokens = page_count * TOKENS_PER_PAGE_IMAGE
-            return chunks, pdf_text_tokens, pdf_visual_tokens, resolved_language
+            language_used = detected_language_code or resolved_language
+            return chunks, pdf_text_tokens, pdf_visual_tokens, language_used
+
+        if language_setting_lower in {"auto_first", "auto-first", "auto"}:
+            resolved_language = self._detect_language(f"{paper.title}\n{paper.abstract}")
 
         chunks = chunk_paper_sentences(paper.paper_id, paper.title, paper.abstract, resolved_language)
         return chunks, 0, 0, resolved_language
+
+    def _compact_artifacts_enabled(self) -> bool:
+        """Enable compact per-paper artifacts only during full_text runs."""
+
+        return self.stage == "full_text" and self.artifact_mode == "compact"
+
+    def _compact_artifact_path_for_folder(self, folder_path: Path, stage: str | None = None) -> Path:
+        """Return per-paper compact artifact path for the target stage."""
+
+        target_stage = stage or self.stage
+        return folder_path / f"{target_stage}_artifact.json"
+
+    @staticmethod
+    def _metadata_snapshot_for_folder(folder_path: Path, fallback: dict | None = None) -> dict:
+        """Use metadata.json as canonical metadata snapshot for sidecar synchronization."""
+
+        metadata_path = folder_path / "metadata.json"
+        if metadata_path.exists():
+            try:
+                payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    return payload
+            except Exception:
+                pass
+
+        fallback_payload = dict(fallback or {})
+        fallback_payload.pop("folder_path", None)
+        return fallback_payload
+
+    def _write_compact_human_normalized_text(
+        self,
+        folder_path: Path,
+        metadata_snapshot: dict,
+        normalized_text: str,
+    ) -> None:
+        """Write human-checkable normalized text with metadata copied from metadata.json."""
+
+        normalized_path = folder_path / f"{self.stage}_normalized.txt"
+        content = [
+            "=== metadata.json ===",
+            json.dumps(metadata_snapshot, ensure_ascii=False, indent=2),
+            "",
+            "=== normalized_full_text ===",
+            normalized_text,
+        ]
+        normalized_path.write_text("\n".join(content), encoding="utf-8")
+
+    def _persist_compact_text_artifacts(
+        self,
+        paper: PaperRecord,
+        pdf_path: Path,
+        cache_key: dict[str, int],
+        normalized_text: str,
+        normalized_pages: list[str],
+    ) -> None:
+        """Persist compact machine artifact and synchronized human text sidecar."""
+
+        folder_path = pdf_path.parent
+        artifact_path = self._compact_artifact_path_for_folder(folder_path, stage="full_text")
+        metadata_snapshot = self._metadata_snapshot_for_folder(folder_path, fallback=paper.metadata)
+
+        artifact_payload: dict[str, Any] = {}
+        if artifact_path.exists():
+            try:
+                loaded = json.loads(artifact_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    artifact_payload = loaded
+            except Exception:
+                artifact_payload = {}
+
+        artifact_payload.update(
+            {
+                "meta": "stage_artifact",
+                "schema_version": 1,
+                "stage": "full_text",
+                "paper_id": str(paper.paper_id),
+                "metadata": metadata_snapshot,
+                "source_pdf_name": pdf_path.name,
+                "source_pdf_cache_key": cache_key,
+                "normalized_text": normalized_text,
+                "normalized_pages": normalized_pages,
+                "normalized_text_sha256": self._sha256_text(normalized_text),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+        artifact_path.write_text(
+            json.dumps(artifact_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self._write_compact_human_normalized_text(folder_path, metadata_snapshot, normalized_text)
 
     def _materialize_paper_folders_full_text(self) -> None:
         """Split select CSV rows into per-paper folders under csv_dir/per_paper_full_text."""
@@ -2602,15 +4737,88 @@ class PaperScreeningPipeline:
             with open(metadata_path, "w", encoding="utf-8") as handle:
                 json.dump(canonical, handle, ensure_ascii=False, indent=2)
 
-            csv_path = folder_path / "metadata.csv"
-            with open(csv_path, "w", encoding="utf-8", newline="") as handle:
-                writer = csv.DictWriter(handle, fieldnames=CANONICAL_FIELDS)
-                writer.writeheader()
-                writer.writerow(canonical)
+            if not self._compact_artifacts_enabled():
+                csv_path = folder_path / "metadata.csv"
+                with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=CANONICAL_FIELDS)
+                    writer.writeheader()
+                    writer.writerow(canonical)
+
+            if not any(folder_path.glob("*.pdf")):
+                cov_id = str(canonical.get("Covidence #") or "").strip()
+                source_pdf = self._find_source_pdf_for_covidence_id(cov_id)
+                if source_pdf and source_pdf.exists():
+                    target_pdf = folder_path / source_pdf.name
+                    try:
+                        if source_pdf.resolve() != target_pdf.resolve():
+                            shutil.copy2(source_pdf, target_pdf)
+                    except Exception as exc:  # pylint: disable=broad-except
+                        self._log_error(
+                            cov_id or folder_name,
+                            f"failed to copy source PDF into retry folder: {exc}",
+                            error_type="retry_pdf_copy_failed",
+                        )
+                elif self.pdf_root and self.pdf_root.exists():
+                    self._log_error(
+                        cov_id or folder_name,
+                        f"no source PDF found in pdf_root={self.pdf_root} for retry folder materialization",
+                        error_type="retry_pdf_source_missing",
+                    )
 
             folders.append(folder_path)
 
         self._paper_folders = folders
+
+    def _find_source_pdf_for_covidence_id(self, covidence_id: str) -> Path | None:
+        """Locate source PDF in pdf_root using Covidence ID for retry materialization."""
+
+        if not self.pdf_root or not self.pdf_root.exists():
+            return None
+
+        cid = str(covidence_id or "").strip().lstrip("#")
+        if not cid:
+            return None
+
+        candidate_folders: list[Path] = []
+        direct = self.pdf_root / cid
+        if direct.is_dir():
+            candidate_folders.append(direct)
+
+        try:
+            prefixed = sorted(
+                [
+                    folder
+                    for folder in self.pdf_root.iterdir()
+                    if folder.is_dir() and folder.name.startswith(f"{cid}_")
+                ],
+                key=lambda folder: folder.stat().st_mtime,
+                reverse=True,
+            )
+            candidate_folders.extend(prefixed)
+        except Exception:
+            pass
+
+        unique_folders: list[Path] = []
+        seen: set[str] = set()
+        for folder in candidate_folders:
+            key = str(folder.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_folders.append(folder)
+
+        for folder in unique_folders:
+            preferred = folder / f"{cid}.pdf"
+            if preferred.exists():
+                return preferred
+            canonical = folder / PAPER_PDF_NAME
+            if canonical.exists():
+                return canonical
+            pdfs = sorted(folder.glob("*.pdf"))
+            if pdfs:
+                return pdfs[0]
+
+        return None
 
     def _materialize_data_extraction_subset(self) -> None:
         """Create per-paper data_extraction folders from included IDs."""
@@ -2666,6 +4874,14 @@ class PaperScreeningPipeline:
                 full_text_chunks = folder / "full_text_selected_chunks.jsonl"
                 if full_text_chunks.exists():
                     shutil.copy2(full_text_chunks, dest / "data_extraction_selected_chunks.jsonl")
+
+                full_text_artifact = folder / "full_text_artifact.json"
+                if full_text_artifact.exists():
+                    shutil.copy2(full_text_artifact, dest / full_text_artifact.name)
+
+                full_text_normalized = folder / "full_text_normalized.txt"
+                if full_text_normalized.exists():
+                    shutil.copy2(full_text_normalized, dest / full_text_normalized.name)
 
                 row["folder_path"] = str(dest)
                 metadata_path = dest / "metadata.json"
@@ -2848,6 +5064,73 @@ class PaperScreeningPipeline:
             )
             return "", 0, None, []
 
+        cache_text_path = path.parent / f"{path.stem}_normalized_text.txt"
+        cache_pages_path = path.parent / f"{path.stem}_normalized_pages.json"
+        cache_meta_path = path.parent / f"{path.stem}_normalized_meta.json"
+        compact_mode = self._compact_artifacts_enabled()
+        compact_artifact_path = self._compact_artifact_path_for_folder(path.parent, stage="full_text")
+        cache_key: dict[str, int] = {}
+
+        try:
+            pdf_stat = path.stat()
+            cache_key = {
+                "pdf_size": int(pdf_stat.st_size),
+                "pdf_mtime_ns": int(pdf_stat.st_mtime_ns),
+            }
+
+            if compact_mode and compact_artifact_path.exists():
+                compact_payload = json.loads(compact_artifact_path.read_text(encoding="utf-8"))
+                if isinstance(compact_payload, dict):
+                    cached_key = compact_payload.get("source_pdf_cache_key")
+                    if isinstance(cached_key, dict) and all(cached_key.get(k) == cache_key.get(k) for k in cache_key):
+                        text = str(compact_payload.get("normalized_text") or "")
+                        pages_payload = compact_payload.get("normalized_pages")
+                        pages = [str(page or "") for page in pages_payload] if isinstance(pages_payload, list) else []
+                        if text.strip():
+                            if include_pages and not pages:
+                                pages = [text]
+                            metadata_snapshot = self._metadata_snapshot_for_folder(path.parent, fallback=paper.metadata)
+                            self._write_compact_human_normalized_text(path.parent, metadata_snapshot, text)
+                            for stale_path in (cache_text_path, cache_pages_path, cache_meta_path):
+                                try:
+                                    if stale_path.exists():
+                                        stale_path.unlink()
+                                except Exception:
+                                    pass
+                            page_count = len(pages) if include_pages else self._count_pdf_pages(path)
+                            return text, page_count, path, pages
+
+            if cache_text_path.exists() and cache_meta_path.exists() and (cache_pages_path.exists() or not include_pages):
+                cache_meta = json.loads(cache_meta_path.read_text(encoding="utf-8"))
+                if isinstance(cache_meta, dict) and all(cache_meta.get(k) == cache_key.get(k) for k in cache_key):
+                    text = cache_text_path.read_text(encoding="utf-8")
+                    pages: list[str] = []
+                    if include_pages:
+                        pages_payload = json.loads(cache_pages_path.read_text(encoding="utf-8"))
+                        if isinstance(pages_payload, list):
+                            pages = [str(page or "") for page in pages_payload]
+                    if include_pages and not pages:
+                        pages = [text]
+                    if compact_mode and text.strip():
+                        self._persist_compact_text_artifacts(
+                            paper,
+                            path,
+                            cache_key,
+                            text,
+                            pages if pages else [text],
+                        )
+                        for stale_path in (cache_text_path, cache_pages_path, cache_meta_path):
+                            try:
+                                if stale_path.exists():
+                                    stale_path.unlink()
+                            except Exception:
+                                pass
+                    page_count = len(pages) if include_pages else self._count_pdf_pages(path)
+                    return text, page_count, path, pages
+        except Exception:
+            # human readable hint: cache read failures should never stop screening; pipeline falls back to live extraction.
+            pass
+
         try:
             if include_pages:
                 pages = read_pdf_pages(str(path))
@@ -2866,6 +5149,35 @@ class PaperScreeningPipeline:
 
             if include_pages and not pages:
                 pages = [text]
+
+            try:
+                if not cache_key:
+                    pdf_stat = path.stat()
+                    cache_key = {
+                        "pdf_size": int(pdf_stat.st_size),
+                        "pdf_mtime_ns": int(pdf_stat.st_mtime_ns),
+                    }
+                if compact_mode:
+                    self._persist_compact_text_artifacts(
+                        paper,
+                        path,
+                        cache_key,
+                        text,
+                        pages if pages else [text],
+                    )
+                    for stale_path in (cache_text_path, cache_pages_path, cache_meta_path):
+                        try:
+                            if stale_path.exists():
+                                stale_path.unlink()
+                        except Exception:
+                            pass
+                else:
+                    cache_text_path.write_text(text, encoding="utf-8")
+                    cache_pages_path.write_text(json.dumps(pages, ensure_ascii=False), encoding="utf-8")
+                    cache_meta_path.write_text(json.dumps(cache_key, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                # human readable hint: cache write failures are non-blocking and do not affect screening correctness.
+                pass
 
             page_count = len(pages) if include_pages else self._count_pdf_pages(path)
             return text, page_count, path, pages
@@ -2995,6 +5307,78 @@ class PaperScreeningPipeline:
         self._async_openai_client_base_url = base_url
         return self._async_openai_client
 
+    def _configure_dynamic_screening_schema(self) -> None:
+        """Build dynamic exclusion schema keys from user tags and prompt-required fields."""
+
+        study_tag_flag_keys = set(_build_study_tag_field_keys(STUDY_TAGS_INCLUDE))
+        prompt_exclusion_flag_keys = {
+            _normalize_schema_key(field)
+            for field in self._prompt_required_json_fields
+            if _looks_like_exclusion_field(field)
+            and _normalize_schema_key(field)
+        }
+
+        active_keys = sorted(study_tag_flag_keys | prompt_exclusion_flag_keys)
+        if not active_keys:
+            active_keys = list(LEGACY_DEFAULT_EXCLUSION_KEYS)
+
+        self._study_tag_flag_keys = tuple(sorted(study_tag_flag_keys))
+        self._prompt_exclusion_flag_keys = tuple(sorted(prompt_exclusion_flag_keys))
+        self._active_exclusion_flag_keys = tuple(active_keys)
+        self._allowed_exclusion_reason_categories = tuple(sorted(set(active_keys)))
+
+        neutral_keys = {key for key in active_keys if key.endswith("_context")}
+        if "not_urban_context" in active_keys:
+            neutral_keys.add("not_urban_context")
+        self._neutral_exclusion_flag_keys = tuple(sorted(neutral_keys))
+
+        configured_reason_keys = set(self._allowed_exclusion_reason_categories)
+        if "insufficient_context" in configured_reason_keys:
+            self._insufficient_context_reason_key = "insufficient_context"
+        else:
+            self._insufficient_context_reason_key = next(
+                (key for key in sorted(configured_reason_keys) if "insufficient" in key),
+                None,
+            )
+
+        self._primary_topic_absence_reason_key = _select_topic_absence_reason_key(
+            configured_reason_keys,
+            self._topic_primary_terms,
+            preferred_key="no_artificial_intelligence",
+        )
+        self._secondary_topic_absence_reason_key = _select_topic_absence_reason_key(
+            configured_reason_keys,
+            self._topic_secondary_terms,
+            preferred_key="no_physical_activity",
+        )
+
+    def _print_dynamic_schema_summary(self) -> None:
+        """Print a compact startup summary of the active dynamic exclusion schema."""
+
+        if self.quiet:
+            return
+
+        preview_count = 8
+        key_preview = ", ".join(self._active_exclusion_flag_keys[:preview_count])
+        suffix = " ..." if len(self._active_exclusion_flag_keys) > preview_count else ""
+        primary_reason = self._primary_topic_absence_reason_key or "n/a"
+        secondary_reason = self._secondary_topic_absence_reason_key or "n/a"
+
+        print(
+            "[schema] Active exclusion keys "
+            f"({len(self._active_exclusion_flag_keys)}): {key_preview or 'none'}{suffix}"
+        )
+        print(
+            "[schema] Sources: "
+            f"study_tags={len(self._study_tag_flag_keys)} "
+            f"prompt_end_goal={len(self._prompt_exclusion_flag_keys)} "
+            f"topic_signals={self._topic_signal_source}"
+        )
+        print(
+            "[schema] Topic absence reason keys: "
+            f"primary={primary_reason}, secondary={secondary_reason}"
+        )
+
     def _validate_screening_decision(self, decision_text: str) -> dict[str, Any]:
         """human readable hint: validate screening JSON and enforce prompt-demanded keys for this stage."""
 
@@ -3027,10 +5411,12 @@ class PaperScreeningPipeline:
                     "LLM decision is missing prompt-required JSON field(s): " + ", ".join(missing_fields)
                 )
 
+        payload = self._normalize_dynamic_exclusion_payload(payload)
+        self._validate_dynamic_exclusion_schema(payload)
+
         return payload
 
-    @staticmethod
-    def _coerce_screening_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    def _coerce_screening_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         """human readable hint: normalize known model-output shape drift while preserving strict field semantics."""
 
         normalized = dict(payload)
@@ -3050,28 +5436,138 @@ class PaperScreeningPipeline:
         elif deliberation is not None and not isinstance(deliberation, str):
             normalized["step_by_step_deliberation"] = str(deliberation)
 
-        context_flag = normalized.get("not_urban_context")
-        if isinstance(context_flag, str):
-            lowered = context_flag.strip().lower()
-            if lowered == "neutral":
-                normalized["not_urban_context"] = "NEUTRAL"
-            elif lowered in {"true", "false"}:
-                normalized["not_urban_context"] = lowered == "true"
+        for key in self._active_exclusion_flag_keys:
+            value = normalized.get(key)
+            if not isinstance(value, str):
+                continue
+
+            lowered = value.strip().lower()
+            if key in self._neutral_exclusion_flag_keys and lowered == "neutral":
+                normalized[key] = "NEUTRAL"
+                continue
+
+            bool_like = PaperScreeningPipeline._parse_bool_like(lowered)
+            if bool_like is not None:
+                normalized[key] = bool_like
 
         return normalized
 
+    def _normalize_dynamic_exclusion_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Normalize exclusion reason and dynamic flag values for schema checks."""
+
+        normalized = dict(payload)
+
+        for key in list(normalized.keys()):
+            if not isinstance(key, str):
+                continue
+            normalized_key = _normalize_schema_key(key)
+            if not normalized_key or normalized_key == key or normalized_key in normalized:
+                continue
+            normalized[normalized_key] = normalized[key]
+
+        for key in self._active_exclusion_flag_keys:
+            if key not in normalized:
+                continue
+            value = normalized.get(key)
+
+            if isinstance(value, str) and key in self._neutral_exclusion_flag_keys and value.strip().lower() == "neutral":
+                normalized[key] = "NEUTRAL"
+                continue
+
+            bool_like = PaperScreeningPipeline._parse_bool_like(value)
+            if bool_like is not None:
+                normalized[key] = bool_like
+
+        reason = self._parse_exclusion_reason(normalized)
+        if reason:
+            normalized["exclusion_reason_category"] = reason
+
+        return normalized
+
+    def _validate_dynamic_exclusion_schema(self, payload: dict[str, Any]) -> None:
+        """Validate exclusion flags/reasons against dynamic tag-driven schema."""
+
+        allowed_reasons: set[str] = {
+            str(key)
+            for key in self._allowed_exclusion_reason_categories
+            if isinstance(key, str)
+        }
+        if not allowed_reasons:
+            allowed_reasons = {str(key) for key in LEGACY_DEFAULT_EXCLUSION_KEYS}
+
+        payload_flag_like_keys = {
+            _normalize_schema_key(key)
+            for key, value in payload.items()
+            if isinstance(key, str)
+            and key not in CORE_SCREENING_SCHEMA_FIELDS
+            and (
+                isinstance(value, bool)
+                or (isinstance(value, str) and value.strip().upper() == "NEUTRAL")
+                or _looks_like_exclusion_field(key)
+            )
+            and _normalize_schema_key(key)
+        }
+        allowed_reasons.update(payload_flag_like_keys)
+
+        for key in self._active_exclusion_flag_keys:
+            if key not in payload:
+                continue
+            value = payload.get(key)
+            if isinstance(value, bool):
+                continue
+            if key in self._neutral_exclusion_flag_keys and isinstance(value, str) and value.strip().upper() == "NEUTRAL":
+                continue
+
+            parsed = PaperScreeningPipeline._parse_bool_like(value)
+            if parsed is not None:
+                payload[key] = parsed
+                continue
+
+            raise ValueError(
+                f"Exclusion flag '{key}' must be boolean"
+                + (" or 'NEUTRAL'" if key in self._neutral_exclusion_flag_keys else "")
+                + "."
+            )
+
+        is_eligible = self._parse_is_eligible(payload)
+        reason = (self._parse_exclusion_reason(payload) or "").strip()
+
+        if reason:
+            payload["exclusion_reason_category"] = reason
+
+        if is_eligible is False and not reason:
+            raise ValueError("exclusion_reason_category is required when is_eligible is false")
+        if reason and reason not in allowed_reasons:
+            raise ValueError(
+                "exclusion_reason_category is not configured in STUDY_TAGS_INCLUDE/prompt schema: "
+                + reason
+            )
+
     @staticmethod
     def _extract_required_json_fields_from_prompt(prompt_template: str) -> set[str]:
-        """human readable hint: detect field names declared in the prompt schema section."""
+        """human readable hint: detect required screening keys only from the END GOAL key list."""
 
         if not prompt_template:
             return set()
 
-        candidates = re.findall(r"[\"`']([a-zA-Z_][a-zA-Z0-9_]*)[\"`']\s*:\s*", prompt_template)
-        fields = {field.strip() for field in candidates if field and field.strip()}
+        in_goal = False
+        fields: set[str] = set()
+        for line in prompt_template.splitlines():
+            stripped = line.strip()
+            lower = stripped.lower()
+            if lower.startswith("# end goal"):
+                in_goal = True
+                continue
+            if in_goal and lower.startswith("# narrowing"):
+                break
+            if not in_goal:
+                continue
 
-        # Keep only meaningful key-like tokens (ignore long prose fragments if any prompt format changes).
-        return {field for field in fields if 1 <= len(field) <= 64}
+            match = re.match(r"^\s*-\s*\"([a-zA-Z_][a-zA-Z0-9_]*)\"\s*:\s*$", stripped)
+            if match:
+                fields.add(match.group(1))
+
+        return fields
 
     @staticmethod
     def _percentiles(values: list[float]) -> dict:
@@ -3126,7 +5622,9 @@ class PaperScreeningPipeline:
             for key in ("exclusion_reason_category", "exclusion_reason", "reason"):
                 val = payload.get(key)
                 if val:
-                    return str(val)
+                    normalized = _normalize_schema_key(str(val))
+                    if normalized:
+                        return normalized
         return None
 
     @staticmethod
@@ -3191,19 +5689,29 @@ class PaperScreeningPipeline:
                 return False
         return None
 
-    @staticmethod
-    def _collect_exclusion_flag_values(payload: dict[str, Any]) -> dict[str, bool | None]:
-        """human readable hint: map exclusion flag values from a screening payload."""
+    def _collect_exclusion_flag_values(self, payload: dict[str, Any]) -> dict[str, bool | None]:
+        """human readable hint: map configured exclusion flag values from a screening payload."""
 
-        return {
-            "not_adult_population": PaperScreeningPipeline._parse_bool_like(payload.get("not_adult_population")),
-            "no_smartphone_technology": PaperScreeningPipeline._parse_bool_like(payload.get("no_smartphone_technology")),
-            "no_artificial_intelligence": PaperScreeningPipeline._parse_bool_like(payload.get("no_artificial_intelligence")),
-            "no_physical_activity": PaperScreeningPipeline._parse_bool_like(payload.get("no_physical_activity")),
-            "not_urban_context": PaperScreeningPipeline._parse_bool_like(payload.get("not_urban_context")),
-            "wrong_publication_type": PaperScreeningPipeline._parse_bool_like(payload.get("wrong_publication_type")),
-            "insufficient_context": PaperScreeningPipeline._parse_bool_like(payload.get("insufficient_context")),
-        }
+        candidate_keys = set(self._active_exclusion_flag_keys)
+        candidate_keys.update(
+            key
+            for key in payload.keys()
+            if isinstance(key, str) and _looks_like_exclusion_field(key)
+        )
+
+        values: dict[str, bool | None] = {}
+        for key in sorted(candidate_keys):
+            raw_value = payload.get(key)
+            if (
+                key in self._neutral_exclusion_flag_keys
+                and isinstance(raw_value, str)
+                and raw_value.strip().upper() == "NEUTRAL"
+            ):
+                values[key] = None
+                continue
+            values[key] = PaperScreeningPipeline._parse_bool_like(raw_value)
+
+        return values
 
     def _detect_decision_contradictions(self, payload: dict[str, Any]) -> list[str]:
         """human readable hint: identify logical contradictions in the LLM screening output."""
@@ -3212,13 +5720,23 @@ class PaperScreeningPipeline:
         is_eligible = self._parse_is_eligible(payload)
         reason = (self._parse_exclusion_reason(payload) or "").strip()
         flag_values = self._collect_exclusion_flag_values(payload)
-        active_flags = sorted([name for name, value in flag_values.items() if value is True])
+        payload_flag_keys = [name for name in flag_values.keys() if name in payload]
+        active_flags = sorted([name for name in payload_flag_keys if flag_values.get(name) is True])
+        allowed_reasons = set(self._allowed_exclusion_reason_categories)
 
-        if is_eligible is False and not active_flags:
+        if is_eligible is False and payload_flag_keys and not active_flags:
             contradictions.append("is_eligible_false_without_true_exclusion_flag")
         if is_eligible is True and active_flags:
             contradictions.append("is_eligible_true_with_true_exclusion_flag")
-        if is_eligible is False and reason == "not_urban_context" and flag_values.get("not_urban_context") is not True:
+        if reason and allowed_reasons and reason not in allowed_reasons:
+            contradictions.append("reason_not_in_configured_exclusion_categories")
+        if (
+            is_eligible is False
+            and reason
+            and reason in self._neutral_exclusion_flag_keys
+            and reason in payload
+            and flag_values.get(reason) is not True
+        ):
             contradictions.append("context_reason_without_context_exclusion")
 
         return contradictions
@@ -3228,6 +5746,8 @@ class PaperScreeningPipeline:
         payload: dict[str, Any],
         contradictions: list[str],
         publication_prefilter: dict[str, Any],
+        selected_chunks: list[dict],
+        selection_trace: dict[str, Any],
     ) -> dict[str, Any]:
         """human readable hint: classify borderline outputs that merit one adjudication pass."""
 
@@ -3246,11 +5766,46 @@ class PaperScreeningPipeline:
         if confidence is not None and FULLTEXT_BORDERLINE_CONFIDENCE_MIN <= confidence <= FULLTEXT_BORDERLINE_CONFIDENCE_MAX:
             reasons.append("mid_confidence_band")
 
-        if is_eligible is False and reason == "not_urban_context":
+        if is_eligible is False and reason and reason in self._neutral_exclusion_flag_keys:
             reasons.append("context_only_exclusion")
 
         if publication_prefilter.get("likely_non_empirical_publication") and is_eligible is True:
             reasons.append("publication_type_prefilter_conflict")
+
+        non_title_chunks = [
+            row
+            for row in selected_chunks
+            if not self._is_always_included_chunk_kind(str(row.get("kind") or ""))
+        ]
+        non_title_word_count = sum(len(str(row.get("text") or "").split()) for row in non_title_chunks)
+        section_rescue_hits = int(selection_trace.get("section_rescue_hits") or 0)
+
+        if (
+            is_eligible is False
+            and self._insufficient_context_reason_key
+            and reason == self._insufficient_context_reason_key
+        ):
+            if len(non_title_chunks) > 0 and (non_title_word_count >= 40 or section_rescue_hits > 0):
+                reasons.append("insufficient_context_with_non_title_evidence")
+
+        signal_text = self._build_borderline_signal_text(payload, non_title_chunks)
+        has_intervention_signal = bool(self._intervention_signal_pattern.search(signal_text))
+
+        if (
+            is_eligible is False
+            and self._primary_topic_absence_reason_key
+            and reason == self._primary_topic_absence_reason_key
+        ):
+            if has_intervention_signal and self._topic_primary_signal_pattern.search(signal_text):
+                reasons.append("primary_topic_exclusion_with_intervention_or_topic_signal")
+
+        if (
+            is_eligible is False
+            and self._secondary_topic_absence_reason_key
+            and reason == self._secondary_topic_absence_reason_key
+        ):
+            if has_intervention_signal and self._topic_secondary_signal_pattern.search(signal_text):
+                reasons.append("secondary_topic_exclusion_with_intervention_or_topic_signal")
 
         deduped = sorted(set(reasons))
         return {
@@ -3259,8 +5814,34 @@ class PaperScreeningPipeline:
             "confidence": confidence,
         }
 
-    @staticmethod
+    def _build_borderline_signal_text(self, payload: dict[str, Any], non_title_chunks: list[dict]) -> str:
+        """Aggregate decision and evidence snippets for conservative borderline signal checks."""
+
+        snippets: list[str] = []
+        for key in ("step_by_step_deliberation", "justification"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                snippets.append(value.strip())
+
+        char_budget = 4500
+        used = sum(len(part) for part in snippets)
+        for chunk in non_title_chunks:
+            if used >= char_budget:
+                break
+            text = str(chunk.get("text") or "").strip()
+            if not text:
+                continue
+            remaining = max(char_budget - used, 0)
+            if remaining <= 0:
+                break
+            excerpt = text[:remaining]
+            snippets.append(excerpt)
+            used += len(excerpt)
+
+        return "\n".join(snippets)
+
     def _build_adjudication_context(
+        self,
         base_context: str,
         current_payload: dict[str, Any],
         reasons: list[str],
@@ -3271,15 +5852,44 @@ class PaperScreeningPipeline:
         reason_text = ", ".join(reasons) if reasons else "none"
         prefilter_text = json.dumps(publication_prefilter, ensure_ascii=False)
         prior = json.dumps(current_payload, ensure_ascii=False)
+        guidance_lines: list[str] = [
+            "Perform a strict prompt-criteria re-check using non-title full-text evidence.",
+        ]
+
+        if "insufficient_context_with_non_title_evidence" in reasons:
+            guidance_lines.append(
+                "You previously marked the context-evidence exclusion despite non-title evidence; keep this exclusion true only when evidence is unreadable or genuinely too sparse."
+            )
+
+        if "primary_topic_exclusion_with_intervention_or_topic_signal" in reasons:
+            reason_key = self._primary_topic_absence_reason_key or "primary-topic exclusion"
+            guidance_lines.append(
+                f"You previously excluded for {reason_key} despite intervention/topic cues; set this exclusion true only when methods clearly lack the required primary topic component."
+            )
+
+        if "secondary_topic_exclusion_with_intervention_or_topic_signal" in reasons:
+            reason_key = self._secondary_topic_absence_reason_key or "secondary-topic exclusion"
+            guidance_lines.append(
+                f"You previously excluded for {reason_key} despite intervention/topic cues; set this exclusion true only when outcomes clearly lack the required secondary topic component."
+            )
+
+        neutral_hint = ""
+        if self._neutral_exclusion_flag_keys:
+            neutral_hint = (
+                " If a context flag is NEUTRAL, do not use that NEUTRAL flag as exclusion_reason_category."
+            )
+
+        guidance_text = "\n".join(f"- {line}" for line in guidance_lines)
 
         note = (
             "\n\n[ADJUDICATION NOTE]\n"
             "Your prior output was flagged as borderline or inconsistent."
             f" Reasons: {reason_text}.\n"
             f" Deterministic publication prefilter: {prefilter_text}.\n"
+            f" Guardrails:\n{guidance_text}\n"
             "Re-evaluate using only the provided criteria."
             " Ensure is_eligible is logically consistent with exclusion flags and exclusion_reason_category."
-            " If not_urban_context is NEUTRAL, do not use not_urban_context as exclusion_reason_category."
+            f"{neutral_hint}"
             " Return one flat JSON object only.\n"
             f"Prior output: {prior}\n"
         )
@@ -3372,12 +5982,14 @@ class PaperScreeningPipeline:
             pass
 
     def _log_overflow(self, paper_id: str, estimated_tokens: int) -> None:
-        """Record a context-window overflow event."""
+        """Record a total-token context-window overflow event."""
 
         msg = {
             "paper_id": paper_id,
             "estimated_tokens": estimated_tokens,
             "context_window": CONTEXT_WINDOW,
+            "max_output_tokens": int(llm_max_tokens),
+            "prompt_token_budget_tokens": PROMPT_TOKEN_BUDGET,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         self.overflow_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3385,7 +5997,9 @@ class PaperScreeningPipeline:
             logf.write(json.dumps(msg) + "\n")
         self._log_error(
             paper_id,
-            f"context overflow: {estimated_tokens} > {CONTEXT_WINDOW}",
+            "context overflow(total): "
+            f"{estimated_tokens} > {CONTEXT_WINDOW} "
+            f"(max_output={llm_max_tokens}, prompt_budget={PROMPT_TOKEN_BUDGET})",
             error_type="context_overflow",
             total_estimated_tokens=estimated_tokens,
         )
@@ -3408,6 +6022,7 @@ class PaperScreeningPipeline:
             "llm_decision": decision,
             "selected_chunks": selected,
             "extracted_data": extraction_payload.get("extracted_data") if extraction_payload else None,
+            "extracted_data_flat": extraction_payload.get("extracted_data_flat") if extraction_payload else None,
             "field_provenance": extraction_payload.get("field_provenance") if extraction_payload else None,
             "criteria": self._extraction_criteria,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -3437,6 +6052,38 @@ class PaperScreeningPipeline:
         folder_path = Path(folder)
         try:
             folder_path.mkdir(parents=True, exist_ok=True)
+
+            if self._compact_artifacts_enabled():
+                artifact_path = self._compact_artifact_path_for_folder(folder_path, stage="full_text")
+                artifact_payload: dict[str, Any] = {}
+                if artifact_path.exists():
+                    try:
+                        loaded = json.loads(artifact_path.read_text(encoding="utf-8"))
+                        if isinstance(loaded, dict):
+                            artifact_payload = loaded
+                    except Exception:
+                        artifact_payload = {}
+
+                metadata_snapshot = self._metadata_snapshot_for_folder(folder_path, fallback=paper.metadata)
+                artifact_payload.update(
+                    {
+                        "meta": "stage_artifact",
+                        "schema_version": 1,
+                        "stage": "full_text",
+                        "paper_id": str(paper.paper_id),
+                        "metadata": metadata_snapshot,
+                        "selected_chunks": selected,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                artifact_path.write_text(
+                    json.dumps(artifact_payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+
+                if not self.compact_keep_legacy_selected_chunks:
+                    return
+
             chunks_path = folder_path / f"{self.stage}_selected_chunks.jsonl"
             with open(chunks_path, "w", encoding="utf-8") as handle:
                 handle.write(
@@ -3473,24 +6120,50 @@ class PaperScreeningPipeline:
         if not folder:
             return []
 
-        chunks_path = Path(folder) / f"{self.stage}_selected_chunks.jsonl"
-        if not chunks_path.exists():
-            return []
+        folder_path = Path(folder)
+        chunks_path = folder_path / f"{self.stage}_selected_chunks.jsonl"
 
-        try:
-            with open(chunks_path, "r", encoding="utf-8") as handle:
-                for line in handle:
-                    if not line.strip():
-                        continue
-                    payload = json.loads(line)
-                    if payload.get("paper_id") == paper.paper_id and "selected_chunks" in payload:
-                        return payload.get("selected_chunks") or []
-        except Exception as exc:  # pylint: disable=broad-except
-            self._log_error(
-                paper.paper_id,
-                f"failed to read selected chunks: {exc}",
-                error_type="selected_chunks_read_failed",
-            )
+        if chunks_path.exists():
+            try:
+                with open(chunks_path, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        if not line.strip():
+                            continue
+                        payload = json.loads(line)
+                        if payload.get("paper_id") == paper.paper_id and "selected_chunks" in payload:
+                            return payload.get("selected_chunks") or []
+            except Exception as exc:  # pylint: disable=broad-except
+                self._log_error(
+                    paper.paper_id,
+                    f"failed to read selected chunks: {exc}",
+                    error_type="selected_chunks_read_failed",
+                )
+
+        artifact_candidates = [
+            self._compact_artifact_path_for_folder(folder_path, stage=self.stage),
+            self._compact_artifact_path_for_folder(folder_path, stage="full_text"),
+        ]
+        seen_paths: set[Path] = set()
+        for artifact_path in artifact_candidates:
+            if artifact_path in seen_paths or not artifact_path.exists():
+                continue
+            seen_paths.add(artifact_path)
+
+            try:
+                payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+            except Exception as exc:  # pylint: disable=broad-except
+                self._log_error(
+                    paper.paper_id,
+                    f"failed to read compact artifact selected chunks: {exc}",
+                    error_type="selected_chunks_read_failed",
+                )
+                continue
+
+            if not isinstance(payload, dict):
+                continue
+            selected = payload.get("selected_chunks")
+            if isinstance(selected, list):
+                return selected
         return []
 
     def _write_data_extraction_outputs(self, paper: PaperRecord, extraction_payload: dict) -> None:
@@ -3514,8 +6187,11 @@ class PaperScreeningPipeline:
             handle.write(json.dumps(extraction_payload) + "\n")
 
         extraction_csv_path = output_dir / f"{self.stage}_extraction_results.csv"
+        flat_extracted = extraction_payload.get("extracted_data_flat") or {}
         fieldnames = ["paper_id"]
-        if self._extraction_criteria:
+        if isinstance(flat_extracted, dict) and flat_extracted:
+            fieldnames.extend(sorted(str(key) for key in flat_extracted.keys()))
+        elif self._extraction_criteria:
             fieldnames.extend(self._extraction_criteria)
         else:
             fieldnames.append("extracted_data")
@@ -3525,7 +6201,10 @@ class PaperScreeningPipeline:
             writer.writeheader()
             row = {"paper_id": extraction_payload.get("paper_id", "")}
             extracted = extraction_payload.get("extracted_data") or {}
-            if self._extraction_criteria:
+            if isinstance(flat_extracted, dict) and flat_extracted:
+                for key in fieldnames[1:]:
+                    row[key] = flat_extracted.get(key, "")
+            elif self._extraction_criteria:
                 for key in self._extraction_criteria:
                     value = extracted.get(key, "")
                     if isinstance(value, (dict, list)):
@@ -3540,10 +6219,9 @@ class PaperScreeningPipeline:
         """Normalize a prompt bullet line into a clean field name."""
 
         cleaned = text.strip().strip("- ").strip()
-        for sep in (":", "â€”", "-", "â€“"):
-            if sep in cleaned:
-                cleaned = cleaned.split(sep, 1)[0].strip()
-                break
+        cleaned = re.sub(r"\s+[\u2013\u2014-]\s+", ":", cleaned)
+        if ":" in cleaned:
+            cleaned = cleaned.split(":", 1)[0].strip()
         return cleaned
 
     @classmethod
@@ -3572,13 +6250,44 @@ class PaperScreeningPipeline:
             if not in_fields_section:
                 continue
 
+            item = ""
             if stripped.startswith(("- ", "* ")):
                 item = stripped[2:].strip()
+            else:
+                numbered = re.match(r"^\d+\)\s+(.*)$", stripped)
+                if numbered:
+                    item = numbered.group(1).strip()
+
+            if item:
                 key = cls._normalize_criterion(item)
                 if key and key.lower() not in seen:
                     criteria.append(key)
                     seen.add(key.lower())
         return criteria
+
+    @staticmethod
+    def _flatten_extracted_data(payload: Any, prefix: str = "") -> dict[str, str]:
+        """Flatten nested extraction JSON into dot-path scalar fields for CSV/validation exports."""
+
+        flat: dict[str, str] = {}
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                key_str = str(key)
+                full_key = f"{prefix}.{key_str}" if prefix else key_str
+                flat.update(PaperScreeningPipeline._flatten_extracted_data(value, full_key))
+            return flat
+
+        if isinstance(payload, list):
+            if all(not isinstance(item, (dict, list)) for item in payload):
+                joined = "; ".join(str(item) for item in payload if item is not None)
+                flat[prefix] = joined
+                return flat
+            flat[prefix] = json.dumps(payload, ensure_ascii=False)
+            return flat
+
+        if prefix:
+            flat[prefix] = "" if payload is None else str(payload)
+        return flat
 
     def _build_extraction_payload(self, paper: PaperRecord, llm_decision: str | None) -> dict | None:
         """Parse the LLM output into structured extraction data."""
@@ -3606,14 +6315,20 @@ class PaperScreeningPipeline:
             if self._extraction_criteria:
                 criteria_set = {c.lower() for c in self._extraction_criteria}
                 filtered = {k: v for k, v in extracted_data.items() if k.lower() in criteria_set}
+                if not filtered and extracted_data:
+                    # human readable hint: keep full payload when prompt criteria are conceptual and response is nested JSON.
+                    filtered = extracted_data
             else:
                 filtered = extracted_data
         else:
             filtered = {}
 
+        flat_filtered = self._flatten_extracted_data(filtered)
+
         return {
             "paper_id": paper.paper_id,
             "extracted_data": filtered,
+            "extracted_data_flat": flat_filtered,
             "field_provenance": field_provenance,
             "raw_output": raw_text,
         }

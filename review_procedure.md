@@ -1,11 +1,24 @@
 # Review Procedure (document 3/6)
 
 **Read prior:** [installation_preparation.md](installation_preparation.md)
-**Read next:** [pipeline_validation_checks.md](pipeline_validation_checks.md)
 
-End-to-end procedure for the three pipeline stages with mandatory human quality control (QC).
+## Document Purpose
 
-## Core principles
+This document defines the execution order for screening and extraction runs.
+
+## What to Expect
+
+- Stage-by-stage run sequence.
+- QC and validation decision flow.
+- Retry behavior and operator prompt tree.
+
+## How to Use This Document
+
+1. Use this as the runbook during active execution.
+2. Follow the prompt decision tree exactly.
+3. Continue to validation checks after understanding the flow.
+
+## Core Principles
 
 - Follow JBI and PRISMA-ScR for review design and reporting.
 - Use deterministic QC sampling (~10%) before full automation at each stage.
@@ -14,14 +27,15 @@ End-to-end procedure for the three pipeline stages with mandatory human quality 
 - For `title_abstract`, screening uses asynchronous batched LLM requests with bounded concurrency and backoff.
 - Screening outputs are accepted only after strict JSON schema validation; invalid responses are retried automatically.
 
-## Required setup
+## Required Setup
 
 - Bern network access (eduroam/campus LAN/VPN).
 - `.env` with `LLM_API_KEY`.
 - `CURRENT_STAGE` set in [config/user_orchestrator.py](config/user_orchestrator.py).
+- `LLM_SETTINGS["context_window_total_tokens"]` and `LLM_SETTINGS["max_tokens"]` set consistently for the active model (`max_tokens < context_window_total_tokens`).
 - Stage KB file exists with `label` (`POS`/`NEG`) and `text` columns.
 
-## Stage order
+## Stage Order
 
 1. `title_abstract`
 2. `full_text`
@@ -29,7 +43,7 @@ End-to-end procedure for the three pipeline stages with mandatory human quality 
 
 Do not skip stage order.
 
-## Run model per stage
+## Run Model per Stage
 
 Every stage follows two passes:
 
@@ -38,25 +52,29 @@ Every stage follows two passes:
 
 This is enforced by terminal prompts in `main.py`.
 
-## Stage 1: title_abstract
+## Stage 1: Title Abstract
 
 1. Import screen CSV to `input/` (`*_screen_csv_*.csv`).
 2. Prepare `knowledge-base/title_abstract_pos-neg_examples.csv`.
 3. Run `main.py` to create and screen QC sample.
 4. Humans review the same QC sample.
 5. Run validation (`stats_engine`) with select/irrelevant CSVs.
-6. If validation is acceptable, continue to remaining papers.
+7. If validation is acceptable, continue to remaining papers.
 
-## Stage 2: full_text
+## Stage 2: Full Text
 
 1. Export select CSV to `input/` (`*_select_csv_*.csv`).
 2. Prepare `knowledge-base/full_text_pos-neg_examples.csv`.
 3. Run `main.py` once to create `input/per_paper_full_text/` folders (setup-only run).
 4. Add one PDF per paper folder.
 5. Run QC-only screening, then human QC, then validation.
+6. Check per-paper artifacts after QC:
+	- compact mode (default): `full_text_artifact.json` and `full_text_normalized.txt`
+	- full mode: legacy normalized sidecars (`*_normalized_text.txt`, `*_normalized_pages.json`, `*_normalized_meta.json`)
+	- optional compact sidecar: `full_text_selected_chunks.jsonl` only if enabled in config
 6. If validation is acceptable, continue to remaining papers.
 
-## Stage 3: data_extraction
+## Stage 3: Data Extraction
 
 1. Export included CSV to `input/` (`*_included_csv_*.csv`).
 2. Prepare `knowledge-base/data_extraction_pos-neg_examples.csv`.
@@ -65,7 +83,7 @@ This is enforced by terminal prompts in `main.py`.
 5. Run QC-only extraction, then human QC extraction, then validation.
 6. If validation is acceptable, continue to remaining papers.
 
-## Terminal commands and decision tree (exact runtime prompts)
+## Terminal Commands and Decision Tree
 
 ### Commands you run manually
 
@@ -121,7 +139,7 @@ START -> run main.py
 	|
 	\-- End-of-run backup prompt (only when all prior prompts were yes):
 				Prompt: Do you want to back up your changes to GitHub now? (y/n):
-					|- y -> runs backup_to_github.py, which executes git pull -> git add . -> git commit -> git push
+					|- y -> runs backup_to_github.py, which executes git pull --ff-only -> git add -u -- tracked code/doc globs -> git commit -> git push
 					\- n -> finish without backup
 ```
 
@@ -130,7 +148,7 @@ START -> run main.py
 - For yes/no prompts, invalid input loops with `Please answer 'y' or 'n'.`
 - In non-interactive terminals, prompt-driven flow stops early.
 
-## Validation outputs
+## Validation Outputs
 
 Screening stages:
 - QC stats report (`*_qc_sample_validation_stats_report_*.txt`)
@@ -141,13 +159,13 @@ Data extraction:
 - extraction accuracy report
 - extraction discrepancies CSV
 
-## Resource and audit outputs
+## Resource and Audit Outputs
 
 - Resource usage logs per run (`*_resource_usage_*.log`)
 - CodeCarbon emissions CSVs
 - Retry manifest (`output/<stage>/<stage>_retry_manifest.jsonl`)
 
-## Decision rule
+## Decision Rule
 
 - If QC validation is weak: refine prompt/knowledge-base and screen QC sample again.
 - If QC validation is strong: continue to remaining papers.

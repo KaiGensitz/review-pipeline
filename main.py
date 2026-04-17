@@ -167,15 +167,40 @@ def _collect_missing_is_eligible(error_log_path: Path, eligibility_path: Path, s
     return missing
 
 
+def _unique_retry_path(path: Path) -> Path:
+    """human readable hint: ensure retry artifacts never overwrite an existing file with the same timestamped name."""
+
+    if not path.exists():
+        return path
+
+    stem = path.stem
+    suffix = path.suffix
+    for idx in range(1, 10000):
+        candidate = path.with_name(f"{stem}_{idx}{suffix}")
+        if not candidate.exists():
+            return candidate
+
+    fallback = datetime.now().strftime("%Y%m%d_%H-%M-%S-%f")
+    return path.with_name(f"{stem}_{fallback}{suffix}")
+
+
 def _write_retry_csv(source_csv: Path, target_dir: Path, paper_ids: set[str], stage: str, run_label: str) -> Path | None:
     """Create a stage-valid retry CSV using run_label and stage-specific token (screen/select)."""
 
     target_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H-%M")
+    timestamp = datetime.now().strftime("%Y%m%d_%H-%M-%S-%f")
     sample_tag = run_label.replace("_sample", "") if run_label.endswith("_sample") else run_label
-    token = "screen" if stage == "title_abstract" else "select" if stage == "full_text" else "screen"
+    token = (
+        "screen"
+        if stage == "title_abstract"
+        else "select"
+        if stage == "full_text"
+        else "included"
+        if stage == "data_extraction"
+        else "screen"
+    )
     filename = f"{stage}_{sample_tag}_sample_{token}_csv_retry_{timestamp}.csv"
-    target_path = target_dir / filename
+    target_path = _unique_retry_path(target_dir / filename)
 
     if not source_csv.exists():
         print(f"[retry] source CSV missing: {source_csv}")
@@ -229,6 +254,14 @@ def _prepare_isolated_retry_run_dir(stage: str, retry_csv: Path) -> Path | None:
     try:
         for stale_csv in isolated_dir.glob("*.csv"):
             stale_csv.unlink(missing_ok=True)
+
+        rule = STAGE_RULES.get(stage, {}) if isinstance(STAGE_RULES, dict) else {}
+        pdf_dir = rule.get("pdf_dir")
+        if pdf_dir:
+            stale_paper_root = isolated_dir / str(pdf_dir)
+            if stale_paper_root.exists() and stale_paper_root.is_dir():
+                shutil.rmtree(stale_paper_root, ignore_errors=True)
+
         target_csv = isolated_dir / retry_csv.name
         shutil.copy2(retry_csv, target_csv)
         return isolated_dir
@@ -250,17 +283,17 @@ def _retry_pdf_root(stage: str) -> str | None:
 def _retry_output_paths(stage: str, run_label: str, attempt_index: int) -> dict:
     """human readable hint: retry outputs stay separate using stage_runlabel_retry_attempt_output_timestamp order."""
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H-%M")
+    timestamp = datetime.now().strftime("%Y%m%d_%H-%M-%S-%f")
     stage_root = Path(PATH_SETTINGS["output_root"]) / stage
     stage_root.mkdir(parents=True, exist_ok=True)
     sample_tag = run_label.replace("_sample", "") if run_label.endswith("_sample") else run_label
     base_prefix = f"{stage}_{sample_tag}_sample_retry_{attempt_index}"
     return {
-        "eligibility": stage_root / f"{base_prefix}_eligibility_{timestamp}.jsonl",
-        "text": stage_root / f"{base_prefix}_screening_results_readable_{timestamp}.txt",
-        "chunks": stage_root / f"{base_prefix}_selected_chunks_{timestamp}.jsonl",
-        "error": stage_root / f"{base_prefix}_error_log_{timestamp}.txt",
-        "resource": stage_root / f"{base_prefix}_resource_usage_{timestamp}.log",
+        "eligibility": _unique_retry_path(stage_root / f"{base_prefix}_eligibility_{timestamp}.jsonl"),
+        "text": _unique_retry_path(stage_root / f"{base_prefix}_screening_results_readable_{timestamp}.txt"),
+        "chunks": _unique_retry_path(stage_root / f"{base_prefix}_selected_chunks_{timestamp}.jsonl"),
+        "error": _unique_retry_path(stage_root / f"{base_prefix}_error_log_{timestamp}.txt"),
+        "resource": _unique_retry_path(stage_root / f"{base_prefix}_resource_usage_{timestamp}.log"),
     }
 
 
@@ -335,7 +368,6 @@ def _infer_run_label_from_retry_csv(path: Path, stage: str) -> str | None:
     """human readable hint: infer run_label from retry CSV name or existing base files."""
 
     name = path.name.lower()
-    stage_root = Path(PATH_SETTINGS["output_root"]) / stage
     base_qc = _latest_base_outputs(stage, "qc_sample").get("eligibility")
     base_rem = _latest_base_outputs(stage, "remaining_sample").get("eligibility")
 
@@ -892,25 +924,40 @@ def _latest_eligibility_map(stage: str) -> dict[str, object]:
 
     stage_root = Path(PATH_SETTINGS.get("output_root", "output")) / stage
     pattern = f"{stage}_*_eligibility_*.jsonl"
-    candidates = sorted(stage_root.glob(pattern))
+    split_tokens = (
+        "eligibility_select_",
+        "eligibility_irrelevant_",
+        "eligibility_included_",
+        "eligibility_excluded_",
+    )
+    candidates = sorted(
+        [
+            path
+            for path in stage_root.glob(pattern)
+            if not any(token in path.name for token in split_tokens)
+        ],
+        key=lambda path: path.stat().st_mtime,
+    )
     if not candidates:
         return {}
-    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+
     records: dict[str, object] = {}
-    try:
-        with latest.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip() or '"meta": "' in line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except Exception:
-                    continue
-                pid = str(obj.get("paper_id", ""))
-                if pid:
-                    records[pid] = obj.get("llm_decision")
-    except Exception:
-        return {}
+    for path in candidates:
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip() or '"meta": "' in line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    pid = str(obj.get("paper_id", ""))
+                    if pid:
+                        # Newer files overwrite older decisions paper-by-paper.
+                        records[pid] = obj.get("llm_decision")
+        except Exception:
+            continue
     return records
 
 

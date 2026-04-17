@@ -9,16 +9,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(REPO_ROOT / ".env")
 
 # ---------------------------------------------------------------------------
-# Edit these each run (minimal inputs for non-coders)
+# Edit these each run
 # ---------------------------------------------------------------------------
 
 CURRENT_STAGE = "full_text"  # title_abstract | full_text | data_extraction
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")  # API key loaded from .env
-LLM_MODEL = "gpt-oss-120b"  # screening model name on your endpoint; working best: "gpt-oss-120b", working very fast: "qwen3-coder-30b-a3b-instruct"
-EMBED_MODEL = "qwen3-embedding-0.6b"  # embedding model name on your endpoint; working for sure: "qwen3-embedding-0.6b"
+LLM_MODEL = "gpt-oss-120b"  # screening model name on your endpoint; working for sure: "gpt-oss-120b" (17.04.2026)
+EMBED_MODEL = "qwen3-embedding-0.6b"  # embedding model name on your endpoint; working for sure: "qwen3-embedding-0.6b" (17.04.2026)
 CSV_DIR = REPO_ROOT / "input"  # where you drop Covidence exports
 QC_ENABLED = True  # False = skip QC sampling and go straight to full screening
-QC_SAMPLE_RATE = 0.1  # 0.0–1.0; 0.10 = ~10% QC sample
+QC_SAMPLE_RATE = 0.1  # 0.0–1.0; 0.10 ~10% QC sample
 
 # Covidence study tags used for validation (case-insensitive)
 STUDY_TAGS_INCLUDE = [
@@ -29,7 +29,8 @@ STUDY_TAGS_INCLUDE = [
     "not urban context",          # Maps to Context
     "wrong publication type",     # Commentary, Review, etc.
     "language not en/de",         # Specificity improves rigor
-    "full text not available"     # Standard scoping review exclusion
+    "full text not available",    # Standard scoping review exclusion
+	"No intervention"			  # no (realworld) intervention
 ]
 
 # Study tags to ignore (e.g., test/sample markers)
@@ -117,11 +118,12 @@ LLM_SETTINGS = {
 	"use_api": True,  # True = call API; False would skip LLM calls (not recommended)
 	"gpustack_base_url": "https://gpustack.unibe.ch/v1",  # LLM endpoint URL; must match your server
 	"prompt_path": str(PROMPT_FILE),  # stage-specific prompt; changes decision logic per stage
+	"context_window_total_tokens": 78000,  # model context window (input + output combined); set per model
 	"max_tokens": 2048,  # response length cap; too low can truncate JSON, too high costs more
 	"temperature": 0.0,  # randomness; lower = more stable decisions, higher = more variable
 	"top_p": 1.0,  # keep at 1.0 with temperature=0.0 for stable decoding behavior
 	"seed": 42,  # reproducibility seed (set an integer number like 42 to stabilize provider-side sampling)
-	"async_max_concurrency": 12,  # max concurrent async LLM requests for title_abstract screening
+	"async_max_concurrency": 18,  # balanced profile: higher throughput without aggressive endpoint saturation
 	"async_max_retries": 3,  # transient API retries (e.g., rate limit/timeouts)
 	"async_backoff_base_seconds": 0.5,  # initial retry delay for async backoff
 	"async_backoff_max_seconds": 8.0,  # maximum retry delay cap
@@ -138,6 +140,8 @@ SCREENING_DEFAULTS = {
 	"sample_size": None,  # limit papers per run; set for pilots in any stage
 	"sample_seed": None,  # fixed seed for deterministic sampling when sample_size is set
 	"batch_size": 32,  # embedding batch size; higher = faster, more memory
+	"artifact_mode": "compact",  # "full" = legacy multi-file outputs; "compact" = merged machine artifacts + human-readable outputs
+	"compact_keep_legacy_selected_chunks": False,  # True keeps *_selected_chunks.jsonl sidecars in compact mode for interoperability
 	"sustainability_tracking": True,  # True = write resource logs; False = no tracking
 	"enable_time_savings": True,  # True = compute human-time savings when QC minutes exist; set False to skip
 }
@@ -219,8 +223,8 @@ HUMAN_TIME_CONFIG = {
 	},
 	"full_text": {
 		"reviewers": [
-			{"id": "human_1", "total_minutes": 0},
-			{"id": "human_2", "total_minutes": 0},
+			{"id": "human_1", "total_minutes": 270}, # Reviewer 1 for 50 articles (Email 09.04.2026): 4.5 h = 270 min
+			{"id": "human_2", "total_minutes": 300}, # Reviewer 2 for 50 articles (Slack): 5 h = 300 min
 			{"id": "human_3", "total_minutes": 0},
 			{"id": "human_4", "total_minutes": 0},
 		],

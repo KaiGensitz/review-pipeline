@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 from datetime import datetime
+from typing import Any
 
 # Keep imports simple: this module just wires defaults and exposes run_pipeline for main.py.
 # Note: this file mainly sets default output names and wires the stage settings.
@@ -17,7 +18,6 @@ from config.user_orchestrator import (
     SCREENING_DEFAULTS,
     CURRENT_STAGE,
     STAGE_RULES,
-    LLM_MODEL,
     require_setting,
 )
 
@@ -53,11 +53,11 @@ def _timestamp_label() -> str:
     """Create a timestamp string for output filenames.
 
     Returns:
-        Timestamp string formatted as YYYYMMDD_HH-MM.
+        Timestamp string formatted as YYYYMMDD_HH-MM-SS.
 
     Note: timestamps prevent overwriting prior runs.
     """
-    return datetime.now().strftime("%Y%m%d_%H-%M")
+    return datetime.now().strftime("%Y%m%d_%H-%M-%S")
 
 
 def _stage_root(stage: str) -> Path:
@@ -150,6 +150,7 @@ def _load_negative_examples_from_csvs(csv_dir: Path, patterns: list[str]) -> lis
     import csv
 
     negatives: list[dict] = []
+    seen_texts: set[str] = set()
     csv_files: list[Path] = []
     for pattern in patterns:
         csv_files.extend(sorted(csv_dir.glob(pattern)))
@@ -169,12 +170,18 @@ def _load_negative_examples_from_csvs(csv_dir: Path, patterns: list[str]) -> lis
                 text = abstract or title
                 if not text:
                     continue
+                normalized = " ".join(text.lower().split())
+                if not normalized or normalized in seen_texts:
+                    continue
+                seen_texts.add(normalized)
                 negatives.append({"label": "NEG", "text": text})
 
     return negatives
 
 
 def _safe_int(val, default=None):
+    """human readable hint: safely coerce config values to int and fail fast on invalid values."""
+
     if val is None:
         return default
     if isinstance(val, int):
@@ -190,6 +197,8 @@ def _safe_int(val, default=None):
 
 
 def _safe_float(val, default=None):
+    """human readable hint: safely coerce config values to float and fail fast on invalid values."""
+
     if val is None:
         return default
     if isinstance(val, float):
@@ -205,6 +214,8 @@ def _safe_float(val, default=None):
 
 
 def _safe_bool(val, default=None):
+    """human readable hint: safely coerce config values to bool using common yes/no string forms."""
+
     if val is None:
         return default
     if isinstance(val, bool):
@@ -218,11 +229,20 @@ def _safe_bool(val, default=None):
 
 def _append_qc_records_to_remaining(stage_root: Path, stage_prefix: str, remaining_path: Path) -> None:
     """Append QC sample eligibility records to the remaining-sample output."""
-    qc_files = sorted(stage_root.glob(f"{stage_prefix}eligibility_qc_sample_*.jsonl"))
+    patterns = [
+        f"{stage_prefix}qc_sample_main_eligibility_*.jsonl",  # current naming
+        f"{stage_prefix}qc_sample_eligibility_*.jsonl",       # fallback naming
+        f"{stage_prefix}eligibility_qc_sample_*.jsonl",       # legacy naming
+    ]
+    qc_files: list[Path] = []
+    for pattern in patterns:
+        qc_files.extend(
+            [path for path in stage_root.glob(pattern) if "_retry_" not in path.name]
+        )
     if not qc_files:
         return
     qc_path = max(qc_files, key=lambda p: p.stat().st_mtime)
-    lines_to_append: list[str] = []
+    records_to_append: list[dict] = []
     try:
         with open(qc_path, "r", encoding="utf-8") as handle:
             for line in handle:
@@ -235,17 +255,76 @@ def _append_qc_records_to_remaining(stage_root: Path, stage_prefix: str, remaini
                     continue
                 if isinstance(obj, dict) and obj.get("meta") in {"eligibility_records", "summary"}:
                     continue
-                lines_to_append.append(json.dumps(obj))
+                if isinstance(obj, dict):
+                    records_to_append.append(obj)
     except Exception:
         return
 
-    if not lines_to_append:
+    if not records_to_append:
         return
 
     try:
-        with open(remaining_path, "a", encoding="utf-8") as out:
-            for line in lines_to_append:
-                out.write(line + "\n")
+        header_meta: dict | None = None
+        summary_meta: dict | None = None
+        existing_records: list[dict] = []
+        seen_ids: set[str] = set()
+
+        if remaining_path.exists():
+            with open(remaining_path, "r", encoding="utf-8") as handle:
+                for raw in handle:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        payload = json.loads(raw)
+                    except Exception:
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    meta_tag = payload.get("meta")
+                    if meta_tag == "eligibility_records":
+                        header_meta = payload
+                        continue
+                    if meta_tag == "summary":
+                        summary_meta = payload
+                        continue
+                    pid = str(payload.get("paper_id", "")).strip()
+                    if pid and pid in seen_ids:
+                        continue
+                    if pid:
+                        seen_ids.add(pid)
+                    existing_records.append(payload)
+
+        for payload in records_to_append:
+            pid = str(payload.get("paper_id", "")).strip()
+            if pid and pid in seen_ids:
+                continue
+            if pid:
+                seen_ids.add(pid)
+            existing_records.append(payload)
+
+        if header_meta is None:
+            header_meta = {
+                "meta": "eligibility_records",
+                "description": "Per-paper LLM decisions (JSONL).",
+            }
+
+        refreshed_summary: dict[str, Any] = (
+            dict(summary_meta) if isinstance(summary_meta, dict) else {"meta": "summary"}
+        )
+        refreshed_summary["meta"] = "summary"
+        refreshed_summary["paper_count"] = len(existing_records)
+
+        total_paper_count = refreshed_summary.get("total_paper_count")
+        if isinstance(total_paper_count, (int, float)) and total_paper_count > 0:
+            refreshed_summary["percent_of_stage"] = (len(existing_records) / float(total_paper_count)) * 100.0
+            refreshed_summary["percent_of_input_file"] = (len(existing_records) / float(total_paper_count)) * 100.0
+
+        with open(remaining_path, "w", encoding="utf-8") as out:
+            out.write(json.dumps(header_meta) + "\n")
+            for payload in existing_records:
+                out.write(json.dumps(payload) + "\n")
+            out.write(json.dumps(refreshed_summary) + "\n")
     except Exception:
         return
 
@@ -275,6 +354,7 @@ def run_pipeline(
     force_new_qc: bool = False,
     enable_time_savings: bool | None = None,
     run_label_override: str | None = None,
+    artifact_mode: str | None = None,
 ) -> object:
     """Run one pipeline stage with stage-specific defaults and outputs.
 
@@ -300,6 +380,7 @@ def run_pipeline(
         qc_only: If True, screen QC sample only.
         qc_enabled: If False, skip QC sampling entirely.
         force_new_qc: If True, generate a new QC sample even if one exists.
+        artifact_mode: Optional per-paper artifact mode override ("full" or "compact").
 
     Returns:
         True if screening executed; False if the run exited early.
@@ -377,10 +458,20 @@ def run_pipeline(
     neg_patterns = STAGE_RULES.get(stage, {}).get("neg_patterns", [])
     if neg_patterns:
         neg_examples = _load_negative_examples_from_csvs(csv_dir_path, neg_patterns)
+        existing_neg_texts = {
+            " ".join(str(item.get("text", "")).lower().split())
+            for item in examples
+            if str(item.get("label", "")).upper() == "NEG"
+        }
         # Ensure all negatives are dicts with 'label' and 'text' keys (LabeledExample structure)
         for neg in neg_examples:
             if "label" in neg and "text" in neg:
-                examples.append({"label": str(neg["label"]), "text": str(neg["text"])})
+                text = str(neg["text"])
+                normalized = " ".join(text.lower().split())
+                if not normalized or normalized in existing_neg_texts:
+                    continue
+                examples.append({"label": str(neg["label"]), "text": text})
+                existing_neg_texts.add(normalized)
 
     # Ensure csv_dir is always a str (never None)
     if csv_dir is None:
@@ -404,7 +495,7 @@ def run_pipeline(
         except Exception:
             qc_sample_ids = set()
 
-    qc_enabled_effective = False if quiet else qc_enabled
+    qc_enabled_effective = qc_enabled
 
     pipeline = PaperScreeningPipeline(
         csv_dir=csv_dir,
@@ -436,6 +527,7 @@ def run_pipeline(
         split_only=split_only,
         quiet=quiet,
         summary_to_console=False,
+        artifact_mode=artifact_mode,
         examples=cast(list[dict], examples),
     )
     stage_csvs = [str(p) for p in pipeline._stage_csv_files()]

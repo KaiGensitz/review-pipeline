@@ -1,22 +1,36 @@
-# Function Explanation UID
+# Function Explanation UID (appendix)
 
-This file explains each script through its primary class, visible __init__ parameters, and callable methods.
+**Read prior:** [study_protocol_and_governance.md](study_protocol_and_governance.md)
 
-## .tmp_generate_function_docs.py
+## Document Purpose
+
+This appendix provides function-level explanations for scripts and classes in the workspace.
+
+## What to Expect
+
+- Primary class descriptions per script.
+- Constructor parameters and callable methods.
+- Human-readable intent notes for key functions.
+
+## How to Use This Document
+
+1. Use this file when you need quick code-navigation support.
+2. Search by filename heading, then by class or function name.
+3. Return to the main document flow in [readme.md](readme.md) for operational guidance.
 
 ## backup_to_github.py
 
 ### Class BackupToGitHub
-- Human readable hint: human readable hint: one-class backup workflow with explicit command methods and one run entrypoint.
+- Human readable hint: one-class backup workflow with explicit command methods and one run entrypoint.
 - __init__ parameters: backup_message
 #### BackupToGitHub.__init__(backup_message)
-- Human readable hint: human readable hint: __init__ stores the commit message used for the backup commit.
+- Human readable hint: __init__ stores the commit message used for the backup commit.
 
 #### BackupToGitHub.run_command(cmd)
-- Human readable hint: human readable hint: run one git command and stop the script when the command fails.
+- Human readable hint: run one git command and stop the script when the command fails.
 
 #### BackupToGitHub.run_backup()
-- Human readable hint: human readable hint: execute pull, add, commit, and push in safe sequence.
+- Human readable hint: execute pull, stage tracked code/doc updates, commit, and push in safe sequence.
 
 ### Script-level functions
 - Human readable hint: compatibility wrappers or helper functions used by the primary class.
@@ -45,14 +59,16 @@ This file explains each script through its primary class, visible __init__ param
 
 #### load_user_config()
 - Human readable hint: Build and validate a UserConfig from module globals (one call per run). Note: you do not edit this function; it just packages the values above.
+- Human readable hint: Current balanced default profile in this config snapshot uses `top_k=8`, `chunk_size=24`, and `async_max_concurrency=18` for faster large-batch runs with moderate recall safeguards.
+- Human readable hint: Total model context budget is configured in `LLM_SETTINGS["context_window_total_tokens"]` and combined with `max_tokens` to derive prompt budget at runtime.
 
 ## main.py
 
 ### Class MainWorkflow
-- Human readable hint: human readable hint: one-class orchestrator for terminal flow, retries, QC gating, and stage execution.
+- Human readable hint: one-class orchestrator for terminal flow, retries, QC gating, and stage execution.
 - __init__ parameters: none
 #### MainWorkflow.__init__()
-- Human readable hint: human readable hint: __init__ keeps the key runtime attributes visible in one place.
+- Human readable hint: __init__ keeps the key runtime attributes visible in one place.
 
 #### MainWorkflow.run()
 - Human readable hint: Run the pipeline for the selected stage with safety checks.
@@ -73,70 +89,73 @@ This file explains each script through its primary class, visible __init__ param
 - Human readable hint: Best-effort extraction of is_eligible from an LLM decision payload (stage-aware).
 
 #### _parse_exclusion_reason(decision)
-- Human readable hint: human readable hint: extract exclusion_reason_category if present.
+- Human readable hint: extract exclusion_reason_category if present.
 
 #### _collect_missing_is_eligible(error_log_path, eligibility_path, stage)
 - Human readable hint: Find paper_ids that have errors AND no is_eligible in eligibility output.
 
+#### _unique_retry_path(path)
+- Human readable hint: Ensure retry artifacts never overwrite an existing file with the same timestamped name.
+
 #### _write_retry_csv(source_csv, target_dir, paper_ids, stage, run_label)
-- Human readable hint: Create a stage-valid retry CSV using run_label and stage-specific token (screen/select).
+- Human readable hint: Create a stage-valid retry CSV using run_label and stage-specific token (screen/select) with collision-safe filenames.
 
 #### _retry_output_paths(stage, run_label, attempt_index)
-- Human readable hint: human readable hint: retry outputs stay separate using stage_runlabel_retry_attempt_output_timestamp order.
+- Human readable hint: retry outputs stay separate using stage_runlabel_retry_attempt_output_timestamp order with collision-safe paths.
 
 #### _latest_base_outputs(stage, run_label)
-- Human readable hint: human readable hint: locate the most recent outputs for a stage+run_label.
+- Human readable hint: locate the most recent outputs for a stage+run_label.
 
 #### _require_base_outputs(stage, run_label)
 - Human readable hint: Ensure base outputs exist before running a retry; avoid orphan retry files.
 
 #### _infer_run_label_from_retry_csv(path, stage)
-- Human readable hint: human readable hint: infer run_label from retry CSV name or existing base files.
+- Human readable hint: infer run_label from retry CSV name or existing base files.
 
 #### _first_available_run_label(stage, preferred)
-- Human readable hint: human readable hint: pick a run_label that has base outputs (eligibility + emissions).
+- Human readable hint: pick a run_label that has base outputs (eligibility + emissions).
 
 #### _record_retry_manifest(retry_artifact, stage, attempt_map, source_csv, emissions_info)
 - Human readable hint: Keep retry artifacts separate and append a manifest entry listing files and paper_ids.
 
 #### _merge_emissions_with_run_column(stage, run_label, attempt_index)
-- Human readable hint: human readable hint: keep one CodeCarbon CSV per run_label; append new rows with run=main/retry_N and report row numbers.
+- Human readable hint: keep one CodeCarbon CSV per run_label; append new rows with run=main/retry_N and report row numbers.
 
 #### _extract_summary_stats(path)
-- Human readable hint: human readable hint: derive counts and summary percentiles from eligibility JSONL.
+- Human readable hint: derive counts and summary percentiles from eligibility JSONL.
 
 #### _run_tag_for_path(path, stage, output_token)
-- Human readable hint: human readable hint: derive run tag (sample + timestamp + retry) from filename.
+- Human readable hint: derive run tag (sample + timestamp + retry) from filename.
 
 #### _append_index_row(idx_path, sample_selection, stage, decision_split, path, stats, total_paper_count)
-- Human readable hint: human readable hint: write/update one row in eligibility index for a decision split.
+- Human readable hint: write/update one row in eligibility index for a decision split.
 
 #### _update_index_from_artifact(stage, artifact, attempt_index)
-- Human readable hint: human readable hint: append index rows for all eligibility splits from a run (base or retry).
+- Human readable hint: append index rows for all eligibility splits from a run (base or retry).
 
 #### _post_run_updates(stage, artifact, attempt_index)
-- Human readable hint: human readable hint: after any run, merge emissions and refresh eligibility index.
+- Human readable hint: after any run, merge emissions and refresh eligibility index.
 
 #### _next_retry_attempt(stage, run_label)
-- Human readable hint: human readable hint: derive the next retry attempt index from the manifest (per run_label).
+- Human readable hint: derive the next retry attempt index from the manifest (per run_label).
 
 #### _latest_eligibility_map(stage)
-- Human readable hint: human readable hint: load the most recent eligibility JSONL into a paper_id->decision map.
+- Human readable hint: load the most recent eligibility JSONL into a paper_id->decision map.
 
 #### _decision_is_complete(decision, stage)
-- Human readable hint: human readable hint: validate presence of is_eligible and required justification/reason.
+- Human readable hint: validate presence of is_eligible and required justification/reason.
 
 #### _retry_csv_needed(retry_csv, stage)
-- Human readable hint: human readable hint: return paper_ids in retry_csv that still lack complete decisions.
+- Human readable hint: return paper_ids in retry_csv that still lack complete decisions.
 
 #### _archive_retry_csv(retry_csv)
-- Human readable hint: human readable hint: archive a fully resolved retry CSV to processed/.
+- Human readable hint: archive a fully resolved retry CSV to processed/.
 
 #### _latest_retry_csv(stage)
 - Human readable hint: Locate the most recent retry CSV under input/retry_runs for this stage (any sample, screen/select).
 
 #### _error_ids_by_type(error_log_path, blocked_types)
-- Human readable hint: human readable hint: collect paper_ids with deterministic errors that should not trigger auto-retry.
+- Human readable hint: collect paper_ids with deterministic errors that should not trigger auto-retry.
 
 #### _prompt_retry_if_needed(stage, artifact)
 - Human readable hint: Prompt for re-screening when errors are present for this stage.
@@ -157,7 +176,7 @@ This file explains each script through its primary class, visible __init__ param
 - Human readable hint: Ask a yes/no question in the terminal and return True for yes. Args: message: Prompt text displayed to the user. Returns: True for yes, False for no (or non-interactive terminal). Note: keeps QC decisions explicit and auditable.
 
 #### _run_validation()
-- Human readable hint: human readable hint: run validation and return True on success.
+- Human readable hint: run validation and return True on success.
 
 #### _run_qc_loop(stage, sample_rate, quiet)
 - Human readable hint: Run QC-only screening, validation prompt, and decision loop. Returns True if the user approves validation and wants full screening. Args: stage: Current pipeline stage (title_abstract/full_text/data_extraction). sample_rate: Fraction of planned papers to include in QC. quiet: If True, suppress most console output. Returns: True if user approves validation and proceeds to full screening; False otherwise.
@@ -168,34 +187,34 @@ This file explains each script through its primary class, visible __init__ param
 ## pipeline/additions/input_trace.py
 
 ### Class InputTraceRunner
-- Human readable hint: human readable hint: one-class trace utility that reconstructs one paper input and verifies its hashes.
+- Human readable hint: one-class trace utility that reconstructs one paper input and verifies its hashes.
 - __init__ parameters: stage
 #### InputTraceRunner.__init__(stage)
-- Human readable hint: human readable hint: __init__ stores the default stage used when CLI arguments omit --stage.
+- Human readable hint: __init__ stores the default stage used when CLI arguments omit --stage.
 
 #### InputTraceRunner.run(args)
-- Human readable hint: human readable hint: execute the full trace workflow from eligibility record lookup to report writing.
+- Human readable hint: execute the full trace workflow from eligibility record lookup to report writing.
 
 ### Script-level functions
 - Human readable hint: compatibility wrappers or helper functions used by the primary class.
 
 #### _sha256_text(value)
-- Human readable hint: human readable hint: compute a stable fingerprint of any text.
+- Human readable hint: compute a stable fingerprint of any text.
 
 #### _latest_eligibility_file(stage)
-- Human readable hint: human readable hint: pick the latest eligibility file (excluding split files).
+- Human readable hint: pick the latest eligibility file (excluding split files).
 
 #### _find_record(eligibility_file, paper_id, input_hash)
-- Human readable hint: human readable hint: find one paper in eligibility output by paper_id or stored input hash.
+- Human readable hint: find one paper in eligibility output by paper_id (with or without leading '#') or stored input hash.
 
 #### _strip_author_mentions(text, authors)
-- Human readable hint: human readable hint: mirror screening redaction logic for exact reproducibility.
+- Human readable hint: mirror screening redaction logic for exact reproducibility.
 
 #### _format_chunks_for_prompt(stage, paper_id, title, authors, chunks)
-- Human readable hint: human readable hint: rebuild the same context text format sent to the model.
+- Human readable hint: rebuild the same context text format sent to the model.
 
 #### _title_abstract_context(stage, paper_id)
-- Human readable hint: human readable hint: title_abstract stores the full model context in selected_chunks output.
+- Human readable hint: title_abstract stores the full model context in selected_chunks output.
 
 #### _load_folder_metadata(folder)
 - Human readable hint: No docstring provided.
@@ -204,19 +223,19 @@ This file explains each script through its primary class, visible __init__ param
 - Human readable hint: No docstring provided.
 
 #### _find_paper_folder(stage, paper_id, csv_root)
-- Human readable hint: human readable hint: locate the per-paper folder by matching Covidence/paper ID in metadata.
+- Human readable hint: locate the per-paper folder by matching Covidence/paper ID in metadata.
 
 #### _load_selected_chunks(folder, stage, paper_id)
-- Human readable hint: No docstring provided.
+- Human readable hint: load selected chunks from stage JSONL and fall back to compact per-paper artifact files.
 
 #### _folder_stage_context(stage, paper_id, csv_root)
-- Human readable hint: human readable hint: rebuild full_text/data_extraction model context from metadata + selected chunks.
+- Human readable hint: rebuild full_text/data_extraction model context from metadata + selected chunks.
 
 #### _reconstruct_context(stage, paper_id, csv_root)
-- Human readable hint: human readable hint: stage-aware reconstruction of exact model context.
+- Human readable hint: stage-aware reconstruction of exact model context with selected chunks.
 
 #### _load_prompt_template(stage)
-- Human readable hint: human readable hint: mirror runtime prompt assembly with optional eligibility criteria injection.
+- Human readable hint: mirror runtime prompt assembly with optional eligibility criteria injection.
 
 #### _parse_args()
 - Human readable hint: No docstring provided.
@@ -283,22 +302,22 @@ This file explains each script through its primary class, visible __init__ param
 - Human readable hint: Determine QC paper count from the QC sample file; falls back to zero if unavailable.
 
 ### Class ResourceUsageEngine
-- Human readable hint: human readable hint: dominant class for this script; it exposes one stable API for run/resource tracking.
+- Human readable hint: dominant class for this script; it exposes one stable API for run/resource tracking.
 - __init__ parameters: resource_log_path, enable_tracking, enable_codecarbon, stage, qc_sample_path, qc_paper_count, run_label, enable_time_savings
 #### ResourceUsageEngine.__init__(resource_log_path, enable_tracking, enable_codecarbon, stage, qc_sample_path, qc_paper_count, run_label, enable_time_savings)
-- Human readable hint: human readable hint: __init__ captures all run-level tracking parameters in one visible constructor.
+- Human readable hint: __init__ captures all run-level tracking parameters in one visible constructor.
 
 #### ResourceUsageEngine.start_run()
-- Human readable hint: human readable hint: start CodeCarbon/resource tracking for the current run.
+- Human readable hint: start CodeCarbon/resource tracking for the current run.
 
 #### ResourceUsageEngine.set_qc_count(qc_count)
-- Human readable hint: human readable hint: set QC paper count once so the tracker does not re-read QC CSV files.
+- Human readable hint: set QC paper count once so the tracker does not re-read QC CSV files.
 
 #### ResourceUsageEngine.log_paper(paper_id, prompt_tokens, response_tokens, pdf_text_tokens, pdf_visual_tokens, embedding_tokens, prompt_tokens_source, response_tokens_source, embedding_tokens_source, paper_seconds)
-- Human readable hint: human readable hint: log per-paper token/runtime metrics in the shared run tracker.
+- Human readable hint: log per-paper token/runtime metrics in the shared run tracker.
 
 #### ResourceUsageEngine.stop_run(total_runtime_seconds, paper_count)
-- Human readable hint: human readable hint: stop tracking and write final TOTAL summary lines.
+- Human readable hint: stop tracking and write final TOTAL summary lines.
 
 ### Script-level functions
 - Human readable hint: compatibility wrappers or helper functions used by the primary class.
@@ -324,13 +343,13 @@ This file explains each script through its primary class, visible __init__ param
 ## pipeline/additions/stats_engine.py
 
 ### Class ValidationEngine
-- Human readable hint: human readable hint: one-class validation orchestrator for screening and extraction stages.
+- Human readable hint: one-class validation orchestrator for screening and extraction stages.
 - __init__ parameters: stage
 #### ValidationEngine.__init__(stage)
-- Human readable hint: human readable hint: __init__ stores the active stage used to route validation.
+- Human readable hint: __init__ stores the active stage used to route validation.
 
 #### ValidationEngine.run(args)
-- Human readable hint: human readable hint: run the correct validation branch based on the configured stage.
+- Human readable hint: run the correct validation branch based on the configured stage.
 
 ### Script-level functions
 - Human readable hint: compatibility wrappers or helper functions used by the primary class.
@@ -357,7 +376,7 @@ This file explains each script through its primary class, visible __init__ param
 - Human readable hint: No docstring provided.
 
 #### _extract_tags(value)
-- Human readable hint: human readable hint: map explicit Covidence tags to the curated include list; ignores notes.
+- Human readable hint: map explicit Covidence tags to the curated include list; ignores notes.
 
 #### _extract_ft_reason(notes_val)
 - Human readable hint: Extract the full-text exclusion reason from Notes/Tags.
@@ -387,13 +406,13 @@ This file explains each script through its primary class, visible __init__ param
 - Human readable hint: Compute confusion-matrix counts.
 
 #### _prop_ci(k, n, alpha)
-- Human readable hint: human readable hint: exact (Clopper-Pearson) CI via statsmodels (Seabold & Perktold, 2010).
+- Human readable hint: exact (Clopper-Pearson) CI via statsmodels (Seabold & Perktold, 2010).
 
 #### _metrics(tp, tn, fp, fn)
 - Human readable hint: Compute agreement metrics for screening.
 
 #### _write_alignment(df, suffix)
-- Human readable hint: human readable hint: single QC alignment file with decisions and reasons.
+- Human readable hint: single QC alignment file with decisions and reasons.
 
 #### _write_report(stats, tp, tn, fp, fn, stage, suffix)
 - Human readable hint: Write a readable validation summary report.
@@ -402,7 +421,7 @@ This file explains each script through its primary class, visible __init__ param
 - Human readable hint: Draw and save a confusion-matrix plot.
 
 #### _extract_timestamp_suffix(path)
-- Human readable hint: Extract the YYYYMMDD_HH-MM suffix from a stage output filename.
+- Human readable hint: Extract the QC timestamp anchor (YYYYMMDD_HH-MM) from stage output filenames, including second/microsecond variants.
 
 #### _load_qc_sample_ids(suffix)
 - Human readable hint: Load QC sample IDs for the matching timestamp suffix.
@@ -427,25 +446,30 @@ This file explains each script through its primary class, visible __init__ param
 ### Class PaperRecord
 - Human readable hint: No class docstring provided.
 ### Class _ScreeningDecisionBaseModel
-- Human readable hint: human readable hint: shared schema for screening decisions returned by the LLM.
+- Human readable hint: shared schema for screening decisions returned by the LLM.
 #### _ScreeningDecisionBaseModel._check_reason_for_exclusion()
-- Human readable hint: human readable hint: exclusion decisions must carry an explicit exclusion reason.
+- Human readable hint: exclusion decisions must carry an explicit exclusion reason.
 
 ### Class TitleAbstractScreeningDecisionModel
-- Human readable hint: human readable hint: title_abstract allows a NEUTRAL eligibility outcome.
+- Human readable hint: title_abstract allows a NEUTRAL eligibility outcome.
 ### Class FullTextScreeningDecisionModel
-- Human readable hint: human readable hint: full_text requires a strict boolean eligibility outcome.
+- Human readable hint: full_text requires a strict boolean eligibility outcome.
+#### FullTextScreeningDecisionModel._check_seed_references_threshold()
+- Human readable hint: enforce strict seed-reference semantics (true only when eligible and confidence > 0.98; explicit true/false required for high-confidence eligible decisions).
 ### Class PaperScreeningPipeline
 - Human readable hint: No class docstring provided.
-- __init__ parameters: csv_dir, knowledge_base_path, eligibility_output_path, chunks_output_path, text_output_path, top_k, score_threshold, batch_size, embedder, examples, sample_size, sample_seed, sustainability_tracking, resource_log_path, enable_time_savings, run_label, codecarbon_enabled, qc_sample_path, qc_sample_readable_path, confirm_sampling, sample_rate, qc_only, qc_enabled, force_new_qc, error_log_path, stage, pdf_root, overflow_log_path, split_only, quiet, summary_to_console
-#### PaperScreeningPipeline.__init__(csv_dir, knowledge_base_path, eligibility_output_path, chunks_output_path, text_output_path, top_k, score_threshold, batch_size, embedder, examples, sample_size, sample_seed, sustainability_tracking, resource_log_path, enable_time_savings, run_label, codecarbon_enabled, qc_sample_path, qc_sample_readable_path, confirm_sampling, sample_rate, qc_only, qc_enabled, force_new_qc, error_log_path, stage, pdf_root, overflow_log_path, split_only, quiet, summary_to_console)
+- __init__ parameters: csv_dir, knowledge_base_path, eligibility_output_path, chunks_output_path, text_output_path, top_k, score_threshold, batch_size, embedder, examples, sample_size, sample_seed, sustainability_tracking, resource_log_path, enable_time_savings, run_label, codecarbon_enabled, qc_sample_path, qc_sample_readable_path, confirm_sampling, sample_rate, qc_only, qc_enabled, force_new_qc, error_log_path, stage, pdf_root, overflow_log_path, split_only, quiet, summary_to_console, artifact_mode
+#### PaperScreeningPipeline.__init__(csv_dir, knowledge_base_path, eligibility_output_path, chunks_output_path, text_output_path, top_k, score_threshold, batch_size, embedder, examples, sample_size, sample_seed, sustainability_tracking, resource_log_path, enable_time_savings, run_label, codecarbon_enabled, qc_sample_path, qc_sample_readable_path, confirm_sampling, sample_rate, qc_only, qc_enabled, force_new_qc, error_log_path, stage, pdf_root, overflow_log_path, split_only, quiet, summary_to_console, artifact_mode)
 - Human readable hint: Initialize the screening/extraction pipeline with configuration. All arguments are strictly typed and have clear defaults for robust, reproducible runs. Non-coders: Each parameter controls a key aspect of the workflow (see README for details).
 
 #### PaperScreeningPipeline._sha256_text(value)
-- Human readable hint: human readable hint: stable fingerprint to verify whether two input texts are exactly identical.
+- Human readable hint: stable fingerprint to verify whether two input texts are exactly identical.
+
+#### PaperScreeningPipeline._persist_prompt_template_snapshot()
+- Human readable hint: persist one prompt snapshot per campaign hash and reuse identical existing snapshots to avoid duplicate files.
 
 #### PaperScreeningPipeline.run()
-- Human readable hint: Main pipeline: prep folders (if needed), QC sample, then screen papers.
+- Human readable hint: Main pipeline: prep folders (if needed), QC sample, then screen papers. Split-only prep skips prompt snapshot persistence.
 
 #### PaperScreeningPipeline._iter_papers()
 - Human readable hint: Yield papers sequentially; sample only if requested.
@@ -472,21 +496,25 @@ This file explains each script through its primary class, visible __init__ param
 - Human readable hint: Collect raw CSV rows into a list (used for folder creation).
 
 #### PaperScreeningPipeline._process_title_abstract_batch(planned_papers)
-- Human readable hint: human readable hint: stream title_abstract completions paper-by-paper as async calls finish.
+- Human readable hint: stream title_abstract completions paper-by-paper as async calls finish.
 
 #### PaperScreeningPipeline._use_async_stage_processing()
-- Human readable hint: human readable hint: allow stage-specific opt-in async processing beyond title_abstract.
+- Human readable hint: allow stage-specific opt-in async processing beyond title_abstract.
 
 #### PaperScreeningPipeline._process_non_title_async_batch(planned_papers)
-- Human readable hint: human readable hint: stream full_text/data_extraction completions paper-by-paper.
+- Human readable hint: stream full_text/data_extraction completions paper-by-paper.
 
 #### PaperScreeningPipeline._stream_async_batch(planned_papers, processor)
-- Human readable hint: human readable hint: bridge async processing to sync caller while emitting per-paper completion updates.
+- Human readable hint: bridge async processing to sync caller while emitting per-paper completion updates.
+
+#### PaperScreeningPipeline._process_paper_async(paper)
+- Human readable hint: run stage-specific chunking, selection, LLM calls, validation, and diagnostics in one async flow.
+- Human readable hint: full_text keeps the final valid adjudication output and records borderline state in diagnostics instead of forcing a final hard validation failure.
 
 #### PaperScreeningPipeline._process_paper(paper)
-- Human readable hint: human readable hint: sync mode reuses the async processing core to avoid duplicate decision logic.
+- Human readable hint: sync mode reuses the async processing core to avoid duplicate decision logic.
 
-#### PaperScreeningPipeline._format_chunks_for_prompt(paper, chunks)
+#### PaperScreeningPipeline._format_chunks_for_prompt(paper, chunks, detected_language_code)
 - Human readable hint: Format selected chunks into a readable prompt section.
 
 #### PaperScreeningPipeline._title_abstract_full_input(paper)
@@ -510,11 +538,35 @@ This file explains each script through its primary class, visible __init__ param
 #### PaperScreeningPipeline._estimate_text_tokens(text)
 - Human readable hint: Estimate token count using a simple whitespace split heuristic.
 
+#### PaperScreeningPipeline._select_chunks_with_rescue(chunks, supplemental_rows)
+- Human readable hint: select evidence with adaptive fallback and enforce non-title/method quotas for full_text.
+- Human readable hint: applies hybrid chunk ranking (embedding + method/triad + readability + sentence completeness).
+- Human readable hint: applies a final raw-chunk non-title rescue when selected evidence collapses to title-only context.
+
+#### PaperScreeningPipeline._hybrid_chunk_score(row)
+- Human readable hint: combine semantic relevance with readability and chunk-completeness signals for robust ranking.
+
 #### PaperScreeningPipeline._count_pdf_pages(pdf_path)
 - Human readable hint: Return number of pages in a PDF; fall back to 0 on failure.
 
 #### PaperScreeningPipeline._prepare_chunks(paper)
 - Human readable hint: Create evidence chunks, token counts, and resolved language for one paper.
+- Human readable hint: full_text now performs language-code detection and returns an unsupported-language marker for non-EN/DE policy handling.
+
+#### PaperScreeningPipeline._compact_artifacts_enabled()
+- Human readable hint: enable compact per-paper artifact mode only for full_text runs.
+
+#### PaperScreeningPipeline._compact_artifact_path_for_folder(folder_path, stage)
+- Human readable hint: build stage artifact filename paths for per-paper compact machine outputs.
+
+#### PaperScreeningPipeline._metadata_snapshot_for_folder(folder_path, fallback)
+- Human readable hint: load canonical metadata from metadata.json for synchronized sidecar exports.
+
+#### PaperScreeningPipeline._write_compact_human_normalized_text(folder_path, metadata_snapshot, normalized_text)
+- Human readable hint: write human-checkable normalized text with metadata copied from metadata.json.
+
+#### PaperScreeningPipeline._persist_compact_text_artifacts(paper, pdf_path, cache_key, normalized_text, normalized_pages)
+- Human readable hint: persist per-paper compact machine artifacts and synchronized normalized text sidecar.
 
 #### PaperScreeningPipeline._materialize_paper_folders_full_text()
 - Human readable hint: Split select CSV rows into per-paper folders under csv_dir/per_paper_full_text.
@@ -547,7 +599,7 @@ This file explains each script through its primary class, visible __init__ param
 - Human readable hint: Create a safe per-paper folder name using ID/author/year/title.
 
 #### PaperScreeningPipeline._load_pdf_text(paper, resolved_path)
-- Human readable hint: Read PDF text once (optionally page-level) and count pages; returns the path used.
+- Human readable hint: Read PDF text once (optionally page-level), support compact/full cache modes, and return page counts with fallback-safe behavior.
 
 #### PaperScreeningPipeline._resolve_pdf_path(paper)
 - Human readable hint: Find the PDF inside the per-paper folder and normalize its filename.
@@ -562,25 +614,25 @@ This file explains each script through its primary class, visible __init__ param
 - Human readable hint: Create a configured async OpenAI API client.
 
 #### PaperScreeningPipeline._validate_screening_decision(decision_text)
-- Human readable hint: human readable hint: validate screening JSON and enforce prompt-demanded keys for this stage.
+- Human readable hint: validate screening JSON and enforce prompt-demanded keys for this stage.
 
 #### PaperScreeningPipeline._extract_required_json_fields_from_prompt(prompt_template)
-- Human readable hint: human readable hint: detect field names declared in the prompt schema section.
+- Human readable hint: detect field names declared in the prompt schema section.
 
 #### PaperScreeningPipeline._percentiles(values)
-- Human readable hint: human readable hint: provide quick p50/p95/max without heavy deps.
+- Human readable hint: provide quick p50/p95/max without heavy deps.
 
 #### PaperScreeningPipeline._parse_is_eligible(decision)
-- Human readable hint: human readable hint: stage-aware extraction of is_eligible from the LLM decision payload.
+- Human readable hint: stage-aware extraction of is_eligible from the LLM decision payload.
 
 #### PaperScreeningPipeline._decision_payload(decision)
-- Human readable hint: human readable hint: parse JSON text decisions once so downstream checks can reuse the payload.
+- Human readable hint: parse JSON text decisions once so downstream checks can reuse the payload.
 
 #### PaperScreeningPipeline._parse_exclusion_reason(decision)
-- Human readable hint: human readable hint: derive exclusion_reason_category if present in LLM output.
+- Human readable hint: derive exclusion_reason_category if present in LLM output.
 
 #### PaperScreeningPipeline._decision_missing_fields(decision)
-- Human readable hint: human readable hint: detect missing justification or exclusion_reason_category without altering the decision.
+- Human readable hint: detect missing justification or exclusion_reason_category without altering the decision.
 
 #### PaperScreeningPipeline._log_error(paper_id, message, context, error_type, attempt, prompt_tokens, response_tokens, embedding_tokens, pdf_text_tokens, pdf_visual_tokens, total_estimated_tokens)
 - Human readable hint: Append errors to the error log with detailed context for transparency.
@@ -616,27 +668,27 @@ This file explains each script through its primary class, visible __init__ param
 - Human readable hint: compatibility wrappers or helper functions used by the primary class.
 
 #### _load_optional_eligibility_criteria_text()
-- Human readable hint: human readable hint: load shared eligibility criteria text when configured and available.
+- Human readable hint: load shared eligibility criteria text when configured and available.
 
 #### _load_stage_prompt_template(stage)
-- Human readable hint: human readable hint: load stage prompt and inject shared criteria only when placeholder is present.
+- Human readable hint: load stage prompt and inject shared criteria only when placeholder is present.
 
 ## pipeline/core/run_screening.py
 
 ### Class StagePipelineRunner
-- Human readable hint: human readable hint: one-class stage runner that centralizes stage defaults and the run entrypoint.
+- Human readable hint: one-class stage runner that centralizes stage defaults and the run entrypoint.
 - __init__ parameters: stage, csv_dir
 #### StagePipelineRunner.__init__(stage, csv_dir)
-- Human readable hint: human readable hint: __init__ stores the stage and input folder used to start screening.
+- Human readable hint: __init__ stores the stage and input folder used to start screening.
 
 #### StagePipelineRunner.run()
-- Human readable hint: human readable hint: execute one stage run while allowing explicit overrides from callers.
+- Human readable hint: execute one stage run while allowing explicit overrides from callers.
 
 ### Script-level functions
 - Human readable hint: compatibility wrappers or helper functions used by the primary class.
 
 #### _timestamp_label()
-- Human readable hint: Create a timestamp string for output filenames. Returns: Timestamp string formatted as YYYYMMDD_HH-MM. Note: timestamps prevent overwriting prior runs.
+- Human readable hint: Create a timestamp string for output filenames. Returns: Timestamp string formatted as YYYYMMDD_HH-MM-SS. Note: higher precision reduces accidental overwrite risk across rapid reruns.
 
 #### _stage_root(stage)
 - Human readable hint: Return the output folder for a given stage. Args: stage: Current stage name (title_abstract/full_text/data_extraction). Returns: Path to output/<stage>/. Note: each stage writes into output/<stage>/.
@@ -654,26 +706,41 @@ This file explains each script through its primary class, visible __init__ param
 - Human readable hint: Load extra negative examples from CSVs to enrich the knowledge base. Args: csv_dir: Directory containing Covidence exports. patterns: List of glob patterns for negative-example CSVs. Returns: List of NEG example dicts with label/text. Note: these negatives improve evidence filtering precision.
 
 #### _safe_int(val, default)
-- Human readable hint: No docstring provided.
+- Human readable hint: safely coerce config values to int and fail fast on invalid values.
 
 #### _safe_float(val, default)
-- Human readable hint: No docstring provided.
+- Human readable hint: safely coerce config values to float and fail fast on invalid values.
 
 #### _safe_bool(val, default)
-- Human readable hint: No docstring provided.
+- Human readable hint: safely coerce config values to bool using common yes/no string forms.
 
 #### _append_qc_records_to_remaining(stage_root, stage_prefix, remaining_path)
 - Human readable hint: Append QC sample eligibility records to the remaining-sample output.
 
-#### run_pipeline(stage, split_only, csv_dir, kb_file, eligibility_output, chunks_output, text_output, error_log, resource_log, top_k, score_threshold, sample_size, sample_seed, batch_size, sustainability_tracking, pdf_root, quiet, confirm_sampling, sample_rate, qc_only, qc_enabled, force_new_qc, enable_time_savings, run_label_override)
-- Human readable hint: Run one pipeline stage with stage-specific defaults and outputs. Args: stage: Stage name (title_abstract/full_text/data_extraction). split_only: If True, only prepare folders and exit. csv_dir: Override input/ folder path. kb_file: Override KB file path for this run. eligibility_output: Override eligibility JSONL output path. chunks_output: Override selected-chunks JSONL output path. text_output: Override readable summary output path. error_log: Override error log path. top_k: Max number of evidence chunks per paper. score_threshold: Minimum relevance score threshold. sample_size: Optional fixed number of papers to sample. sample_seed: Random seed for sampling. batch_size: Embedding batch size. sustainability_tracking: If True, write resource logs. pdf_root: Optional PDF root path override. quiet: If True, suppress most console output. confirm_sampling: If True, skip QC prompt (already confirmed). sample_rate: QC sample fraction (0–1). qc_only: If True, screen QC sample only. qc_enabled: If False, skip QC sampling entirely. force_new_qc: If True, generate a new QC sample even if one exists. Returns: True if screening executed; False if the run exited early. Note: this is the core launcher used by main.py.
+#### run_pipeline(stage, split_only, csv_dir, kb_file, eligibility_output, chunks_output, text_output, error_log, resource_log, top_k, score_threshold, sample_size, sample_seed, batch_size, sustainability_tracking, pdf_root, quiet, confirm_sampling, sample_rate, qc_only, qc_enabled, force_new_qc, enable_time_savings, run_label_override, artifact_mode)
+- Human readable hint: Run one pipeline stage with stage-specific defaults and outputs. Supports optional artifact mode override (`compact` or `full`) for per-paper full_text artifact persistence.
 
 ## pipeline/integrations/embedding_utils.py
 
 ### Class TextPdfUtils
-- Human readable hint: human readable hint: one utility class for language detection, PDF reading, and sentence splitting.
+- Human readable hint: one utility class for language detection, PDF reading, and sentence splitting.
+#### TextPdfUtils.normalize_extracted_text(text)
+- Human readable hint: apply conservative cleanup to extracted PDF text before sentence splitting and prompt assembly.
+
+#### TextPdfUtils.detect_language_code(text)
+- Human readable hint: detect language code (for example en/de/fr) used by full_text language policy checks.
+
 #### TextPdfUtils.detect_language(text)
 - Human readable hint: Detect whether text is English or German using stopword counts.
+
+#### TextPdfUtils._normalize_margin_line(line)
+- Human readable hint: normalize page-margin text to detect repeated headers/footers across pages.
+
+#### TextPdfUtils._remove_repeated_margin_lines(raw_pages)
+- Human readable hint: remove repetitive header/footer lines from page text before retrieval chunking.
+
+#### TextPdfUtils._read_pypdf_pages(file_path, max_pages)
+- Human readable hint: read page-level text through PyPDF fallback when pdfplumber extraction is sparse.
 
 #### TextPdfUtils.read_pdf_file(file_path, max_pages)
 - Human readable hint: Read PDF text and return a single combined string (optionally capped by max_pages).
@@ -689,6 +756,9 @@ This file explains each script through its primary class, visible __init__ param
 
 #### detect_language(text)
 - Human readable hint: Detect whether text is English or German using stopword counts.
+
+#### detect_language_code(text)
+- Human readable hint: Detect language code for deterministic language policy checks.
 
 #### read_pdf_file(file_path, max_pages)
 - Human readable hint: Read PDF text and return a single combined string (optionally capped by max_pages).
@@ -708,16 +778,16 @@ This file explains each script through its primary class, visible __init__ param
 - Human readable hint: No docstring provided.
 
 #### OpenAIResponder._request_kwargs()
-- Human readable hint: human readable hint: build one consistent chat request payload for sync and async calls.
+- Human readable hint: build one consistent chat request payload for sync and async calls.
 
 #### OpenAIResponder._usage_to_dict(usage)
-- Human readable hint: human readable hint: normalize provider usage objects into plain dictionaries.
+- Human readable hint: normalize provider usage objects into plain dictionaries.
 
 #### OpenAIResponder._response_to_tuple(response)
-- Human readable hint: human readable hint: parse one response object and return content plus usage metadata.
+- Human readable hint: parse one response object and return content plus usage metadata.
 
 #### OpenAIResponder._is_retryable_error(exc)
-- Human readable hint: human readable hint: retry only on transient transport/rate-limit provider failures.
+- Human readable hint: retry only on transient transport/rate-limit provider failures.
 
 #### OpenAIResponder.generate_response(retries, backoff_seconds)
 - Human readable hint: Get one response from the model and return text plus usage metadata.
@@ -731,12 +801,15 @@ This file explains each script through its primary class, visible __init__ param
 ## pipeline/selection/chunking.py
 
 ### Class ChunkBuilder
-- Human readable hint: human readable hint: one class that groups all chunk-building methods for title/abstract and full-text.
+- Human readable hint: one class that groups all chunk-building methods for title/abstract and full-text.
 #### ChunkBuilder.clean_text(value)
 - Human readable hint: Trim whitespace from text fields safely.
 
+#### ChunkBuilder._is_low_information_sentence(sentence)
+- Human readable hint: discard table-like/citation-like sentence fragments before full-text chunk assembly.
+
 #### ChunkBuilder.chunk_sentence_entries(entries, chunk_size, overlap_size)
-- Human readable hint: Group sentence entries into overlapping chunks with page/line spans.
+- Human readable hint: Group sentence entries into overlapping chunks with page/line spans and sentence/word count metadata.
 
 #### ChunkBuilder.chunk_paper_sentences(paper_id, title, abstract, language)
 - Human readable hint: Split title and abstract into sentence chunks (title sentences are always kept).
@@ -785,16 +858,16 @@ This file explains each script through its primary class, visible __init__ param
 - Human readable hint: Compute relevance scores for each vector.
 
 #### RelevanceSelector.select(chunks, top_k, score_threshold)
-- Human readable hint: human readable hint: score only candidate chunks; always-include kinds bypass embedding for speed.
+- Human readable hint: score only candidate chunks; always-include kinds bypass embedding for speed.
 
 ### Class SelectionEngine
-- Human readable hint: human readable hint: dominant selector class that owns embedding and relevance-scoring setup for one script.
+- Human readable hint: dominant selector class that owns embedding and relevance-scoring setup for one script.
 - __init__ parameters: examples, batch_size, always_include_kinds, embedder
 #### SelectionEngine.__init__(examples, batch_size, always_include_kinds, embedder)
-- Human readable hint: human readable hint: __init__ stores examples and prepares the underlying selector with one consistent interface.
+- Human readable hint: __init__ stores examples and prepares the underlying selector with one consistent interface.
 
 #### SelectionEngine.select(chunks, top_k, score_threshold)
-- Human readable hint: human readable hint: return selected chunks and scores using the configured embedding+relevance backend.
+- Human readable hint: return selected chunks and scores using the configured embedding+relevance backend.
 
 ### Script-level functions
 - Human readable hint: compatibility wrappers or helper functions used by the primary class.
@@ -804,3 +877,7 @@ This file explains each script through its primary class, visible __init__ param
 
 #### _normalize(vec)
 - Human readable hint: Normalize a vector to unit length.
+
+---
+**Read next:** [readme.md](readme.md)
+

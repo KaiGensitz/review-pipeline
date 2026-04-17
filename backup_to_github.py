@@ -37,8 +37,8 @@ class BackupToGitHub:
     def run_backup(self) -> None:
         """human readable hint: execute pull, add, commit, and push in safe sequence."""
 
-        self.run_command(["git", "pull"])
-        self.run_command(["git", "add", "."])
+        self.run_command(["git", "pull", "--ff-only"])
+        self.run_command(["git", "add", "-A"])
         if not self.has_staged_changes():
             print("No staged changes detected. Skipping commit and push.")
             return
@@ -51,6 +51,7 @@ def run(cmd: list[str]) -> None:
     """Compatibility wrapper for older calls."""
 
     BackupToGitHub(BACKUP_MSG).run_command(cmd)
+
 
 def main():
     # human readable hint: pulling first reduces push conflicts when multiple users work on the repo.
