@@ -1274,15 +1274,41 @@ class PaperScreeningPipeline:
 
         start_time = time.time()
         tracking_started = False
-        if self.sustainability_tracking:
+
+        def _start_tracking_if_needed() -> None:
+            nonlocal tracking_started, start_time
+            if tracking_started or not self.sustainability_tracking:
+                return
             self.resource_tracker.start_run()
             tracking_started = True
+            # human readable hint: runtime accounting begins when tracking actually starts.
+            start_time = time.time()
 
         def _finish_tracking_if_started() -> None:
+            nonlocal tracking_started
             if not tracking_started:
                 return
             self._total_runtime_seconds = max(0.0, time.time() - start_time)
             self.resource_tracker.stop_run(self._total_runtime_seconds, self._paper_count)
+            tracking_started = False
+
+        class _RunTrackingGuard:
+            """human readable hint: fail-safe finalizer so run tracking still closes on unexpected exceptions."""
+
+            def __init__(self, closer) -> None:
+                self._closer = closer
+                self._closed = False
+
+            def close(self) -> None:
+                if self._closed:
+                    return
+                self._closer()
+                self._closed = True
+
+            def __del__(self) -> None:
+                self.close()
+
+        tracking_guard = _RunTrackingGuard(_finish_tracking_if_started)
 
         if not self.quiet:
             if self.split_only:
@@ -1295,6 +1321,12 @@ class PaperScreeningPipeline:
             self._warn_prompt_hash_drift_in_stage_outputs()
         else:
             self._prompt_snapshot_path = None
+
+        # human readable hint: start tracking immediately for split_only preflight and QC-enabled runs
+        # so operators can see tracking from run start of the whole pipeline flow.
+        # Remaining (non-QC) runs keep deferred startup to avoid empty tracking files when no papers remain.
+        if self.split_only or self.qc_enabled:
+            _start_tracking_if_needed()
 
         if self.stage == "full_text":
             self._materialize_paper_folders_full_text()
@@ -1377,6 +1409,9 @@ class PaperScreeningPipeline:
                     print("[qc] Remaining run has no papers after removing QC sample; nothing to do.")
                 _finish_tracking_if_started()
                 return False
+
+        # For non-QC runs, start tracking only after we confirmed there are papers to process.
+        _start_tracking_if_needed()
 
         if self._fulltext_preparse_enabled and self.stage == "full_text" and planned_papers:
             self._preparse_full_text_pdfs(planned_papers)
@@ -1769,7 +1804,7 @@ class PaperScreeningPipeline:
 
         _append_error_summary(total_planned)
 
-        _finish_tracking_if_started()
+        tracking_guard.close()
 
         return True
 
@@ -5272,7 +5307,9 @@ class PaperScreeningPipeline:
         files: list[Path] = []
         for pattern in patterns:
             files.extend(sorted(self.csv_dir.glob(pattern)))
-        if self.csv_dir.name == "retry_runs":
+        # human readable hint: retries can run from retry_runs itself or from isolated child folders under retry_runs.
+        in_retry_scope = self.csv_dir.name == "retry_runs" or self.csv_dir.parent.name == "retry_runs"
+        if in_retry_scope:
             resolved = [max(files, key=lambda p: p.stat().st_mtime)] if files else []
             self._stage_csv_cache[select_only] = resolved
             return list(resolved)

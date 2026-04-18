@@ -196,6 +196,24 @@ def _destination_pdf_path(target: FolderTarget) -> Path:
     return target.folder / f"{safe_id}.pdf"
 
 
+def load_targets(target_root: Path, overwrite: bool) -> list[FolderTarget]:
+    """human readable hint: public API wrapper for loading per-paper target folders for matching workflows."""
+
+    return _load_targets(target_root=target_root, overwrite=overwrite)
+
+
+def load_candidates(source_root: Path) -> list[PdfCandidate]:
+    """human readable hint: public API wrapper for loading candidate PDFs used by match/review tools."""
+
+    return _load_candidates(source_root=source_root)
+
+
+def score_candidate(target: FolderTarget, candidate: PdfCandidate) -> tuple[float, dict[str, float]]:
+    """human readable hint: public API wrapper exposing the shared scoring function for review scripts."""
+
+    return _score(target=target, candidate=candidate)
+
+
 def run(args: argparse.Namespace) -> int:
     """human readable hint: execute match workflow and optionally copy matched PDFs."""
 
@@ -376,3 +394,14 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+__all__ = [
+    "PdfCandidate",
+    "FolderTarget",
+    "load_targets",
+    "load_candidates",
+    "score_candidate",
+    "run",
+    "build_arg_parser",
+]

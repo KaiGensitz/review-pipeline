@@ -39,7 +39,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: Compatibility wrapper for older calls.
 
 #### main()
-- Human readable hint: No docstring provided.
+- Human readable hint: No docstring in source; placeholder retained intentionally for exhaustive traceability.
 
 ## config/user_orchestrator.py
 
@@ -49,17 +49,17 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: compatibility wrappers or helper functions used by the primary class.
 
 #### require_setting(container, key, container_name)
-- Human readable hint: No docstring provided.
+- Human readable hint: No docstring in source; placeholder retained intentionally for exhaustive traceability.
 
 #### require_setting(container, key, container_name, expected_type)
-- Human readable hint: No docstring provided.
+- Human readable hint: No docstring in source; placeholder retained intentionally for exhaustive traceability.
 
 #### require_setting(container, key, container_name, expected_type)
 - Human readable hint: Fetch a required setting from a config dict and warn if missing. Args: container: Settings dictionary (e.g., LLM_SETTINGS). key: Key to look up in the settings dict. container_name: Human-readable container name for warnings. Returns: The value stored under the key. Note: missing settings stop the run so you can fix the config.
 
 #### load_user_config()
 - Human readable hint: Build and validate a UserConfig from module globals (one call per run). Note: you do not edit this function; it just packages the values above.
-- Human readable hint: Current balanced default profile in this config snapshot uses `top_k=8`, `chunk_size=24`, and `async_max_concurrency=18` for faster large-batch runs with moderate recall safeguards.
+- Human readable hint: Current balanced default profile in this config snapshot uses `top_k=10`, `chunk_size=20`, and `async_max_concurrency=18` for faster large-batch runs with moderate recall safeguards.
 - Human readable hint: Total model context budget is configured in `LLM_SETTINGS["context_window_total_tokens"]` and combined with `max_tokens` to derive prompt budget at runtime.
 
 ## main.py
@@ -217,10 +217,10 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: title_abstract stores the full model context in selected_chunks output.
 
 #### _load_folder_metadata(folder)
-- Human readable hint: No docstring provided.
+- Human readable hint: No docstring in source; placeholder retained intentionally for exhaustive traceability.
 
 #### _extract_covidence_id(row)
-- Human readable hint: No docstring provided.
+- Human readable hint: No docstring in source; placeholder retained intentionally for exhaustive traceability.
 
 #### _find_paper_folder(stage, paper_id, csv_root)
 - Human readable hint: locate the per-paper folder by matching Covidence/paper ID in metadata.
@@ -238,7 +238,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: mirror runtime prompt assembly with optional eligibility criteria injection.
 
 #### _parse_args()
-- Human readable hint: No docstring provided.
+- Human readable hint: No docstring in source; placeholder retained intentionally for exhaustive traceability.
 
 #### run_trace()
 - Human readable hint: Compatibility wrapper for direct module execution.
@@ -251,10 +251,10 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: Initialize and manage CodeCarbon trackers with offline/online support.
 - __init__ parameters: enabled
 #### CarbonTrackerManager.__init__(enabled)
-- Human readable hint: No docstring provided.
+- Human readable hint: No docstring in source; placeholder retained intentionally for exhaustive traceability.
 
 #### CarbonTrackerManager._init_tracker()
-- Human readable hint: No docstring provided.
+- Human readable hint: No docstring in source; placeholder retained intentionally for exhaustive traceability.
 
 #### CarbonTrackerManager.start()
 - Human readable hint: Start the tracker (no-op if unavailable).
@@ -269,10 +269,10 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: Return final energy consumed in kWh, if available.
 
 #### CarbonTrackerManager.__enter__()
-- Human readable hint: No docstring provided.
+- Human readable hint: No docstring in source; placeholder retained intentionally for exhaustive traceability.
 
 #### CarbonTrackerManager.__exit__(exc_type, exc, tb)
-- Human readable hint: No docstring provided.
+- Human readable hint: No docstring in source; placeholder retained intentionally for exhaustive traceability.
 
 #### CarbonTrackerManager.measure_energy(func)
 - Human readable hint: Decorator for function-level emissions tracking.
@@ -281,7 +281,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: Track per-paper and per-run resource usage, with optional CodeCarbon.
 - __init__ parameters: config
 #### ResourceUsageTracker.__init__(config)
-- Human readable hint: No docstring provided.
+- Human readable hint: No docstring in source; placeholder retained intentionally for exhaustive traceability.
 
 #### ResourceUsageTracker.start_run()
 - Human readable hint: Start CodeCarbon tracking (if enabled and available).
@@ -373,7 +373,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: Find the best ID column and return it as strings.
 
 #### _normalize_tag_text(value)
-- Human readable hint: No docstring provided.
+- Human readable hint: No docstring in source; placeholder retained intentionally for exhaustive traceability.
 
 #### _extract_tags(value)
 - Human readable hint: map explicit Covidence tags to the curated include list; ignores notes.
@@ -444,7 +444,7 @@ This appendix provides function-level explanations for scripts and classes in th
 ## pipeline/core/pipeline.py
 
 ### Class PaperRecord
-- Human readable hint: No class docstring provided.
+- Human readable hint: No class docstring in source; placeholder retained intentionally for exhaustive traceability.
 ### Class _ScreeningDecisionBaseModel
 - Human readable hint: shared schema for screening decisions returned by the LLM.
 #### _ScreeningDecisionBaseModel._check_reason_for_exclusion()
@@ -457,7 +457,7 @@ This appendix provides function-level explanations for scripts and classes in th
 #### FullTextScreeningDecisionModel._check_seed_references_threshold()
 - Human readable hint: enforce strict seed-reference semantics (true only when eligible and confidence > 0.98; explicit true/false required for high-confidence eligible decisions).
 ### Class PaperScreeningPipeline
-- Human readable hint: No class docstring provided.
+- Human readable hint: No class docstring in source; placeholder retained intentionally for exhaustive traceability.
 - __init__ parameters: csv_dir, knowledge_base_path, eligibility_output_path, chunks_output_path, text_output_path, top_k, score_threshold, batch_size, embedder, examples, sample_size, sample_seed, sustainability_tracking, resource_log_path, enable_time_savings, run_label, codecarbon_enabled, qc_sample_path, qc_sample_readable_path, confirm_sampling, sample_rate, qc_only, qc_enabled, force_new_qc, error_log_path, stage, pdf_root, overflow_log_path, split_only, quiet, summary_to_console, artifact_mode
 #### PaperScreeningPipeline.__init__(csv_dir, knowledge_base_path, eligibility_output_path, chunks_output_path, text_output_path, top_k, score_threshold, batch_size, embedder, examples, sample_size, sample_seed, sustainability_tracking, resource_log_path, enable_time_savings, run_label, codecarbon_enabled, qc_sample_path, qc_sample_readable_path, confirm_sampling, sample_rate, qc_only, qc_enabled, force_new_qc, error_log_path, stage, pdf_root, overflow_log_path, split_only, quiet, summary_to_console, artifact_mode)
 - Human readable hint: Initialize the screening/extraction pipeline with configuration. All arguments are strictly typed and have clear defaults for robust, reproducible runs. Non-coders: Each parameter controls a key aspect of the workflow (see README for details).
@@ -775,7 +775,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: Generate responses using the OpenAI API within a RAG workflow.
 - __init__ parameters: data, model, prompt_template, client
 #### OpenAIResponder.__init__(data, model, prompt_template, client)
-- Human readable hint: No docstring provided.
+- Human readable hint: No docstring in source; placeholder retained intentionally for exhaustive traceability.
 
 #### OpenAIResponder._request_kwargs()
 - Human readable hint: build one consistent chat request payload for sync and async calls.
@@ -837,7 +837,7 @@ This appendix provides function-level explanations for scripts and classes in th
 ### Class EmbeddingBackend
 - Human readable hint: Fetch embeddings from the API and cache them for reuse.
 #### EmbeddingBackend.__post_init__()
-- Human readable hint: No docstring provided.
+- Human readable hint: No docstring in source; placeholder retained intentionally for exhaustive traceability.
 
 #### EmbeddingBackend.embed_texts(texts)
 - Human readable hint: Return embeddings for texts plus usage metadata when the API provides it.
@@ -852,7 +852,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: Score chunks against POS/NEG examples and keep the most relevant ones.
 - __init__ parameters: embedder, examples, always_include_kinds
 #### RelevanceSelector.__init__(embedder, examples, always_include_kinds)
-- Human readable hint: No docstring provided.
+- Human readable hint: No docstring in source; placeholder retained intentionally for exhaustive traceability.
 
 #### RelevanceSelector._score_vectors(vectors)
 - Human readable hint: Compute relevance scores for each vector.
@@ -878,6 +878,57 @@ This appendix provides function-level explanations for scripts and classes in th
 #### _normalize(vec)
 - Human readable hint: Normalize a vector to unit length.
 
+## Update Log (2026-04-18)
+
+### main.py
+
+#### _merge_emissions_with_run_column(stage, run_label, attempt_index)
+- Human readable hint: delegates CodeCarbon run-label merge to a dedicated CSV-safe helper module to avoid ad-hoc comma-splitting bugs.
+
+#### _require_base_outputs(stage, run_label)
+- Human readable hint: retry requires base eligibility output; missing base emissions now logs a warning but does not block retry execution.
+
+#### _execute_retry_run(stage, run_label, retry_csv, attempt_map)
+- Human readable hint: unified retry executor for both startup-pending and post-error retry paths; runs isolated retry screening, updates post-run indices/emissions, and appends retry manifest entries.
+
+### pipeline/core/pipeline.py
+
+#### PaperScreeningPipeline.run()
+- Human readable hint: run tracking now uses an explicit fail-safe guard so CodeCarbon/resource finalization still executes on unexpected exceptions.
+
+#### PaperScreeningPipeline._stage_csv_files(select_only)
+- Human readable hint: retry CSV resolution now recognizes both `retry_runs/` roots and isolated child folders under `retry_runs/` for robust retry-file discovery.
+
+### pipeline/additions/emissions_merge.py
+
+#### merge_emissions_with_run_column(stage_root, stage, run_label, attempt_index)
+- Human readable hint: CSV-safe merge for CodeCarbon outputs that labels rows with `run` (`main` / `retry_N`), merges latest retry rows into a stable base file, and returns appended row indices for manifest traceability.
+
+#### _read_csv_rows(path), _write_csv_rows(path, fieldnames, rows), _ensure_run_column(fieldnames)
+- Human readable hint: low-level CSV helpers keep quoting and column alignment deterministic across merge/rewrite operations.
+
+#### _fill_run_values(rows, run_value, override_existing), _label_single_file_retry_rows(rows, attempt_index)
+- Human readable hint: row-label helpers preserve existing retry labels while filling missing/legacy `run` values in both single-file and multi-file CodeCarbon scenarios.
+
+### pipeline/additions/stats_engine.py
+
+#### _load_ai()
+- Human readable hint: returns schema-stable empty DataFrames (`paper_id`, `ai_decision`, `ai_reason`, `source_path`) when no usable AI records exist, preventing downstream merge failures.
+
+#### _merge(ai, human)
+- Human readable hint: guards required AI merge columns on empty inputs so QC validation can complete with explicit zero-overlap outputs instead of raising KeyError.
+
+### pipeline/additions/bulk_pdf_match.py
+
+#### load_targets(target_root, overwrite), load_candidates(source_root), score_candidate(target, candidate)
+- Human readable hint: public API wrappers expose matcher internals for companion tooling without importing private underscore-prefixed functions.
+
+### pipeline/additions/bulk_pdf_match_review.py
+
+#### _targets_by_folder(target_root), run(args)
+- Human readable hint: now uses public matcher APIs (`load_targets`, `load_candidates`, `score_candidate`) to reduce fragility when matcher internals evolve.
+
 ---
 **Read next:** [readme.md](readme.md)
+
 

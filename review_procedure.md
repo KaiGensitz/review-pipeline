@@ -182,7 +182,7 @@ START -> run main.py
 	|
 	\-- End-of-run backup prompt (only when all prior prompts were yes):
 				Prompt: Do you want to back up your changes to GitHub now? (y/n):
-					|- y -> runs backup_to_github.py, which executes git pull --ff-only -> git add -u -- tracked code/doc globs -> git commit -> git push
+					|- y -> runs backup_to_github.py, which executes git pull --ff-only -> git add -A -> git commit -> git push
 					\- n -> finish without backup
 ```
 

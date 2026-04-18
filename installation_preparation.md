@@ -189,7 +189,7 @@ python -m pipeline.additions.input_trace --paper-id <ID> --stage <stage> --show-
 - For PDF stages, PDFs are placed in the generated per-paper folders.
 
 ## Throughput Tips
-- Balanced profile defaults are now preconfigured in [config/user_orchestrator.py](config/user_orchestrator.py): `top_k=8`, `chunk_size=24`, `async_max_concurrency=18`.
+- Balanced profile defaults are now preconfigured in [config/user_orchestrator.py](config/user_orchestrator.py): `top_k=10`, `chunk_size=20`, `async_max_concurrency=18`.
 - Keep `top_k` modest (e.g., 6–10) and `chunk_size` moderately sized (e.g., 20-25) for `full_text`/`data_extraction` to cut embedding/LLM load (`title_abstract` now uses full Title+Abstract directly).
 - For large `title_abstract` runs, tune async throughput with `LLM_SETTINGS["async_max_concurrency"]` and retry/backoff parameters in [config/user_orchestrator.py](config/user_orchestrator.py).
 - Use QC-only first, then full run; each run writes new timestamped outputs—no need to merge manually.

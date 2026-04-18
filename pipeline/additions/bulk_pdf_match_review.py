@@ -44,7 +44,7 @@ def _read_report_rows(path: Path) -> list[dict[str, str]]:
 def _targets_by_folder(target_root: Path) -> dict[str, matcher.FolderTarget]:
     """human readable hint: map folder path to target metadata for scoring."""
 
-    targets = matcher._load_targets(target_root, overwrite=True)
+    targets = matcher.load_targets(target_root, overwrite=True)
     return {str(t.folder.resolve()): t for t in targets}
 
 
@@ -90,7 +90,7 @@ def run(args: argparse.Namespace) -> int:
         print("[info] no report rows matched the requested filters.")
         return 0
 
-    candidates = matcher._load_candidates(source_root)
+    candidates = matcher.load_candidates(source_root)
     if not candidates:
         print("[error] no candidate PDFs found under source directory.")
         return 1
@@ -127,7 +127,7 @@ def run(args: argparse.Namespace) -> int:
 
             ranked: list[tuple[float, matcher.PdfCandidate, dict[str, float]]] = []
             for candidate in candidates:
-                score, signals = matcher._score(target, candidate)
+                score, signals = matcher.score_candidate(target, candidate)
                 ranked.append((score, candidate, signals))
             ranked.sort(key=lambda x: x[0], reverse=True)
 

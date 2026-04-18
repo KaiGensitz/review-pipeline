@@ -20,6 +20,9 @@ from config.user_orchestrator import (
     STAGE_RULES,
 )
 from pipeline.core.run_screening import run_pipeline
+from pipeline.additions.emissions_merge import (
+    merge_emissions_with_run_column as _merge_emissions_with_run_column_csvsafe,
+)
 from pipeline.additions.resource_usage import backfill_time_savings
 
 # Track whether every interactive prompt in this run received a "yes" response.
@@ -357,10 +360,9 @@ def _require_base_outputs(stage: str, run_label: str) -> dict[str, Path | None]:
 
     if not base.get("emissions"):
         print(
-            f"[retry] Cannot run retry: missing base CodeCarbon file for stage '{stage}' (run_label='{run_label}'). "
-            "Run the main screening for this sample with sustainability tracking enabled before retrying."
+            f"[retry] Base CodeCarbon file is missing for stage '{stage}' (run_label='{run_label}'). "
+            "Retry will continue; emissions merge/update will be skipped for this attempt."
         )
-        return {}
 
     return base
 
@@ -547,131 +549,15 @@ def _record_retry_manifest(
 
 
 def _merge_emissions_with_run_column(stage: str, run_label: str, attempt_index: int) -> dict[str, object] | None:
-    """human readable hint: keep one CodeCarbon CSV per run_label; append new rows with run=main/retry_N and report row numbers."""
+    """human readable hint: delegate CodeCarbon merge to the dedicated CSV-safe emissions helper module."""
 
     stage_root = Path(PATH_SETTINGS["output_root"]) / stage
-    sample_tag = run_label.replace("_sample", "") if run_label.endswith("_sample") else run_label
-    run_key = f"{sample_tag}_sample"
-    pattern = f"{stage}_{run_key}_codecarbon_emissions_*.csv"
-    files = sorted(stage_root.glob(pattern), key=lambda p: p.stat().st_mtime)
-    if not files:
-        return None
-
-    base_file = files[0]
-    latest_file = files[-1]
-
-    # If only one file exists (e.g., CodeCarbon reused the same file) and this is a retry,
-    # assign the first data row to main and the rest to the retry attempt so runs stay distinguishable.
-    if len(files) == 1 and attempt_index not in {None, 0}:
-        try:
-            with base_file.open("r", encoding="utf-8") as handle:
-                lines = handle.readlines()
-        except Exception:
-            return None
-        if not lines:
-            return None
-        headers = lines[0].strip().split(",")
-        if "run" not in headers:
-            proj_idx = headers.index("project_name") if "project_name" in headers else 0
-            headers.insert(proj_idx + 1, "run")
-        run_idx = headers.index("run")
-        rewritten = [",".join(headers) + "\n"]
-        for idx, row in enumerate(lines[1:]):
-            if not row.strip():
-                continue
-            cols = row.rstrip("\n").split(",")
-            run_value = "main" if idx == 0 else f"retry_{attempt_index}"
-            current = cols[run_idx] if len(cols) > run_idx else ""
-            if len(cols) <= run_idx:
-                cols.append(run_value)
-            elif idx == 0:
-                # Keep existing labels on the first row; only fill if empty.
-                if not current:
-                    cols[run_idx] = run_value
-            else:
-                # For retry rows, overwrite "main"/empty with the retry attempt but preserve any prior retry labels.
-                if not current or current == "main":
-                    cols[run_idx] = run_value
-            rewritten.append(",".join(cols) + "\n")
-        try:
-            with base_file.open("w", encoding="utf-8") as handle:
-                handle.writelines(rewritten)
-        except Exception:
-            return None
-        rows = [idx + 1 for idx, row in enumerate(rewritten[1:]) if row.strip() and row.split(",")[run_idx] == f"retry_{attempt_index}"]
-        return {"emissions_path": base_file, "emissions_rows": rows}
-
-    def _rewrite_with_run(path: Path, run_value: str, *, override_existing: bool) -> list[str]:
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                lines = handle.readlines()
-        except Exception:
-            return []
-        if not lines:
-            return []
-        headers = lines[0].strip().split(",")
-        run_idx = None
-        if "run" in headers:
-            run_idx = headers.index("run")
-        else:
-            proj_idx = headers.index("project_name") if "project_name" in headers else 0
-            headers.insert(proj_idx + 1, "run")
-            run_idx = proj_idx + 1
-
-        rewritten: list[str] = [",".join(headers) + "\n"]
-        for row in lines[1:]:
-            if not row.strip():
-                continue
-            cols = row.rstrip("\n").split(",")
-            current = cols[run_idx] if len(cols) > run_idx else ""
-            if len(cols) <= run_idx:
-                cols.append(run_value)
-            elif override_existing or not current:
-                cols[run_idx] = run_value
-            rewritten.append(",".join(cols) + "\n")
-
-        try:
-            with path.open("w", encoding="utf-8") as handle:
-                handle.writelines(rewritten)
-        except Exception:
-            return []
-        return rewritten
-
-    def _ensure_base_run_labels(path: Path, run_value: str) -> None:
-        """human readable hint: make sure every existing row carries a run label before merges."""
-
-        if not path.exists():
-            return
-        _rewrite_with_run(path, run_value, override_existing=False)
-
-    _ensure_base_run_labels(base_file, "main")
-
-    _rewrite_with_run(base_file, "main", override_existing=False)
-    if latest_file == base_file:
-        return {"emissions_path": base_file, "emissions_rows": []}
-
-    run_value = "main" if attempt_index in {None, 0} else f"retry_{attempt_index}"
-    latest_lines = _rewrite_with_run(latest_file, run_value, override_existing=True)
-    if not latest_lines:
-        return None
-
-    appended_rows: list[int] = []
-    try:
-        existing_lines = []
-        if base_file.exists():
-            with base_file.open("r", encoding="utf-8") as existing:
-                existing_lines = existing.readlines()
-        start_row = max(len(existing_lines) - 1, 0)
-        with base_file.open("a", encoding="utf-8") as out:
-            for idx, row in enumerate(latest_lines[1:], start=1):
-                out.write(row if row.endswith("\n") else row + "\n")
-                if row.strip():
-                    appended_rows.append(start_row + idx)
-        latest_file.unlink(missing_ok=True)
-    except Exception:
-        return None
-
-    return {"emissions_path": base_file, "emissions_rows": appended_rows}
+    return _merge_emissions_with_run_column_csvsafe(
+        stage_root=stage_root,
+        stage=stage,
+        run_label=run_label,
+        attempt_index=attempt_index,
+    )
 
 
 def _extract_summary_stats(path: Path) -> tuple[int, float, float, float, float]:
@@ -887,7 +773,279 @@ def _post_run_updates(stage: str, artifact: dict | None, attempt_index: int) -> 
     run_label = artifact.get("run_label") or "remaining_sample"
     emissions_info = _merge_emissions_with_run_column(stage, run_label, attempt_index)
     _update_index_from_artifact(stage, artifact, attempt_index)
+    # human readable hint: after a successful remaining run, write explicit qc+remaining total summaries.
+    if str(run_label) == "remaining_sample" and int(attempt_index or 0) == 0:
+        _write_combined_qc_remaining_totals(stage)
     return emissions_info
+
+
+def _latest_total_resource_entry(path: Path | None) -> dict[str, object] | None:
+    """human readable hint: read the last TOTAL row from a resource_usage JSONL file."""
+
+    if not path or not path.exists():
+        return None
+    latest: dict[str, object] | None = None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(payload, dict) and str(payload.get("paper_id")) == "TOTAL":
+                    latest = payload
+    except Exception:
+        return None
+    return latest
+
+
+def _safe_float(value: object) -> float:
+    """human readable hint: normalize numeric-like values for robust summary math."""
+
+    try:
+        if value is None:
+            return 0.0
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return 0.0
+            return float(text)
+        return float(str(value))
+    except Exception:
+        return 0.0
+
+
+def _summarize_codecarbon_csv(path: Path | None) -> dict[str, float]:
+    """human readable hint: sum key CodeCarbon numeric columns across all rows."""
+
+    totals = {
+        "row_count": 0.0,
+        "duration": 0.0,
+        "emissions": 0.0,
+        "energy_consumed": 0.0,
+        "cpu_energy": 0.0,
+        "gpu_energy": 0.0,
+        "ram_energy": 0.0,
+    }
+    if not path or not path.exists():
+        return totals
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                if not row:
+                    continue
+                totals["row_count"] += 1.0
+                totals["duration"] += _safe_float(row.get("duration"))
+                totals["emissions"] += _safe_float(row.get("emissions"))
+                totals["energy_consumed"] += _safe_float(row.get("energy_consumed"))
+                totals["cpu_energy"] += _safe_float(row.get("cpu_energy"))
+                totals["gpu_energy"] += _safe_float(row.get("gpu_energy"))
+                totals["ram_energy"] += _safe_float(row.get("ram_energy"))
+    except Exception:
+        return totals
+    return totals
+
+
+def _write_combined_qc_remaining_totals(stage: str) -> None:
+    """human readable hint: write explicit qc+remaining total files for resource usage and CodeCarbon."""
+
+    stage_root = Path(PATH_SETTINGS.get("output_root", "output")) / stage
+    stage_root.mkdir(parents=True, exist_ok=True)
+
+    qc_base = _latest_base_outputs(stage, "qc_sample")
+    rem_base = _latest_base_outputs(stage, "remaining_sample")
+
+    qc_resource = qc_base.get("resource")
+    rem_resource = rem_base.get("resource")
+    qc_emissions = qc_base.get("emissions")
+    rem_emissions = rem_base.get("emissions")
+
+    if not qc_resource or not rem_resource:
+        print("[summary] Skipping qc+remaining total files: missing qc or remaining resource_usage log.")
+        return
+
+    qc_total = _latest_total_resource_entry(qc_resource)
+    rem_total = _latest_total_resource_entry(rem_resource)
+    if not qc_total or not rem_total:
+        print("[summary] Skipping qc+remaining resource total file: TOTAL row not found in one of the logs.")
+        return
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H-%M-%S")
+
+    numeric_fields = [
+        "tokens_total",
+        "prompt_tokens",
+        "response_tokens",
+        "embedding_tokens",
+        "pdf_text_tokens",
+        "pdf_visual_tokens",
+        "total_runtime_seconds",
+        "paper_count",
+        "paper_seconds_total",
+        "human_minutes_estimate",
+        "time_saved_minutes",
+        "codecarbon_emissions_kg",
+        "codecarbon_energy_kwh",
+    ]
+    combined_numeric: dict[str, float] = {}
+    for field in numeric_fields:
+        combined_numeric[field] = _safe_float(qc_total.get(field)) + _safe_float(rem_total.get(field))
+
+    paper_count = int(combined_numeric.get("paper_count", 0.0))
+    total_runtime_seconds = combined_numeric.get("total_runtime_seconds", 0.0)
+    paper_seconds_total = combined_numeric.get("paper_seconds_total", 0.0)
+    human_minutes_estimate = combined_numeric.get("human_minutes_estimate", 0.0)
+
+    total_runtime_avg_seconds_per_paper = (total_runtime_seconds / paper_count) if paper_count else 0.0
+    llm_avg_seconds_per_paper = (paper_seconds_total / paper_count) if paper_count else 0.0
+    human_rate_min_per_paper = (human_minutes_estimate / paper_count) if paper_count else None
+    time_saved_percent = None
+    if human_minutes_estimate > 0:
+        time_saved_percent = 1.0 - ((total_runtime_seconds / 60.0) / human_minutes_estimate)
+
+    combined_resource_payload: dict[str, object] = {
+        "paper_id": "TOTAL_QC_PLUS_REMAINING",
+        "stage": stage,
+        "run_label": "qc_plus_remaining",
+        "tokens_total": int(combined_numeric.get("tokens_total", 0.0)),
+        "prompt_tokens": int(combined_numeric.get("prompt_tokens", 0.0)),
+        "response_tokens": int(combined_numeric.get("response_tokens", 0.0)),
+        "embedding_tokens": int(combined_numeric.get("embedding_tokens", 0.0)),
+        "pdf_text_tokens": int(combined_numeric.get("pdf_text_tokens", 0.0)),
+        "pdf_visual_tokens": int(combined_numeric.get("pdf_visual_tokens", 0.0)),
+        "codecarbon_emissions_kg": combined_numeric.get("codecarbon_emissions_kg", 0.0),
+        "codecarbon_energy_kwh": combined_numeric.get("codecarbon_energy_kwh", 0.0),
+        "total_runtime_seconds": total_runtime_seconds,
+        "total_runtime_avg_seconds_per_paper": total_runtime_avg_seconds_per_paper,
+        "paper_count": paper_count,
+        "paper_seconds_total": paper_seconds_total,
+        "llm_decision_avg_seconds_per_paper": llm_avg_seconds_per_paper,
+        "human_rate_min_per_paper": human_rate_min_per_paper,
+        "human_minutes_estimate": human_minutes_estimate,
+        "time_saved_minutes": combined_numeric.get("time_saved_minutes", 0.0),
+        "time_saved_percent": time_saved_percent,
+        "source_resource_logs": {
+            "qc_sample": str(qc_resource),
+            "remaining_sample": str(rem_resource),
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    combined_resource_path = stage_root / f"{stage}_qc_plus_remaining_total_resource_usage_{timestamp}.log"
+    try:
+        with combined_resource_path.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(combined_resource_payload, ensure_ascii=False) + "\n")
+        print(f"[summary] Combined resource totals written: {combined_resource_path}")
+    except Exception as exc:
+        print(f"[summary] Could not write combined resource totals: {exc}")
+
+    if not qc_emissions or not rem_emissions:
+        print("[summary] Skipping qc+remaining CodeCarbon total file: missing qc or remaining emissions CSV.")
+        return
+
+    qc_em_totals = _summarize_codecarbon_csv(qc_emissions)
+    rem_em_totals = _summarize_codecarbon_csv(rem_emissions)
+    total_emissions_kg = qc_em_totals["emissions"] + rem_em_totals["emissions"]
+    total_energy_kwh = qc_em_totals["energy_consumed"] + rem_em_totals["energy_consumed"]
+    total_duration_s = qc_em_totals["duration"] + rem_em_totals["duration"]
+    total_intensity_g_per_kwh = (total_emissions_kg * 1000.0 / total_energy_kwh) if total_energy_kwh > 0 else None
+
+    combined_emissions_path = stage_root / f"{stage}_qc_plus_remaining_total_codecarbon_emissions_{timestamp}.csv"
+    try:
+        with combined_emissions_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=[
+                    "stage",
+                    "run_scope",
+                    "qc_emissions_path",
+                    "remaining_emissions_path",
+                    "qc_rows",
+                    "remaining_rows",
+                    "total_rows",
+                    "qc_duration_seconds",
+                    "remaining_duration_seconds",
+                    "total_duration_seconds",
+                    "qc_emissions_kg",
+                    "remaining_emissions_kg",
+                    "total_emissions_kg",
+                    "qc_energy_kwh",
+                    "remaining_energy_kwh",
+                    "total_energy_kwh",
+                    "total_carbon_intensity_g_per_kwh",
+                    "timestamp",
+                ],
+            )
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "stage": stage,
+                    "run_scope": "qc_plus_remaining",
+                    "qc_emissions_path": str(qc_emissions),
+                    "remaining_emissions_path": str(rem_emissions),
+                    "qc_rows": int(qc_em_totals["row_count"]),
+                    "remaining_rows": int(rem_em_totals["row_count"]),
+                    "total_rows": int(qc_em_totals["row_count"] + rem_em_totals["row_count"]),
+                    "qc_duration_seconds": qc_em_totals["duration"],
+                    "remaining_duration_seconds": rem_em_totals["duration"],
+                    "total_duration_seconds": total_duration_s,
+                    "qc_emissions_kg": qc_em_totals["emissions"],
+                    "remaining_emissions_kg": rem_em_totals["emissions"],
+                    "total_emissions_kg": total_emissions_kg,
+                    "qc_energy_kwh": qc_em_totals["energy_consumed"],
+                    "remaining_energy_kwh": rem_em_totals["energy_consumed"],
+                    "total_energy_kwh": total_energy_kwh,
+                    "total_carbon_intensity_g_per_kwh": total_intensity_g_per_kwh,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        print(f"[summary] Combined CodeCarbon totals written: {combined_emissions_path}")
+    except Exception as exc:
+        print(f"[summary] Could not write combined CodeCarbon totals: {exc}")
+
+
+def _auto_generate_qc_mismatch_csv(stage: str, artifact: dict[str, object] | None) -> None:
+    """human readable hint: automatically build an explicit mismatch CSV after QC validation completes."""
+
+    stage_root = Path(PATH_SETTINGS.get("output_root", "output")) / stage
+    alignments = sorted(
+        stage_root.glob(f"{stage}_qc_sample_validation_alignment*.csv"),
+        key=lambda path: path.stat().st_mtime,
+    )
+    if not alignments:
+        print("[qc] Validation alignment CSV was not found; mismatch CSV was not generated.")
+        return
+
+    alignment_path = alignments[-1]
+    eligibility_path: Path | None = None
+
+    if artifact and str(artifact.get("run_label") or "") == "qc_sample":
+        candidate = artifact.get("eligibility_path")
+        if isinstance(candidate, (str, os.PathLike)):
+            maybe_path = Path(candidate)
+            if maybe_path.exists():
+                eligibility_path = maybe_path
+
+    if eligibility_path is None:
+        fallback = _latest_base_outputs(stage, "qc_sample").get("eligibility")
+        if isinstance(fallback, Path) and fallback.exists():
+            eligibility_path = fallback
+
+    from pipeline.additions.qc_mismatch_report import build_mismatch_sheet
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H-%M")
+    output_path = stage_root / f"{stage}_qc_sample_validation_mismatch_{timestamp}.csv"
+    mismatch_count, out_path = build_mismatch_sheet(
+        alignment_path,
+        output_path,
+        eligibility_path=eligibility_path,
+    )
+    print(f"[qc] Explicit mismatch CSV written: {out_path} (rows={mismatch_count}).")
 
 
 def _next_retry_attempt(stage: str, run_label: str) -> int:
@@ -1071,6 +1229,61 @@ def _error_ids_by_type(error_log_path: Path, blocked_types: set[str]) -> set[str
     return blocked_ids
 
 
+def _execute_retry_run(
+    *,
+    stage: str,
+    run_label: str,
+    retry_csv: Path,
+    attempt_map: dict[str, int],
+) -> dict[str, object] | None:
+    """human readable hint: run one retry attempt with consistent outputs, manifest writing, and post-run updates."""
+
+    if not retry_csv.exists():
+        print(f"[retry] Retry CSV missing: {retry_csv}. Aborting retry step.")
+        return None
+
+    base_outputs = _require_base_outputs(stage, run_label)
+    if not base_outputs:
+        return None
+
+    retry_run_dir = _prepare_isolated_retry_run_dir(stage, retry_csv)
+    if not retry_run_dir:
+        print("[retry] Could not prepare isolated retry run folder. Aborting retry step.")
+        return None
+
+    attempt_for_run = max(attempt_map.values()) if attempt_map else _next_retry_attempt(stage, run_label)
+    retry_out = _retry_output_paths(stage, run_label, attempt_for_run)
+    print(f"[retry] Created retry CSV at {retry_csv}. Running re-screen (QC disabled for retry)...")
+
+    _run_pipeline_guarded(
+        stage=stage,
+        csv_dir=str(retry_run_dir),
+        pdf_root=_retry_pdf_root(stage),
+        qc_enabled=False,
+        confirm_sampling=False,
+        quiet=False,
+        eligibility_output=retry_out.get("eligibility"),
+        chunks_output=retry_out.get("chunks"),
+        text_output=retry_out.get("text"),
+        error_log=retry_out.get("error"),
+        resource_log=retry_out.get("resource"),
+        run_label_override=run_label,
+        mark_failure=False,
+    )
+
+    artifact = _last_artifact_dict()
+    if not isinstance(artifact, dict) or not artifact.get("success", False):
+        print("[retry] Re-screen failed. Check the retry error log for details.")
+        return None
+
+    emissions_info = _post_run_updates(stage, artifact, attempt_for_run)
+    _record_retry_manifest(artifact, stage, attempt_map, retry_csv, emissions_info)
+
+    manifest_path = Path(PATH_SETTINGS.get("output_root", "output")) / stage / f"{stage}_retry_manifest.jsonl"
+    print(f"[retry] Re-screen completed. Outputs kept separate; manifest updated at {manifest_path}.")
+    return artifact
+
+
 def _prompt_retry_if_needed(stage: str, artifact: dict | None, depth: int = 0) -> None:
     """Prompt for re-screening when errors are present for this stage."""
     if depth >= 2:
@@ -1154,61 +1367,22 @@ def _prompt_retry_if_needed(stage: str, artifact: dict | None, depth: int = 0) -
         print("[retry] Could not locate a source CSV for retry. Aborting retry step.")
         return
 
-    base_outputs = _require_base_outputs(stage, run_label)
-    if not base_outputs:
-        return
-
     target_dir = Path(PATH_SETTINGS["csv_dir"]) / "retry_runs"
     retry_csv = _write_retry_csv(source_csv, target_dir, candidates, stage, run_label)
     if not retry_csv:
         return
-    retry_run_dir = _prepare_isolated_retry_run_dir(stage, retry_csv)
-    if not retry_run_dir:
-        print("[retry] Could not prepare isolated retry run folder. Aborting retry step.")
+    retry_artifact_dict = _execute_retry_run(
+        stage=stage,
+        run_label=run_label,
+        retry_csv=retry_csv,
+        attempt_map=attempt_map,
+    )
+    if not isinstance(retry_artifact_dict, dict):
         return
 
-    attempt_for_run = max(attempt_map.values()) if attempt_map else 1
-    out_paths = _retry_output_paths(stage, run_label, attempt_for_run)
-    print(f"[retry] Created retry CSV at {retry_csv}. Running re-screen (QC disabled for retry)...")
-    retry_artifact = run_pipeline(
-        stage=stage,
-        csv_dir=str(retry_run_dir),
-        pdf_root=_retry_pdf_root(stage),
-        qc_enabled=False,
-        confirm_sampling=False,
-        quiet=False,
-        eligibility_output=out_paths.get("eligibility"),
-        chunks_output=out_paths.get("chunks"),
-        text_output=out_paths.get("text"),
-        error_log=out_paths.get("error"),
-        resource_log=out_paths.get("resource"),
-        sustainability_tracking=True,
-        run_label_override=run_label,
-    )
-
-    if isinstance(retry_artifact, dict):
-        _PROMPT_STATE["last_artifact"] = retry_artifact
-        success = bool(retry_artifact.get("success", False))
-    else:
-        success = bool(retry_artifact)
-
-    if success:
-        retry_artifact_dict = retry_artifact if isinstance(retry_artifact, dict) else _last_artifact_dict()
-        if not isinstance(retry_artifact_dict, dict):
-            print("[retry] No retry artifact available; manifest not updated.")
-            return
-        emissions_info = _post_run_updates(stage, retry_artifact_dict, attempt_for_run)
-
-        stage_root = Path(PATH_SETTINGS.get("output_root", "output")) / stage
-        manifest_path = stage_root / f"{stage}_retry_manifest.jsonl"
-        _record_retry_manifest(retry_artifact_dict, stage, attempt_map, retry_csv, emissions_info)
-        print(f"[retry] Re-screen completed. Outputs kept separate; manifest updated at {manifest_path}.")
-
-        # human readable hint: if the retry still has errors, offer another retry prompt instead of stopping silently.
-        if retry_artifact_dict.get("error_log_path"):
-            _prompt_retry_if_needed(stage, retry_artifact_dict, depth=depth + 1)
-    else:
-        print("[retry] Re-screen failed. Check the retry error log for details.")
+    # human readable hint: if the retry still has errors, offer another retry prompt instead of stopping silently.
+    if retry_artifact_dict.get("error_log_path"):
+        _prompt_retry_if_needed(stage, retry_artifact_dict, depth=depth + 1)
 
 
 def _ensure_csv_inputs(csv_dir: Path) -> bool:
@@ -1406,6 +1580,9 @@ def _run_validation() -> bool:
         _PROMPT_STATE["validation_ran"] = False
         return False
 
+    artifact_after_validation = _last_artifact_dict()
+    _auto_generate_qc_mismatch_csv(CURRENT_STAGE, artifact_after_validation)
+
     _PROMPT_STATE["validation_ran"] = True
     return True
 def _run_qc_loop(stage: str, sample_rate: float, quiet: bool = False) -> bool:
@@ -1522,30 +1699,14 @@ class MainWorkflow:
                             print("[retry] Could not build a filtered retry CSV; aborting retry step.")
                             return
                         retry_csv = filtered_retry_csv
-                        retry_run_dir = _prepare_isolated_retry_run_dir(stage, retry_csv)
-                        if not retry_run_dir:
-                            print("[retry] Could not prepare isolated retry run folder; aborting retry step.")
-                            return
-                        retry_out = _retry_output_paths(stage, run_label, attempt_for_run)
-                        _run_pipeline_guarded(
+                        artifact = _execute_retry_run(
                             stage=stage,
-                            csv_dir=str(retry_run_dir),
-                            pdf_root=_retry_pdf_root(stage),
-                            qc_enabled=False,
-                            confirm_sampling=False,
-                            quiet=False,
-                            eligibility_output=retry_out.get("eligibility"),
-                            chunks_output=retry_out.get("chunks"),
-                            text_output=retry_out.get("text"),
-                            error_log=retry_out.get("error"),
-                            resource_log=retry_out.get("resource"),
-                            run_label_override=run_label,
+                            run_label=run_label,
+                            retry_csv=retry_csv,
+                            attempt_map=attempt_map,
                         )
-                        artifact = _last_artifact_dict()
-                        emissions_info = _post_run_updates(stage, artifact, attempt_for_run)
-                        _record_retry_manifest(artifact, stage, attempt_map, retry_csv, emissions_info)
-                        manifest_path = Path(PATH_SETTINGS.get("output_root", "output")) / stage / f"{stage}_retry_manifest.jsonl"
-                        print(f"[retry] Outputs kept separate; manifest updated at {manifest_path}.")
+                        if not isinstance(artifact, dict):
+                            return
                         _prompt_retry_if_needed(stage, artifact)
 
                         if not _retry_csv_needed(retry_csv, stage):

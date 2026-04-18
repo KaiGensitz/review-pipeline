@@ -201,14 +201,14 @@ Data-extraction validation additionally writes run-level exports:
 
 - Auto-prompt appears after `main.py` run.
 - Manual command: `python backup_to_github.py`
-- Backup staging is restricted to tracked code/document files (no blanket artifact staging).
+- Backup uses `git add -A`; `.gitignore` keeps local artifact trees (`input/`, `output/`, `papers/`, `_tests/`, etc.) out of commits by default.
 
 ## Notes
 
 - Change only [config/user_orchestrator.py](config/user_orchestrator.py) for daily runs.
 - Total context budget is model-configurable in `LLM_SETTINGS["context_window_total_tokens"]` (input + output).
 - Keep `LLM_SETTINGS["max_tokens"]` lower than `context_window_total_tokens`; effective prompt budget is computed as `context_window_total_tokens - max_tokens`.
-- Balanced optimization profile defaults are now set to: `SCREENING_DEFAULTS.top_k=8`, `EMBEDDING_SETTINGS.chunk_size=24`, `LLM_SETTINGS.async_max_concurrency=18`.
+- Balanced optimization profile defaults are now set to: `SCREENING_DEFAULTS.top_k=10`, `EMBEDDING_SETTINGS.chunk_size=20`, `LLM_SETTINGS.async_max_concurrency=18`.
 - Async LLM controls are in `LLM_SETTINGS`: `async_max_concurrency`, `async_max_retries`, `async_backoff_base_seconds`, `async_backoff_max_seconds`, `async_jitter_seconds`.
 - Stage toggles for async processing: `async_enable_full_text`, `async_enable_data_extraction`.
 - Async heartbeat log interval: `async_heartbeat_seconds` (default `30`).

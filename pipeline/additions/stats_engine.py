@@ -378,6 +378,8 @@ def _parse_ai_decision(val) -> Tuple[Optional[int], str]:
 def _load_ai() -> tuple[pd.DataFrame, Path]:
     """Aggregate AI QC decisions across main and retry runs, keeping latest per paper."""
 
+    empty_columns = ["paper_id", "ai_decision", "ai_reason", "source_path"]
+
     # human readable hint: gather all QC eligibility JSONL files (main + retries) and prefer newest per paper_id.
     stage_files: list[Path] = []
     patterns = [
@@ -434,7 +436,8 @@ def _load_ai() -> tuple[pd.DataFrame, Path]:
 
     records = list(latest_by_paper.values())
     if not records:
-        return pd.DataFrame(), stage_files[-1]
+        # human readable hint: preserve expected columns so downstream merge logic remains stable on empty AI sets.
+        return pd.DataFrame(columns=empty_columns), stage_files[-1]
     return pd.DataFrame(records), stage_files[-1]
 
 
@@ -444,6 +447,13 @@ def _merge(ai: pd.DataFrame, human: pd.DataFrame) -> pd.DataFrame:
     human = human.copy()
     ai = ai.copy()
     ai.rename(columns={"paper_id": "covidence_id"}, inplace=True)
+
+    if "covidence_id" not in ai.columns:
+        ai["covidence_id"] = pd.Series(dtype="string")
+    if "ai_decision" not in ai.columns:
+        ai["ai_decision"] = pd.Series(dtype="float64")
+    if "ai_reason" not in ai.columns:
+        ai["ai_reason"] = pd.Series(dtype="string")
 
     merged = human.merge(ai, on="covidence_id", how="inner", suffixes=("_human", "_ai"))
     if merged["covidence_id"].duplicated().any():
