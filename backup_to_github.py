@@ -1,4 +1,4 @@
-"""Direct run: python backup_to_github.py"""
+"""Direct run: `python backup_to_github.py`"""
 
 import subprocess
 import sys
