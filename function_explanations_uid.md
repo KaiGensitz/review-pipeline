@@ -560,10 +560,10 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: build stage artifact filename paths for per-paper compact machine outputs.
 
 #### PaperScreeningPipeline._metadata_snapshot_for_folder(folder_path, fallback)
-- Human readable hint: load canonical metadata from metadata.json for synchronized sidecar exports.
+- Human readable hint: load canonical metadata from per-stage artifact files for synchronized sidecar exports.
 
 #### PaperScreeningPipeline._write_compact_human_normalized_text(folder_path, metadata_snapshot, normalized_text)
-- Human readable hint: write human-checkable normalized text with metadata copied from metadata.json.
+- Human readable hint: write human-checkable normalized text with metadata copied from stage artifact metadata.
 
 #### PaperScreeningPipeline._persist_compact_text_artifacts(paper, pdf_path, cache_key, normalized_text, normalized_pages)
 - Human readable hint: persist per-paper compact machine artifacts and synchronized normalized text sidecar.

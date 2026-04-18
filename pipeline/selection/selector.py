@@ -10,7 +10,7 @@ from typing import cast
 
 import numpy as np
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import OpenAI, PermissionDeniedError
 
 from config.user_orchestrator import EMBEDDING_SETTINGS, require_setting
 
@@ -126,7 +126,14 @@ class EmbeddingBackend:
 
 		for start in range(0, len(texts), self.batch_size):
 			batch = texts[start : start + self.batch_size]
-			response = self._client.embeddings.create(model=str(gpustack_embedding_model), input=batch)
+			try:
+				response = self._client.embeddings.create(model=str(gpustack_embedding_model), input=batch)
+			except PermissionDeniedError as exc:
+				raise RuntimeError(
+					"Embedding API access denied (HTTP 403). "
+					f"base_url={gpustack_base_url}, model={gpustack_embedding_model}. "
+					"Confirm University of Bern network/VPN access and verify LLM_API_KEY has embedding permissions."
+				) from exc
 			batch_embeddings = [item.embedding for item in response.data]
 			embeddings.extend(batch_embeddings)
 

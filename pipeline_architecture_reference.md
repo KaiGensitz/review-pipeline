@@ -18,6 +18,8 @@ This document describes how the pipeline is implemented and what guarantees are 
 2. Cross-check behavior against validation artifacts and runtime logs.
 3. Continue to governance guidance for publication-facing commitments.
 
+Cross-reference: for an operator-facing 1-X runtime sequence (including exactly when parsing, embedding scoring, LLM calls, and decision writes occur), see [review_procedure.md](review_procedure.md) section "Exact Runtime Sequence (1-X)".
+
 ## Implemented Guarantees
 
 - Deterministic quality control (QC) sample generation per stage (`ceil(sample_rate * planned_papers)`).
@@ -41,7 +43,7 @@ This document describes how the pipeline is implemented and what guarantees are 
 - Full-text PDF extraction now uses a hybrid backend (pdfplumber primary + PyPDF fallback) and strips repeated header/footer lines.
 - Full-text per-paper artifact persistence supports `full` and `compact` modes (`compact` default).
 - Compact mode writes one machine artifact (`full_text_artifact.json`) plus one human-readable file (`full_text_normalized.txt`) and removes legacy normalized sidecars.
-- In compact mode, the metadata block written to `full_text_normalized.txt` is synchronized from `metadata.json`.
+- In compact mode, the metadata block written to `full_text_normalized.txt` is synchronized from `full_text_artifact.json` -> `metadata`.
 - Full mode retains legacy normalized sidecars (`*_normalized_text.txt`, `*_normalized_pages.json`, `*_normalized_meta.json`).
 - Full-text sentence assembly now removes low-information sentence fragments (table/citation noise) before chunk windows are formed.
 - Full-text chunk ranking now uses a hybrid score (embedding relevance + method/triad lexical evidence + readability + sentence completeness) to prioritize richer evidence blocks.

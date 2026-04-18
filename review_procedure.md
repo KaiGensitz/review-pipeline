@@ -52,6 +52,49 @@ Every stage follows two passes:
 
 This is enforced by terminal prompts in `main.py`.
 
+## Exact Runtime Sequence (1-X)
+
+Use this section when you need to know exactly when parsing, embeddings, LLM calls, and decision files happen.
+
+### A) Operator flow with optional QC branch
+
+1. Run `main.py`.
+2. Preflight checks run first: API key present, stage valid, required CSVs exist, tokenizer resources available, interactive terminal available.
+3. If a pending retry CSV exists, you can run retry first. If yes, retry runs before any new QC/main pass.
+4. Stage preflight runs:
+	- `full_text`: first run can be setup-only (`split_only=True`) to create `input/per_paper_full_text/`; then you upload one PDF per folder.
+	- `data_extraction`: setup-only pass creates/refreshes `input/per_paper_data_extraction/`.
+5. If `QC_ENABLED=True`, QC-only pass runs first.
+6. After QC-only pass, validation prompts run in order:
+	- reviewer-minutes confirmation,
+	- validation execution (`python -m pipeline.additions.stats_engine`),
+	- approval to continue.
+7. If QC validation is accepted, remaining-pass screening starts.
+8. If `QC_ENABLED=False`, the run skips QC branch and goes directly to remaining-pass screening.
+9. At end of any pass, unresolved errors can trigger retry prompts. Retry outputs are written separately and tracked in the retry manifest.
+
+### B) Per-paper technical call chain (screening run)
+
+1. `PaperScreeningPipeline.run()` builds the planned paper list and opens output writers.
+2. For each paper, `_process_paper_async()` is executed (sync wrapper or async batch, depending on stage/config).
+3. `_prepare_chunks()` is called.
+4. Parsing happens inside `_prepare_chunks()` only for `full_text`/`data_extraction`:
+	- `_load_pdf_text()` resolves the paper PDF and extracts normalized text.
+	- If `USE_ADVANCED_PDF_PARSER=1`, extraction uses `extract_markdown_from_pdf_with_level()` with parser order (pymupdf4llm primary -> Docling on parser failure -> OCR only when needed).
+	- Parser provenance is stored as `parser_level` in each paper's `full_text_artifact.json` (compact artifact mode).
+5. Chunking runs after parsing (`chunk_fulltext_sentences`). If no usable text/chunks are produced, LLM is skipped and an error is logged.
+6. Embedding-based retrieval is called next via `_select_chunks_with_rescue()`.
+7. Inside retrieval, `SelectionEngine.select()` embeds candidate chunk texts (non-title chunks) and scores them against POS/NEG centroids from the stage knowledge base.
+8. Prompt assembly runs after retrieval (`_format_chunks_for_prompt()`), using selected evidence chunks.
+9. LLM call happens after prompt assembly via `_call_llm_async()` (or sync variant), with retry/backoff and schema validation.
+10. Decision is sanitized/validated, then recorded in memory for the current paper.
+11. Decision/output visibility timing:
+	- Eligibility JSONL: appended to buffer immediately for that paper, flushed to disk every 64 records (or at final run flush).
+	- Selected chunks: written per paper in the same loop iteration.
+	- Readable text summary: written in the same loop iteration.
+	- Run-level summaries/index rows: written at finalization after loop completion.
+12. After all papers are processed, remaining buffers are flushed, summary rows are appended, and stage index files are updated.
+
 ## Stage 1: Title Abstract
 
 1. Import screen CSV to `input/` (`*_screen_csv_*.csv`).

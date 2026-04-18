@@ -14,6 +14,7 @@ from config.user_orchestrator import (
     PATH_SETTINGS,
     LLM_API_KEY,
     LLM_MODEL,
+    EMBED_MODEL,
     QC_ENABLED,
     QC_SAMPLE_RATE,
     STAGE_RULES,
@@ -1278,19 +1279,55 @@ def _missing_pdf_folders(base_dir: Path) -> list[str]:
     return missing
 
 
-def _ensure_nltk_tokenizers() -> None:
-    """Download NLTK sentence tokenizers once so sentence splitting works.
+def _enforce_no_runtime_model_downloads() -> None:
+    """Force HF/Transformers offline mode during screening unless explicitly overridden.
 
-    Note: required for consistent sentence chunking.
+    This avoids surprise model downloads while papers are being screened.
     """
-    try:
-        nltk.data.find("tokenizers/punkt")
-    except LookupError:
-        nltk.download("punkt", quiet=True)
-    try:
-        nltk.data.find("tokenizers/punkt_tab")
-    except LookupError:
-        nltk.download("punkt_tab", quiet=True)
+
+    allow_runtime_downloads = str(os.getenv("ALLOW_RUNTIME_MODEL_DOWNLOADS", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if allow_runtime_downloads:
+        return
+
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
+
+def _ensure_nltk_tokenizers() -> bool:
+    """Validate NLTK tokenizers are present without downloading during screening.
+
+    Returns:
+        True when required tokenizer resources are available, else False.
+    """
+
+    required_resources = (
+        ("tokenizers/punkt", "punkt"),
+        ("tokenizers/punkt_tab", "punkt_tab"),
+    )
+    missing_packages: list[str] = []
+
+    for resource_path, package_name in required_resources:
+        try:
+            nltk.data.find(resource_path)
+        except LookupError:
+            missing_packages.append(package_name)
+
+    if not missing_packages:
+        return True
+
+    missing_text = ", ".join(missing_packages)
+    print(f"[setup] Missing NLTK tokenizer data: {missing_text}")
+    print("[setup] Runtime downloads are disabled during screening runs.")
+    print(
+        "[next] Preload runtime assets once, then rerun: "
+        ".venv\\Scripts\\python -m pipeline.additions.preload_runtime_assets"
+    )
+    return False
 
 
 def _prompt_yes_no(message: str) -> bool:
@@ -1441,7 +1478,7 @@ class MainWorkflow:
         csv_dir = self.csv_dir
         sample_rate = self.sample_rate
 
-        print(f"[main] Stage: {stage} | Model: {LLM_MODEL}")
+        print(f"[main] Stage: {stage} | LLM: {LLM_MODEL} | Embedding: {EMBED_MODEL}")
 
         if stage not in STAGE_RULES:
             print(f"[error] Unknown CURRENT_STAGE='{stage}'. Choose from {sorted(STAGE_RULES)}.")
@@ -1450,7 +1487,10 @@ class MainWorkflow:
         if not _ensure_csv_inputs(csv_dir):
             return
 
-        _ensure_nltk_tokenizers()
+        _enforce_no_runtime_model_downloads()
+
+        if not _ensure_nltk_tokenizers():
+            return
 
         if not sys.stdin.isatty():
             print("[error] QC confirmation requires an interactive terminal. Rerun in an interactive session.")

@@ -48,7 +48,7 @@ This document lists implementation-level checks to verify run readiness and outp
 - Per-paper full_text artifacts depend on `SCREENING_DEFAULTS["artifact_mode"]`:
   - `compact` (default): writes `full_text_artifact.json` and `full_text_normalized.txt`
   - `full`: writes legacy normalized sidecars (`*_normalized_text.txt`, `*_normalized_pages.json`, `*_normalized_meta.json`)
-- In compact mode, verify the metadata block in `full_text_normalized.txt` matches `metadata.json`.
+- In compact mode, verify the metadata block in `full_text_normalized.txt` matches `full_text_artifact.json` -> `metadata`.
 - Full-text retrieval ranking now includes chunk completeness/readability; check `selection_trace.target_chunk_sentence_count`, `selection_trace.selected_sentence_count_min`, and `selection_trace.selected_sentence_count_mean` for context depth.
 - Selected chunks include per-chunk certainty metrics (`relevance_score`, `retrieval_rank`, `certainty_percentile`, `certainty_label`, `selection_sources`) for human audit.
 - Eligibility diagnostics include selected-chunk quality/coverage summaries (`selected_score_stats`, `selected_page_coverage`, `selection_trace`).
@@ -139,7 +139,7 @@ Expected outputs:
 - `..._resource_usage_...log`
 - validation files (`alignment`, `stats_report`, `matrix`)
 - per-paper files in `input/per_paper_full_text/<paper_folder>/`:
-  - always: `metadata.json` and one PDF
+  - always: `full_text_artifact.json` and one PDF
   - compact mode (default): `full_text_artifact.json`, `full_text_normalized.txt`
   - optional in compact mode: `full_text_selected_chunks.jsonl` only when `compact_keep_legacy_selected_chunks=True`
   - full mode: `*_normalized_text.txt`, `*_normalized_pages.json`, `*_normalized_meta.json`

@@ -12,6 +12,7 @@ import asyncio
 import csv
 import hashlib
 import json
+import logging
 import math
 import os
 from queue import Queue
@@ -24,7 +25,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Generator, Iterable, Mapping, Tuple, TextIO
+from typing import Generator, Iterable, Mapping, Tuple, TextIO, cast
 from typing import Any, Literal
 from statistics import mean, median, pstdev
 
@@ -42,6 +43,13 @@ from pipeline.integrations.embedding_utils import (
     detect_language,
     detect_language_code,
     normalize_extracted_text,
+)
+from pipeline.selection.pdf_parser import (
+    extract_markdown_from_pdf_with_level,
+    PARSER_LEVEL_DOCLING_SUCCESS,
+    PARSER_LEVEL_PYMUPDF_FALLBACK,
+    PARSER_LEVEL_OCR_SUCCESS,
+    PARSER_LEVEL_LOW_DENSITY,
 )
 from pipeline.integrations.llm_client import OpenAIResponder
 from config.user_orchestrator import (
@@ -916,6 +924,18 @@ CANONICAL_FIELDS = [
 ]
 
 
+class _SplitOnlySelectionEngineStub:
+    """Guard object used when split_only prep mode intentionally skips embedding setup."""
+
+    def select(
+        self,
+        chunks: list[dict],
+        top_k: int | None,
+        score_threshold: float | None = None,
+    ) -> tuple[list[dict], list[float], dict | None]:
+        raise RuntimeError("Selection engine is unavailable in split_only preparation mode.")
+
+
 class PaperScreeningPipeline:
     def __init__(
         self,
@@ -951,6 +971,7 @@ class PaperScreeningPipeline:
         quiet: bool = False,
         summary_to_console: bool = True,
         artifact_mode: str | None = None,
+        use_advanced_pdf_parser: bool | None = None,
     ) -> None:
         """
         Initialize the screening/extraction pipeline with configuration.
@@ -1001,6 +1022,32 @@ class PaperScreeningPipeline:
         self.artifact_mode = mode_normalized if mode_normalized in {"full", "compact"} else "full"
         self.compact_keep_legacy_selected_chunks = bool(
             SCREENING_DEFAULTS.get("compact_keep_legacy_selected_chunks", False)
+        )
+        if use_advanced_pdf_parser is None:
+            self.use_advanced_pdf_parser = str(os.getenv("USE_ADVANCED_PDF_PARSER", "0")).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+        else:
+            self.use_advanced_pdf_parser = bool(use_advanced_pdf_parser)
+        self._fulltext_preparse_enabled = (
+            self.stage == "full_text"
+            and str(os.getenv("FULLTEXT_PREPARSE_BEFORE_SCREENING", "1")).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+        )
+        self._fulltext_preparse_log_each_paper = (
+            str(os.getenv("FULLTEXT_PREPARSE_LOG_EACH_PAPER", "1")).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
         )
         self.language_setting = str(EMBEDDING_SETTINGS.get("data_language", "en")) or "en"
         self._detect_language = detect_language
@@ -1116,15 +1163,20 @@ class PaperScreeningPipeline:
         self._monitoring_kb_pos_count = int(monitoring_signal_config.get("kb_pos_count") or 0)
         self._monitoring_kb_neg_count = int(monitoring_signal_config.get("kb_neg_count") or 0)
 
-        if self.selection_engine is None:
-            self.selection_engine = SelectionEngine(
-                examples=kb_examples,
-                batch_size=self.batch_size,
-                always_include_kinds=self._always_include_kinds,
-                embedder=self.embedder,
-            )
-
-        self.selector = self.selection_engine
+        skip_selector_init = self.split_only and self.stage in {"full_text", "data_extraction"}
+        if skip_selector_init:
+            self.selector = cast(SelectionEngine, _SplitOnlySelectionEngineStub())
+        else:
+            active_selection_engine = self.selection_engine
+            if active_selection_engine is None:
+                active_selection_engine = SelectionEngine(
+                    examples=kb_examples,
+                    batch_size=self.batch_size,
+                    always_include_kinds=self._always_include_kinds,
+                    embedder=self.embedder,
+                )
+                self.selection_engine = active_selection_engine
+            self.selector = cast(SelectionEngine, active_selection_engine)
 
     @staticmethod
     def _sha256_text(value: str) -> str:
@@ -1220,6 +1272,18 @@ class PaperScreeningPipeline:
         self.chunks_output_path.parent.mkdir(parents=True, exist_ok=True)
         self.text_output_path.parent.mkdir(parents=True, exist_ok=True)
 
+        start_time = time.time()
+        tracking_started = False
+        if self.sustainability_tracking:
+            self.resource_tracker.start_run()
+            tracking_started = True
+
+        def _finish_tracking_if_started() -> None:
+            if not tracking_started:
+                return
+            self._total_runtime_seconds = max(0.0, time.time() - start_time)
+            self.resource_tracker.stop_run(self._total_runtime_seconds, self._paper_count)
+
         if not self.quiet:
             if self.split_only:
                 print(f"[prep] Creating per-paper folders from: {self.csv_dir.resolve()}")
@@ -1244,6 +1308,7 @@ class PaperScreeningPipeline:
                         print(f"  - {name}")
                 elif not missing and not self.quiet:
                     print("[prep] Done. PDFs found in all folders. Rerun main.py to start screening.")
+                _finish_tracking_if_started()
                 return False
         elif self.stage == "data_extraction":
             self._materialize_data_extraction_subset()
@@ -1257,12 +1322,14 @@ class PaperScreeningPipeline:
                         print(f"  - {name}")
                 elif not missing and not self.quiet:
                     print("[prep] Done. PDFs found in all folders. Rerun main.py to start screening.")
+                _finish_tracking_if_started()
                 return False
 
         planned_papers = self._collect_planned_papers()
         if not planned_papers:
             if not self.quiet:
                 print("[progress] No papers to process")
+            _finish_tracking_if_started()
             return False
 
         total_input_rows = len(planned_papers)
@@ -1277,6 +1344,7 @@ class PaperScreeningPipeline:
                 if not planned_papers:
                     if not self.quiet:
                         print("[qc] QC-only mode selected but no QC papers found; aborting run.")
+                    _finish_tracking_if_started()
                     return False
                 total_planned = len(planned_papers)
             if not self.confirm_sampling:
@@ -1286,6 +1354,7 @@ class PaperScreeningPipeline:
                         print(
                             "[qc] QC screening pending. Review the QC files and rerun main.py to continue."
                         )
+                    _finish_tracking_if_started()
                     return False
                 self.confirm_sampling = True
 
@@ -1296,6 +1365,7 @@ class PaperScreeningPipeline:
                 if not planned_papers:
                     if not self.quiet:
                         print("[qc] Remaining run has no papers after removing QC sample; nothing to do.")
+                    _finish_tracking_if_started()
                     return False
 
         # When QC is disabled for the remaining run, still skip any known QC sample IDs.
@@ -1305,10 +1375,11 @@ class PaperScreeningPipeline:
             if not planned_papers:
                 if not self.quiet:
                     print("[qc] Remaining run has no papers after removing QC sample; nothing to do.")
+                _finish_tracking_if_started()
                 return False
 
-        if self.sustainability_tracking:
-            self.resource_tracker.start_run()
+        if self._fulltext_preparse_enabled and self.stage == "full_text" and planned_papers:
+            self._preparse_full_text_pdfs(planned_papers)
 
         progress_total = total_planned if total_planned is not None else (self.sample_size or None)
         progress = (
@@ -1317,7 +1388,6 @@ class PaperScreeningPipeline:
             else None
         )
 
-        start_time = time.time()
         elig_writer = None
         text_writer = None
         chunk_writer = None
@@ -1669,9 +1739,6 @@ class PaperScreeningPipeline:
         if not self.quiet and self.summary_to_console:
             print("[pipeline] screening run completed successfully")
 
-        if self.sustainability_tracking:
-            self.resource_tracker.stop_run(self._total_runtime_seconds, self._paper_count)
-
         def _append_error_summary(total_planned: int) -> None:
             """human readable hint: append a run-level summary row into the error log."""
 
@@ -1702,6 +1769,8 @@ class PaperScreeningPipeline:
 
         _append_error_summary(total_planned)
 
+        _finish_tracking_if_started()
+
         return True
 
     def _iter_papers(self) -> Iterable[PaperRecord]:
@@ -1714,11 +1783,9 @@ class PaperScreeningPipeline:
                 folders = rng.sample(folders, min(self.sample_size, len(folders)))
 
             for folder in folders:
-                meta_path = folder / "metadata.json"
-                if not meta_path.exists():
+                row = self._metadata_snapshot_for_folder(folder)
+                if not row:
                     continue
-                with open(meta_path, "r", encoding="utf-8") as handle:
-                    row = json.load(handle)
                 title = row.get("Title") or row.get("title", "")
                 abstract = row.get("Abstract") or row.get("abstract", "")
                 paper_id = (
@@ -1751,6 +1818,202 @@ class PaperScreeningPipeline:
         """Materialize the papers to be screened so sampling and progress are deterministic."""
 
         return list(self._iter_papers())
+
+    @staticmethod
+    def _suppress_noisy_parser_library_logs() -> None:
+        """Reduce third-party parser chatter so terminal output stays focused."""
+
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+        for logger_name in (
+            "RapidOCR",
+            "rapidocr",
+            "huggingface_hub",
+            "filelock",
+            "transformers",
+            "docling",
+            "urllib3",
+        ):
+            logger = logging.getLogger(logger_name)
+            logger.setLevel(logging.WARNING)
+
+    def _read_parser_level_for_folder(self, folder_path: Path) -> str:
+        """Read parser_level from compact artifact when available."""
+
+        artifact_path = self._compact_artifact_path_for_folder(folder_path, stage="full_text")
+        if not artifact_path.exists():
+            return ""
+
+        try:
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return ""
+            return str(payload.get("parser_level") or "").strip()
+        except Exception:
+            return ""
+
+    def _preparse_full_text_pdfs(self, papers: list[PaperRecord]) -> None:
+        """Parse full_text PDFs before screening to warm caches and surface parse status."""
+
+        self._suppress_noisy_parser_library_logs()
+
+        total = len(papers)
+        ok_count = 0
+        fail_count = 0
+        report_rows: list[dict[str, str]] = []
+
+        if not self.quiet:
+            print(f"[preparse] Starting full_text preflight parsing for {total} paper(s)...")
+
+        for idx, paper in enumerate(papers, start=1):
+            resolved_path = self._resolve_pdf_path(paper)
+            text, _page_count, used_path, _pages = self._load_pdf_text(
+                paper,
+                resolved_path,
+                include_pages=False,
+            )
+
+            success = bool((text or "").strip())
+            if success:
+                ok_count += 1
+            else:
+                fail_count += 1
+
+            parser_level = ""
+            if success:
+                if self.use_advanced_pdf_parser and self._compact_artifacts_enabled():
+                    target_path = used_path or resolved_path
+                    if target_path is not None:
+                        parser_level = self._read_parser_level_for_folder(Path(target_path).parent)
+                elif not self.use_advanced_pdf_parser:
+                    parser_level = "Legacy reader"
+
+            report_rows.append(
+                {
+                    "paper_id": str(paper.paper_id),
+                    "status": "OK" if success else "FAIL",
+                    "parser_level": parser_level,
+                    "pdf_path": str((used_path or resolved_path) or ""),
+                }
+            )
+
+            if not self.quiet and self._fulltext_preparse_log_each_paper:
+                suffix = f" parser='{parser_level}'" if parser_level else ""
+                status = "OK" if success else "FAIL"
+                print(
+                    f"[preparse] {idx}/{total} paper={paper.paper_id} status={status}{suffix}",
+                    flush=True,
+                )
+
+        self._write_fulltext_preparse_report(report_rows, total, ok_count, fail_count)
+
+        if not self.quiet:
+            print(
+                f"[preparse] Completed preflight parsing: ok={ok_count} fail={fail_count} total={total}",
+                flush=True,
+            )
+
+    def _write_fulltext_preparse_report(
+        self,
+        rows: list[dict[str, str]],
+        total: int,
+        ok_count: int,
+        fail_count: int,
+    ) -> None:
+        """Write one compact JSON report for full_text preparse outcomes."""
+
+        def _starts_with(level: str, prefix: str) -> bool:
+            return bool(level and level.startswith(prefix))
+
+        primary_pymupdf_count = sum(
+            1
+            for row in rows
+            if str(row.get("status") or "") == "OK"
+            and _starts_with(str(row.get("parser_level") or ""), PARSER_LEVEL_PYMUPDF_FALLBACK)
+        )
+        fallback_docling_count = sum(
+            1
+            for row in rows
+            if str(row.get("status") or "") == "OK"
+            and _starts_with(str(row.get("parser_level") or ""), PARSER_LEVEL_DOCLING_SUCCESS)
+        )
+        fallback_ocr_count = sum(
+            1
+            for row in rows
+            if str(row.get("status") or "") == "OK"
+            and _starts_with(str(row.get("parser_level") or ""), PARSER_LEVEL_OCR_SUCCESS)
+        )
+        low_density_without_ocr_count = sum(
+            1
+            for row in rows
+            if _starts_with(str(row.get("parser_level") or ""), PARSER_LEVEL_LOW_DENSITY)
+        )
+        low_density_trigger_count = fallback_ocr_count + low_density_without_ocr_count
+        legacy_reader_count = sum(
+            1
+            for row in rows
+            if str(row.get("status") or "") == "OK"
+            and str(row.get("parser_level") or "") == "Legacy reader"
+        )
+        unknown_parser_level_count = sum(
+            1
+            for row in rows
+            if str(row.get("status") or "") == "OK"
+            and not str(row.get("parser_level") or "").strip()
+        )
+
+        parser_outcome_counts = {
+            PARSER_LEVEL_PYMUPDF_FALLBACK: primary_pymupdf_count,
+            PARSER_LEVEL_DOCLING_SUCCESS: fallback_docling_count,
+            PARSER_LEVEL_OCR_SUCCESS: fallback_ocr_count,
+            PARSER_LEVEL_LOW_DENSITY: low_density_without_ocr_count,
+            "Legacy reader": legacy_reader_count,
+            "Unknown parser level": unknown_parser_level_count,
+        }
+        parser_outcome_counts = {k: v for k, v in parser_outcome_counts.items() if v > 0}
+
+        failures = [
+            {
+                "paper_id": str(row.get("paper_id") or ""),
+                "pdf_path": str(row.get("pdf_path") or ""),
+            }
+            for row in rows
+            if str(row.get("status") or "") == "FAIL"
+        ]
+
+        report_payload: dict[str, Any] = {
+            "meta": "full_text_preparse_report",
+            "schema_version": 2,
+            "stage": self.stage,
+            "run_label": self.run_label,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "totals": {
+                "papers": total,
+                "parsed_ok": ok_count,
+                "parsed_fail": fail_count,
+            },
+            "parser_handler_order": [
+                PARSER_LEVEL_PYMUPDF_FALLBACK,
+                PARSER_LEVEL_DOCLING_SUCCESS,
+                PARSER_LEVEL_LOW_DENSITY,
+                PARSER_LEVEL_OCR_SUCCESS,
+            ],
+            "parser_outcome_counts": parser_outcome_counts,
+            "low_text_density_trigger_count": low_density_trigger_count,
+            "failures": failures,
+        }
+
+        report_path = self.stage_output_dir / f"{self.stage}_preparse_report.json"
+        try:
+            self.stage_output_dir.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(json.dumps(report_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            if not self.quiet:
+                print(f"[preparse] Report: {report_path}", flush=True)
+        except Exception as exc:  # pylint: disable=broad-except
+            if not self.quiet:
+                print(f"[warning] Could not write preparse report: {exc}")
 
     def _ensure_qc_sample(self, planned_papers: list[PaperRecord], force_new: bool = False) -> bool:
         """Create (or load) a QC sample and record its paper_ids."""
@@ -4635,18 +4898,32 @@ class PaperScreeningPipeline:
         target_stage = stage or self.stage
         return folder_path / f"{target_stage}_artifact.json"
 
-    @staticmethod
-    def _metadata_snapshot_for_folder(folder_path: Path, fallback: dict | None = None) -> dict:
-        """Use metadata.json as canonical metadata snapshot for sidecar synchronization."""
+    def _metadata_snapshot_for_folder(self, folder_path: Path, fallback: dict | None = None) -> dict:
+        """Read metadata from per-stage artifact files only."""
 
-        metadata_path = folder_path / "metadata.json"
-        if metadata_path.exists():
+        candidate_paths = [
+            self._compact_artifact_path_for_folder(folder_path, stage=self.stage),
+            self._compact_artifact_path_for_folder(folder_path, stage="full_text"),
+            self._compact_artifact_path_for_folder(folder_path, stage="data_extraction"),
+        ]
+
+        seen: set[Path] = set()
+        for artifact_path in candidate_paths:
+            if artifact_path in seen or not artifact_path.exists():
+                continue
+            seen.add(artifact_path)
+
             try:
-                payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-                if isinstance(payload, dict):
-                    return payload
+                payload = json.loads(artifact_path.read_text(encoding="utf-8"))
             except Exception:
-                pass
+                continue
+
+            if not isinstance(payload, dict):
+                continue
+
+            metadata = payload.get("metadata")
+            if isinstance(metadata, dict):
+                return metadata
 
         fallback_payload = dict(fallback or {})
         fallback_payload.pop("folder_path", None)
@@ -4658,11 +4935,11 @@ class PaperScreeningPipeline:
         metadata_snapshot: dict,
         normalized_text: str,
     ) -> None:
-        """Write human-checkable normalized text with metadata copied from metadata.json."""
+        """Write human-checkable normalized text with metadata copied from artifact metadata."""
 
         normalized_path = folder_path / f"{self.stage}_normalized.txt"
         content = [
-            "=== metadata.json ===",
+            "=== metadata ===",
             json.dumps(metadata_snapshot, ensure_ascii=False, indent=2),
             "",
             "=== normalized_full_text ===",
@@ -4677,6 +4954,7 @@ class PaperScreeningPipeline:
         cache_key: dict[str, int],
         normalized_text: str,
         normalized_pages: list[str],
+        parser_level: str | None = None,
     ) -> None:
         """Persist compact machine artifact and synchronized human text sidecar."""
 
@@ -4692,6 +4970,13 @@ class PaperScreeningPipeline:
                     artifact_payload = loaded
             except Exception:
                 artifact_payload = {}
+
+        resolved_parser_level = str(parser_level or artifact_payload.get("parser_level") or "").strip()
+
+        # Keep parser_level at the top for quick manual auditing of extraction fallback level.
+        payload_without_level = {k: v for k, v in artifact_payload.items() if k != "parser_level"}
+        artifact_payload = {"parser_level": resolved_parser_level}
+        artifact_payload.update(payload_without_level)
 
         artifact_payload.update(
             {
@@ -4733,16 +5018,43 @@ class PaperScreeningPipeline:
             folder_path.mkdir(parents=True, exist_ok=True)
 
             canonical = self._canonicalize_row(row)
-            metadata_path = folder_path / "metadata.json"
-            with open(metadata_path, "w", encoding="utf-8") as handle:
-                json.dump(canonical, handle, ensure_ascii=False, indent=2)
 
-            if not self._compact_artifacts_enabled():
-                csv_path = folder_path / "metadata.csv"
-                with open(csv_path, "w", encoding="utf-8", newline="") as handle:
-                    writer = csv.DictWriter(handle, fieldnames=CANONICAL_FIELDS)
-                    writer.writeheader()
-                    writer.writerow(canonical)
+            artifact_path = self._compact_artifact_path_for_folder(folder_path, stage="full_text")
+            artifact_payload: dict[str, Any] = {}
+            if artifact_path.exists():
+                try:
+                    loaded = json.loads(artifact_path.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        artifact_payload = loaded
+                except Exception:
+                    artifact_payload = {}
+
+            resolved_parser_level = str(artifact_payload.get("parser_level") or "").strip()
+            payload_without_level = {k: v for k, v in artifact_payload.items() if k != "parser_level"}
+            artifact_payload = {"parser_level": resolved_parser_level}
+            artifact_payload.update(payload_without_level)
+            artifact_payload.update(
+                {
+                    "meta": "stage_artifact",
+                    "schema_version": 1,
+                    "stage": "full_text",
+                    "paper_id": str(canonical.get("Covidence #") or folder_name),
+                    "metadata": canonical,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            artifact_path.write_text(
+                json.dumps(artifact_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            for stale_name in ("metadata.json", "metadata.csv"):
+                stale_path = folder_path / stale_name
+                if stale_path.exists():
+                    try:
+                        stale_path.unlink()
+                    except Exception:
+                        pass
 
             if not any(folder_path.glob("*.pdf")):
                 cov_id = str(canonical.get("Covidence #") or "").strip()
@@ -4850,13 +5162,8 @@ class PaperScreeningPipeline:
         for folder in sorted(source_dir.iterdir()):
             if not folder.is_dir():
                 continue
-            meta_path = folder / "metadata.json"
-            if not meta_path.exists():
-                continue
-            try:
-                with open(meta_path, "r", encoding="utf-8") as handle:
-                    row = json.load(handle)
-            except Exception:
+            row = self._metadata_snapshot_for_folder(folder)
+            if not row:
                 continue
 
             cov_id = self._extract_covidence_id(row)
@@ -4883,16 +5190,38 @@ class PaperScreeningPipeline:
                 if full_text_normalized.exists():
                     shutil.copy2(full_text_normalized, dest / full_text_normalized.name)
 
-                row["folder_path"] = str(dest)
-                metadata_path = dest / "metadata.json"
-                with open(metadata_path, "w", encoding="utf-8") as handle:
-                    json.dump(row, handle, ensure_ascii=False, indent=2)
+                data_artifact_path = self._compact_artifact_path_for_folder(dest, stage="data_extraction")
+                data_artifact_payload: dict[str, Any] = {}
+                if data_artifact_path.exists():
+                    try:
+                        loaded = json.loads(data_artifact_path.read_text(encoding="utf-8"))
+                        if isinstance(loaded, dict):
+                            data_artifact_payload = loaded
+                    except Exception:
+                        data_artifact_payload = {}
 
-                csv_path = dest / "metadata.csv"
-                with open(csv_path, "w", encoding="utf-8", newline="") as handle:
-                    writer = csv.DictWriter(handle, fieldnames=CANONICAL_FIELDS)
-                    writer.writeheader()
-                    writer.writerow({field: row.get(field, "") for field in CANONICAL_FIELDS})
+                data_artifact_payload.update(
+                    {
+                        "meta": "stage_artifact",
+                        "schema_version": 1,
+                        "stage": "data_extraction",
+                        "paper_id": str(row.get("Covidence #") or row.get("paper_id") or folder.name),
+                        "metadata": row,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                data_artifact_path.write_text(
+                    json.dumps(data_artifact_payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+
+                for stale_name in ("metadata.json", "metadata.csv"):
+                    stale_path = dest / stale_name
+                    if stale_path.exists():
+                        try:
+                            stale_path.unlink()
+                        except Exception:
+                            pass
 
                 copied.append(dest)
             except Exception as exc:  # pylint: disable=broad-except
@@ -5067,9 +5396,15 @@ class PaperScreeningPipeline:
         cache_text_path = path.parent / f"{path.stem}_normalized_text.txt"
         cache_pages_path = path.parent / f"{path.stem}_normalized_pages.json"
         cache_meta_path = path.parent / f"{path.stem}_normalized_meta.json"
+        advanced_mode_for_pdf = bool(self.use_advanced_pdf_parser and path.suffix.lower() == ".pdf")
         compact_mode = self._compact_artifacts_enabled()
         compact_artifact_path = self._compact_artifact_path_for_folder(path.parent, stage="full_text")
         cache_key: dict[str, int] = {}
+
+        def _effective_page_count(pages_value: list[str]) -> int:
+            if advanced_mode_for_pdf:
+                return self._count_pdf_pages(path)
+            return len(pages_value) if include_pages else self._count_pdf_pages(path)
 
         try:
             pdf_stat = path.stat()
@@ -5086,8 +5421,10 @@ class PaperScreeningPipeline:
                         text = str(compact_payload.get("normalized_text") or "")
                         pages_payload = compact_payload.get("normalized_pages")
                         pages = [str(page or "") for page in pages_payload] if isinstance(pages_payload, list) else []
+                        if advanced_mode_for_pdf and len(pages) <= 1:
+                            pages = []
                         if text.strip():
-                            if include_pages and not pages:
+                            if include_pages and not pages and not advanced_mode_for_pdf:
                                 pages = [text]
                             metadata_snapshot = self._metadata_snapshot_for_folder(path.parent, fallback=paper.metadata)
                             self._write_compact_human_normalized_text(path.parent, metadata_snapshot, text)
@@ -5097,7 +5434,7 @@ class PaperScreeningPipeline:
                                         stale_path.unlink()
                                 except Exception:
                                     pass
-                            page_count = len(pages) if include_pages else self._count_pdf_pages(path)
+                            page_count = _effective_page_count(pages)
                             return text, page_count, path, pages
 
             if cache_text_path.exists() and cache_meta_path.exists() and (cache_pages_path.exists() or not include_pages):
@@ -5109,15 +5446,21 @@ class PaperScreeningPipeline:
                         pages_payload = json.loads(cache_pages_path.read_text(encoding="utf-8"))
                         if isinstance(pages_payload, list):
                             pages = [str(page or "") for page in pages_payload]
-                    if include_pages and not pages:
+                    if advanced_mode_for_pdf and len(pages) <= 1:
+                        pages = []
+                    if include_pages and not pages and not advanced_mode_for_pdf:
                         pages = [text]
                     if compact_mode and text.strip():
+                        pages_for_cache = pages
+                        if not pages_for_cache and not advanced_mode_for_pdf:
+                            pages_for_cache = [text]
                         self._persist_compact_text_artifacts(
                             paper,
                             path,
                             cache_key,
                             text,
-                            pages if pages else [text],
+                            pages_for_cache,
+                            parser_level=None,
                         )
                         for stale_path in (cache_text_path, cache_pages_path, cache_meta_path):
                             try:
@@ -5125,14 +5468,20 @@ class PaperScreeningPipeline:
                                     stale_path.unlink()
                             except Exception:
                                 pass
-                    page_count = len(pages) if include_pages else self._count_pdf_pages(path)
+                    page_count = _effective_page_count(pages)
                     return text, page_count, path, pages
         except Exception:
             # human readable hint: cache read failures should never stop screening; pipeline falls back to live extraction.
             pass
 
         try:
-            if include_pages:
+            used_advanced_pdf_parser = False
+            parser_level: str | None = None
+            if advanced_mode_for_pdf:
+                used_advanced_pdf_parser = True
+                pages = []
+                text, parser_level = extract_markdown_from_pdf_with_level(path)
+            elif include_pages:
                 pages = read_pdf_pages(str(path))
                 text = "\n".join(pages)
             else:
@@ -5140,14 +5489,15 @@ class PaperScreeningPipeline:
                 text = read_pdf_file(str(path))
 
             if not text or not text.strip():
+                parser_chain = "advanced parser chain" if used_advanced_pdf_parser else "legacy parser chain"
                 self._log_error(
                     paper.paper_id,
-                    f"PDF has no extractable text (likely scanned or empty). OCR is disabled; skipping: {path}",
+                    f"PDF has no extractable text after {parser_chain}; skipping: {path}",
                     error_type="pdf_unreadable",
                 )
                 return "", 0, None, []
 
-            if include_pages and not pages:
+            if include_pages and not pages and not used_advanced_pdf_parser:
                 pages = [text]
 
             try:
@@ -5158,12 +5508,16 @@ class PaperScreeningPipeline:
                         "pdf_mtime_ns": int(pdf_stat.st_mtime_ns),
                     }
                 if compact_mode:
+                    pages_for_cache = pages
+                    if not pages_for_cache and not used_advanced_pdf_parser:
+                        pages_for_cache = [text]
                     self._persist_compact_text_artifacts(
                         paper,
                         path,
                         cache_key,
                         text,
-                        pages if pages else [text],
+                        pages_for_cache,
+                        parser_level=parser_level,
                     )
                     for stale_path in (cache_text_path, cache_pages_path, cache_meta_path):
                         try:
@@ -5179,7 +5533,7 @@ class PaperScreeningPipeline:
                 # human readable hint: cache write failures are non-blocking and do not affect screening correctness.
                 pass
 
-            page_count = len(pages) if include_pages else self._count_pdf_pages(path)
+            page_count = _effective_page_count(pages)
             return text, page_count, path, pages
         except Exception as exc:  # pylint: disable=broad-except
             self._log_error(paper.paper_id, f"PDF read failed at {path}: {exc}", error_type="pdf_read_error")

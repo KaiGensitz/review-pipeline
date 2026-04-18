@@ -175,7 +175,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--target-folders",
         default="input/per_paper_full_text",
-        help="Directory containing per-paper folders with metadata.json.",
+        help="Directory containing per-paper folders with full_text_artifact.json metadata.",
     )
     parser.add_argument(
         "--output-dir",

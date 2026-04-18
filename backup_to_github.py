@@ -4,7 +4,30 @@ import subprocess
 import sys
 from datetime import datetime
 
-BACKUP_MSG = f"Automated backup after pipeline run on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+
+def _default_backup_message() -> str:
+    """human readable hint: build a timestamped default commit message at runtime."""
+
+    return f"Automated backup after pipeline run on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+
+
+def prompt_commit_message(default_message: str) -> str:
+    """human readable hint: ask user for commit message and fall back to default when needed."""
+
+    if not sys.stdin.isatty():
+        print(f"Non-interactive terminal detected. Using default commit message: {default_message}")
+        return default_message
+
+    print("Enter commit message for this backup commit.")
+    print("Press Enter to use the default shown below.")
+    print(f"Default: {default_message}")
+    try:
+        user_input = input("> ").strip()
+    except EOFError:
+        print("No input received. Using default commit message.")
+        return default_message
+
+    return user_input if user_input else default_message
 
 class BackupToGitHub:
     """human readable hint: one-class backup workflow with explicit command methods and one run entrypoint."""
@@ -50,12 +73,14 @@ class BackupToGitHub:
 def run(cmd: list[str]) -> None:
     """Compatibility wrapper for older calls."""
 
-    BackupToGitHub(BACKUP_MSG).run_command(cmd)
+    BackupToGitHub(_default_backup_message()).run_command(cmd)
 
 
 def main():
     # human readable hint: pulling first reduces push conflicts when multiple users work on the repo.
-    BackupToGitHub(BACKUP_MSG).run_backup()
+    default_message = _default_backup_message()
+    commit_message = prompt_commit_message(default_message)
+    BackupToGitHub(commit_message).run_backup()
 
 if __name__ == "__main__":
     main()

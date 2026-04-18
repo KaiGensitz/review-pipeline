@@ -1,5 +1,9 @@
 pdfplumber==0.11.8 # Extract text from PDFs for screening
 PyPDF2 # PDF page counting fallback
+docling>=2.0.0 # Layout-aware PDF to markdown conversion (primary parser)
+pymupdf4llm>=0.0.17 # Markdown extraction fallback on parser failure
+pytesseract>=0.3.10 # OCR fallback for scanned PDFs
+Pillow>=10.0.0 # Image conversion support for OCR pipeline
 nltk==3.9.2 # Tokenization/sentence splitting utilities
 langdetect==1.0.9 # Robust language-code detection for EN/DE policy checks
 openai==2.8.1 # OpenAI-compatible LLM client

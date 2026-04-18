@@ -129,7 +129,7 @@ Dynamic behavior implemented in pipeline:
 - Full-text artifact persistence now supports two modes:
   - `compact` (default): writes `full_text_artifact.json` and `full_text_normalized.txt` per paper and removes legacy normalized sidecars.
   - `full`: keeps legacy normalized sidecars (`*_normalized_text.txt`, `*_normalized_pages.json`, `*_normalized_meta.json`).
-- In compact mode, the metadata block in `full_text_normalized.txt` is synchronized from `metadata.json`.
+- In compact mode, the metadata block in `full_text_normalized.txt` is synchronized from `full_text_artifact.json` -> `metadata`.
 - Full-text chunking now filters low-information sentence fragments (table-like/citation-like noise) before chunk assembly.
 - Full-text retrieval now uses a hybrid score (embedding + method/triad signals + readability + sentence completeness) to prioritize informative chunks.
 - Full-text retrieval now enforces a final raw-chunk safety net so decisions do not collapse to title-only context when selected non-title evidence is empty.
@@ -174,7 +174,7 @@ In `output/<stage>/` (or per-paper subfolders for extraction):
 - CodeCarbon emissions CSV (merged per sample with `run` column)
 
 Full-text per-paper input artifacts (`input/per_paper_full_text/<paper_folder>/`):
-- always: `metadata.json` and one PDF
+- always: `full_text_artifact.json` and one PDF
 - compact mode (default): `full_text_artifact.json`, `full_text_normalized.txt`
 - optional in compact mode: `full_text_selected_chunks.jsonl` only when `compact_keep_legacy_selected_chunks=True`
 - full mode: legacy normalized sidecars (`*_normalized_text.txt`, `*_normalized_pages.json`, `*_normalized_meta.json`)

@@ -60,9 +60,33 @@ python -m pip install -r requirement.txt
 
 Notes:
 - Wait until installation completes successfully.
-- First run may download NLTK tokenizer data.
+- Runtime tokenizer/model downloads are now moved out of screening runs.
 - `pdfplumber` is required for PDF stages.
 - If `codecarbon` is unavailable, the pipeline now continues without emissions tracking (warning only).
+
+## Preload Runtime Assets (One-Time)
+
+Run once before screening:
+
+~~~bash
+.venv\Scripts\python -m pipeline.additions.preload_runtime_assets
+~~~
+
+What this does:
+- Downloads required NLTK tokenizer data (`punkt`, `punkt_tab`) if missing.
+- If `USE_ADVANCED_PDF_PARSER=1`, warms the Docling parser cache using the smallest local PDF (fastest candidate).
+- Keeps screening runs deterministic by avoiding runtime tokenizer/model downloads.
+
+Important:
+- Screening runs now enforce offline cache mode for Hugging Face assets.
+- If preload is skipped and assets are missing, `main.py` stops early with a setup message.
+- `full_text` now runs a preflight parse before screening and prints one minimal status line per paper (`OK`/`FAIL`, plus parser level when available).
+- Optional toggles (environment variables):
+	- `FULLTEXT_PREPARSE_BEFORE_SCREENING=1` (default) enables/disables the preflight parse.
+	- `FULLTEXT_PREPARSE_LOG_EACH_PAPER=1` (default) enables/disables per-paper preparse status lines.
+	- `DOCLING_WARMUP_TIMEOUT_SECONDS=0` (default) means warmup waits until completion.
+	  - Set `>0` (for example `300`) if you want a bounded warmup timeout.
+	- Optional Hugging Face auth token for preload speed/rate limits: `HF_TOKEN=...` in `.env`.
 
 ## Add API Key
 

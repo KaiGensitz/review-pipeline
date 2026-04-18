@@ -62,7 +62,7 @@ Per study, define and archive:
 - Input export provenance and hash/archive process.
 - Procedure for on-demand reconstruction of paper-level model input text (`pipeline.additions.input_trace`) for audit cases.
 - Which artifacts are public vs restricted.
-- Policy for metadata synchronization between `metadata.json` and human-readable normalized sidecars (`full_text_normalized.txt`) in compact mode.
+- Policy for metadata synchronization between `full_text_artifact.json` (`metadata`) and human-readable normalized sidecars (`full_text_normalized.txt`) in compact mode.
 - Final release license and repository destination.
 - Redaction rules for sensitive metadata before release.
 

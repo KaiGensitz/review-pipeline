@@ -1,5 +1,6 @@
 ﻿import sys
 import json
+import os
 from pathlib import Path
 from datetime import datetime
 from typing import Any
@@ -355,6 +356,7 @@ def run_pipeline(
     enable_time_savings: bool | None = None,
     run_label_override: str | None = None,
     artifact_mode: str | None = None,
+    use_advanced_pdf_parser: bool | None = None,
 ) -> object:
     """Run one pipeline stage with stage-specific defaults and outputs.
 
@@ -381,6 +383,7 @@ def run_pipeline(
         qc_enabled: If False, skip QC sampling entirely.
         force_new_qc: If True, generate a new QC sample even if one exists.
         artifact_mode: Optional per-paper artifact mode override ("full" or "compact").
+        use_advanced_pdf_parser: Optional explicit override for advanced PDF parser feature flag.
 
     Returns:
         True if screening executed; False if the run exited early.
@@ -451,6 +454,10 @@ def run_pipeline(
     )
     default_time_savings = _safe_bool(SCREENING_DEFAULTS.get("enable_time_savings"), False)
     enable_time_savings = bool(enable_time_savings) if enable_time_savings is not None else bool(default_time_savings)
+    if use_advanced_pdf_parser is None:
+        use_advanced_pdf_parser = bool(_safe_bool(os.getenv("USE_ADVANCED_PDF_PARSER", "0"), False))
+    else:
+        use_advanced_pdf_parser = bool(use_advanced_pdf_parser)
     codecarbon_enabled = True
     pdf_root = pdf_root or PATH_SETTINGS.get("pdf_root")
 
@@ -528,6 +535,7 @@ def run_pipeline(
         quiet=quiet,
         summary_to_console=False,
         artifact_mode=artifact_mode,
+        use_advanced_pdf_parser=use_advanced_pdf_parser,
         examples=cast(list[dict], examples),
     )
     stage_csvs = [str(p) for p in pipeline._stage_csv_files()]

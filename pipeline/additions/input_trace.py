@@ -244,15 +244,25 @@ def _title_abstract_context(stage: str, paper_id: str) -> tuple[str, list[dict]]
 
 
 def _load_folder_metadata(folder: Path) -> dict:
-    meta_path = folder / "metadata.json"
-    if not meta_path.exists():
-        return {}
-    try:
-        with meta_path.open("r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-            return payload if isinstance(payload, dict) else {}
-    except Exception:
-        return {}
+    artifact_candidates = [
+        folder / "full_text_artifact.json",
+        folder / "data_extraction_artifact.json",
+    ]
+    for artifact_path in artifact_candidates:
+        if not artifact_path.exists():
+            continue
+        try:
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                metadata = payload.get("metadata")
+                if isinstance(metadata, dict):
+                    return metadata
+                # Backward compatibility for non-nested payload variants.
+                return payload
+        except Exception:
+            continue
+
+    return {}
 
 
 def _extract_covidence_id(row: dict) -> str:

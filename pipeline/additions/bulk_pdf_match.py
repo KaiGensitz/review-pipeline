@@ -83,15 +83,29 @@ def _load_targets(target_root: Path, overwrite: bool) -> list[FolderTarget]:
         if not overwrite and any(folder.glob("*.pdf")):
             continue
 
-        meta_path = folder / "metadata.json"
-        if not meta_path.exists():
-            continue
-
+        metadata: dict = {}
         try:
             import json
 
-            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+            artifact_candidates = [
+                folder / "full_text_artifact.json",
+                folder / "data_extraction_artifact.json",
+            ]
+            for artifact_path in artifact_candidates:
+                if not artifact_path.exists():
+                    continue
+                payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    nested = payload.get("metadata")
+                    if isinstance(nested, dict):
+                        metadata = nested
+                        break
+                    metadata = payload
+                    break
         except Exception:
+            metadata = {}
+
+        if not metadata:
             continue
 
         title = str(metadata.get("Title") or metadata.get("title") or "").strip()
@@ -322,7 +336,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--target-folders",
         default="input/per_paper_full_text",
-        help="Directory containing per-paper folders with metadata.json.",
+        help="Directory containing per-paper folders with full_text_artifact.json metadata.",
     )
     parser.add_argument(
         "--apply",
