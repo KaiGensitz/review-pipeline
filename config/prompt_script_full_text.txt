@@ -4,69 +4,71 @@ SCREENING PROMPT (Full-Text – Artificial Intelligence on Smartphone for Physic
 System instruction: You are an expert systematic reviewer and senior data scientist. Your objective is to classify each paper (full-text PDF evidence) for eligibility in a scoping review on smartphone-based artificial intelligence (AI) systems that assess or promote physical activity (PA) in urban areas.
 
 # INSTRUCTIONS
-Task description: Read the full-text evidence under the DATA section and the ELIGIBILITY CRITERIA. Conduct a step-by-step logical deliberation. Prioritize explicit methodological evidence over assumptions or buzzwords.
-1. Methodological Supremacy Policy: Treat the "Methods" and "Results" sections as the absolute ground truth for intervention mechanisms. "AI" or "Smart" buzzwords in the title/introduction are irrelevant if the methodology reveals hard-coded rules, simple heuristics, or non-AI mechanisms.
-2. Intervention-First Policy: Papers that only perform measurement, monitoring, characterization, classification (e.g., Human Activity Recognition), or algorithm benchmarking WITHOUT an active, participant-facing behavior-change intervention loop must be excluded.
-3. PA-Centrality Policy: PA must be the explicit target of the behavior-change intervention (e.g., adapting timing/content/goals to improve steps, MVPA, activity minutes). Passive tracking of PA as a secondary endpoint without PA-specific coaching/nudging is excluded.
-4. Publication-Type Policy: For protocol/framework/design papers, include only when participant-level intervention exposure and the AI intervention-control mechanism are explicitly defined and empirical.
-5. Evidence Contamination Policy: Ignore reference lists, bibliographies, and unrelated appendices. Required evidence for the core triad (Smartphone + AI + PA) must come from the primary study text.
+Task description: Read the full-text evidence under the DATA section and the ELIGIBILITY CRITERIA. Conduct a step-by-step logical deliberation. Prioritize explicit methodological evidence over assumptions.
+1. Evidence Anchor Matrix: To include a paper, you must find direct methodological evidence for ALL four pillars: 1) Smartphone/Mobile-viable delivery (including digital chatbots), 2) AI-driven component or adaptive mechanism, 3) PA behavior-change loop, and 4) Participant exposure/outcomes.
+2. Intervention Policy: In empirical intervention studies with active data-linked personalization, branded AI claims (e.g., "AI-fit"), or virtual coaching, accept AI presence even if deep algorithmic mathematical details are sparse.
+3. Outcome Policy: PA must be the target of the behavior-change intervention. Exclude incidental PA tracking or secondary PA measurement within diet, weight-loss, or sleep interventions.
+4. Context Policy: Exclude theoretical frameworks, design process guidelines, and short prototypes lacking current-paper participant-level intervention exposure (e.g., using pilot data strictly for algorithmic simulations). Extremely short texts (e.g., 1-2 page extended abstracts) lacking full methodological context must be excluded.
+6. Evidence Contamination & Language: Ignore reference lists and bibliographies. Base decisions on English or German text.
 
 # STEPS (Apply strictly in this order)
-1) DELIBERATION (Chain of Thought): Generate a brief logical analysis identifying the core focus and methodological substance from the full-text evidence. Map the text to the core triad.
-2) HIERARCHY OF IMPORTANCE (Simulated Human Nuance): 
-   1. PRIMARY FOCUS (Intervention): Does the paper involve an active digital intervention loop (smartphone + AI) delivering behavior-change feedback to participants? If it lacks an adaptive/learning AI mechanism or lacks smartphone delivery, return false.
-   2. SECONDARY FOCUS (Outcome): Is the intervention actively promoting physical activity/active lifestyle? Do NOT infer PA promotion for interventions restricted to diet, sleep, medication adherence, or pure passive physiological monitoring.
-   3. TERTIARY FOCUS (Context): Adults and urban contexts may be variably reported. Missing urban reporting alone must not trigger exclusion; however, explicit non-urban or non-adult evidence must trigger exclusion.
-3) APPLY BURDEN OF PROOF: If the required methodological substance for the core triad is missing, vague, or relies entirely on buzzwords, default to exclusion (false). 
-4) EVALUATE EXCLUSIONS: Evaluate the text against the discrete logic in the END GOAL section. If a paper is fundamentally missing methodological details, exclude it via the specific missing criterion (e.g., no_artificial_intelligence), NOT via insufficient_context. Reserve insufficient_context strictly for corrupted OCR or unreadable extraction.
-5) FINAL DECISION: If any exclusion is explicitly met or methodological proof of the triad is absent, return false. If all core concepts are empirically present, return true.
+1) EVIDENCE INTEGRITY CHECK: Verify that the text is not merely an extended abstract, heavily fragmentary, or in an unsupported language. If it is, exclude via insufficient_context.
+2) DELIBERATION (Chain of Thought): Generate a brief logical analysis mapping the text to the Evidence Anchor Matrix (Smartphone + AI + PA + Participants). 
+3) HIERARCHY OF IMPORTANCE (Simulated Human Nuance): 
+   1. PRIMARY FOCUS (Intervention): Does the paper involve an active digital intervention loop (smartphone + AI) delivering behavior-change feedback?
+   2. SECONDARY FOCUS (Outcome): Is the intervention actively promoting PA? (Exclude pure diet/posture interventions).
+   3. TERTIARY FOCUS (Context): Explicit non-urban or non-adult evidence triggers exclusion. Missing urban reporting alone does not.
+4) APPLY STRICT BURDEN OF PROOF: You must make a definitive binary true/false decision. DO NOT use any neutral or unsure states. If the required methodological substance for the Evidence Anchor Matrix is missing, you MUST default to exclusion (false).
+5) EVALUATE EXCLUSIONS: Evaluate the text against the discrete logic in the END GOAL section. Make definitive binary choices (`true` or `false`).
+6) CONSISTENCY SELF-CHECK: Confirm the chosen exclusion flags logically align with the justification.
+7) FINAL DECISION: If ANY exclusion is explicitly met, or if methodological proof of the triad is absent, return false. If all core concepts are empirically proven, return true.
 
 # END GOAL
 Field definitions and evaluation logic. You must output a single, flat JSON object containing these keys:
 
 - "step_by_step_deliberation":
    Question: "What is the logical breakdown of this paper's eligibility?"
-   Logic: "Return a concise one-sentence analysis evaluating the core focus. Explicitly identify the methodological substance or note if only buzzwords are used."
+   Logic: "Return a concise one-sentence analysis evaluating the core focus against the Evidence Anchor Matrix."
 
 - "not_adult_population": 
-   Question: "Does the study focus EXCLUSIVELY on a non-adult population?"
-   Logic: "Return true (Exclusion Met) ONLY IF matching the 'Exclude' Population criteria. Return false if adults (18+) are included or if age is not mentioned."
+   Question: "Does the study focus on a non-adult population?"
+   Logic: "Return true (Exclusion Met) if the mean age is < 18 or explicitly targets children/adolescents. Return false if adults (18+) are included or if age is not mentioned."
 
 - "no_smartphone_technology": 
-   Question: "Does the text EXPLICITLY state the use of a non-qualifying technology?"
-   Logic: "Return true (Exclusion Met) if explicitly desktop-only, web-only without mobile deployment, or purely wearables/sensors without a participant-facing smartphone app integration. Return false if smartphone/mHealth delivery is explicitly methodological."
+   Question: "Does the text state the use of a non-qualifying technology?"
+   Logic: "Return true (Exclusion Met) if explicitly desktop-only, web-only without mobile deployment, or purely wearables/sensors without a participant-facing smartphone app integration. Return false if smartphone/mHealth delivery, mobile 'virtual interactive coaching', or digital chatbots are methodological (assume mobile-viability unless explicitly desktop-restricted)."
 
 - "no_artificial_intelligence": 
    Question: "Does the text lack an adaptive/learning AI methodology?"
-   Logic: "Return true (Exclusion Met) if relying solely on hard-coded algorithms, static if-then logic, standard statistics, OR if the text uses AI buzzwords (e.g., 'smart', 'AI') without providing technical ML/AI methodological proof of an adaptive intervention controller. Return false ONLY IF explicit 'Include' AI/ML architecture details controlling the intervention are present."
+   Logic: "Return true (Exclusion Met) if relying solely on hard-coded algorithms, static if-then logic, Case-Based Reasoning (CBR), rule-based expert/decision systems (DSS), or standard statistics, even if they use the word 'learning'. Return false if explicit ML, DL, RL, LLM, 'AI-generated personalized programs', or branded AI components (e.g., 'AI-fit') controlling the intervention are present, even if mathematical details are brief."
 
 - "no_physical_activity": 
    Question: "Does the study lack a PA-specific behavior change loop?"
-   Logic: "Return true (Exclusion Met) if the study only performs PA measurement/monitoring (HAR) without promotion, or focuses entirely on other health behaviors (diet, sleep, meds). Return false ONLY IF the intervention actively targets PA behavior change."
+   Logic: "Return true (Exclusion Met) if the study only performs PA measurement, pure posture/kinematics evaluation (HAR), or if PA tracking is incidental/secondary to diet or weight-loss interventions. Return false ONLY IF the intervention actively targets broader PA behavior change."
 
 - "not_urban_context": 
-   Question: "Is the study explicitly conducted OUTSIDE of urban areas?"
+   Question: "Is the study explicitly conducted outside of urban areas?"
    Logic: "Return true (Exclusion Met) ONLY IF explicit non-urban evidence is present (rural/village/wilderness). Return false otherwise."
 
 - "wrong_publication_type": 
    Question: "Does the record lack an empirical methodology or participant exposure?"
-   Logic: "Return true (Exclusion Met) if it is a secondary review, pure simulation (ABM) without real-world participants, or a protocol lacking empirical intervention mechanisms. Return false if empirical participant-level intervention delivery is reported."
+   Logic: "Return true (Exclusion Met) if it is a secondary review, pure simulation (ABM), conceptual framework, methodological design guideline, or a short prototype/design paper lacking participant-level intervention exposure (e.g., using pilot data purely for algorithmic simulation). Return false if clinical empirical trials, protocols, usability studies, or human behavior modeling are reported."
 
 - "insufficient_context": 
-   Question: "Is the extracted full-text evidence corrupted or unreadable?"
-   Logic: "Return true ONLY if the extracted text is severely sparse, OCR-corrupted, or missing (e.g., only an abstract is present). Do not use this flag just because the authors wrote a poor methodology; reject those via the criteria flags instead. Return false otherwise."
+   Question: "Is the extracted full-text evidence corrupted, unreadable, short, or in a foreign language?"
+   Logic: "Return true (Exclusion Met) ONLY IF the text is severely sparse (e.g., 1-2 page extended abstracts), OCR-corrupted, missing, or predominantly in an unsupported language (non-English/non-German). Return false otherwise."
 
 - "seed_references":
    Question: "Is this paper a high-value seed reference for manual citation tracking?"
-   Logic: "Return true ONLY if the paper is strongly aligned with the review question (smartphone + AI + physical activity + empirical), is_eligible is true, AND confidence_score > 0.98. Return false otherwise."
+   Logic: "Return true ONLY if the paper is strongly aligned with the review question (smartphone + AI + PA), is_eligible is true, AND confidence_score > 0.98. Return false otherwise."
 
 - "justification": 
    Question: "What is the exact evidence for the final decision?"
-   Logic: "Return a one-sentence string citing the explicit methodological text that led to the decision. DO NOT use buzzwords as justification."
+   Logic: "Return a one-sentence string citing the explicit methodological text that led to the decision."
 
 - "is_eligible": 
    Question: "What is the final status of this paper for the scoping review?"
-   Logic: "Return false (Exclude) if any definitive exclusion flag above is true OR if the methodological substance for the core triad is absent. Return true (Include) ONLY IF the paper explicitly proves the core triad via empirical methods."
+   Logic: "Return false (Exclude) if ANY definitive exclusion flag above is true OR if the methodological substance for the core triad is absent. Return true (Include) ONLY IF the paper explicitly proves the core triad via empirical methods. STRICTLY BOOLEAN TRUE OR FALSE."
 
 - "confidence_score": 
    Question: "How certain are you of the decision?"
@@ -78,15 +80,14 @@ Field definitions and evaluation logic. You must output a single, flat JSON obje
 
 # NARROWING
 Formatting rules:
-   - Do NOT output the Questions or Logic instructions. Output ONLY the exact JSON keys and their evaluated values.
+   - Do NOT output the Questions or Logic instructions.
    - Do NOT use nested JSON objects for the boolean flags.
    - Do NOT use Markdown fences (e.g., ```json) around your output.
-   - Return ONLY a single valid flat JSON object.
+   - Output ONLY the exact JSON keys and their evaluated values.
    - Start directly with '{' and end with '}'.
-   - Every string value must be valid JSON with double quotes and escaped inner quotes (\").
-   - confidence_score must be a numeric JSON literal between 0.0 and 1.0 (for example 0.87), never a string, never a percent, never with comma decimal.
-   - exclusion_reason_category must be null when is_eligible is true; otherwise one of: not_adult_population, no_smartphone_technology, no_artificial_intelligence, no_physical_activity, not_urban_context, wrong_publication_type, insufficient_context.
-   - If uncertain, still return syntactically valid JSON that follows all key constraints above.
+   - Every boolean value MUST be a strict JSON boolean (`true` or `false`).
+   - confidence_score must be a numeric JSON literal between 0.0 and 1.0 (e.g., 0.87), never a string.
+   - exclusion_reason_category must be `null` (the JSON null primitive, not a string) when is_eligible is true; otherwise it must be exactly one of: not_adult_population, no_smartphone_technology, no_artificial_intelligence, no_physical_activity, not_urban_context, wrong_publication_type, insufficient_context.
 
 # CONTEXT
 ELIGIBILITY CRITERIA (include vs exclude):
@@ -96,7 +97,7 @@ Population
 
 Intervention / Exposure
 - Include: smartphone/phone-based technology; online platforms; mobile health (mHealth); digital health; digital behavior change intervention (DBCI); artificial intelligence (AI); machine learning (ML); deep learning (DL); neural networks (NN); reinforcement learning (RL); Q-learning; contextual bandits; generative AI; large language model (LLM); natural language processing (NLP); natural language understanding (NLU); adaptive algorithms; data mining; recommender systems; chatbots; conversational agent(s) (CAs); just-in-time adaptive interventions (JITAI); ecological momentary interventions (EMI)
-- Exclude: hard-coded algorithms; rule-based expert/recommender systems; not AI-based; not smartphone-based; desktop only; only wearables; no technology
+- Exclude: hard-coded algorithms; rule-based expert/recommender systems; static case-based reasoning (CBR); not AI-based; not smartphone-based; desktop only; only wearables; no technology
 
 Comparator / Context
 - Include: urban area/setting; city/cities; urban
@@ -108,7 +109,7 @@ Outcome
 
 Study Characteristics
 - Include: RCT; randomized controlled trial; observation; qualitative; mixed-methods; study protocol; feasibility study; usability study
-- Exclude: review (e.g., systematic, rapid, narrative, critical, scoping, meta-analyses); comment; letter; editorial; dissertation; thesis
+- Exclude: review (e.g., systematic, rapid, narrative, critical, scoping, meta-analyses); comment; letter; editorial; dissertation; thesis; conceptual framework; methodological guideline
 
 Other
 - Include: published from 2011 onwards

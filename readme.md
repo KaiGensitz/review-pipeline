@@ -34,15 +34,17 @@ This start document provides the summary view of the review pipeline and links t
 
 ```mermaid
 flowchart LR
-    A[Set CURRENT_STAGE + models + API key] --> B[Place stage CSV and KB]
-    B --> C[Run main.py]
-    C --> D[Create deterministic QC sample]
-    D --> E[QC-only AI run + human review]
-    E --> F{Validation acceptable?}
-    F -- No --> G[Refine prompt/KB and rerun QC]
-    G --> D
-    F -- Yes --> H[Run remaining papers]
-    H --> I[Write outputs + validation + resource logs]
+  A[Set API key and environment] --> B[Place POS and NEG PDFs in papers/pos_examples and papers/neg_examples]
+  B --> C[Run KB and prompt bootstrap utility]
+  C --> D[Place stage CSV exports in input]
+  D --> E[Run main.py]
+  E --> F[Create deterministic QC sample]
+  F --> G[QC-only AI run + human review]
+  G --> H{Validation acceptable?}
+  H -- No --> I[Refine prompt/KB and rerun QC]
+  I --> F
+  H -- Yes --> J[Run remaining papers]
+  J --> K[Write outputs + validation + resource logs]
 ```
 
 ## Quick Start
@@ -52,11 +54,69 @@ flowchart LR
    - Windows: `.venv\Scripts\activate`
    - macOS/Linux: `source .venv/bin/activate`
 3. Install dependencies: `python -m pip install -r requirement.txt`
-4. Set `.env` with `LLM_API_KEY=...`
-5. Set `CURRENT_STAGE`, `LLM_MODEL`, and `EMBED_MODEL` in [config/user_orchestrator.py](config/user_orchestrator.py)
-6. Run:
+4. Place positive and negative example PDFs:
+  - positive examples: `papers/pos_examples/`
+  - negative examples: `papers/neg_examples/`
+5. Build stage KB files and suggested prompts from those PDFs:
+  - `python -m pipeline.additions.bootstrap_stage_kb_and_prompts`
+6. (Optional, `full_text`) Generate a cleaned-hybrid KB draft without modifying existing KB source files:
+  - `python -m pipeline.additions.generate_cleaned_hybrid_kb_draft`
+7. Set `.env` with `LLM_API_KEY=...`
+8. Set `CURRENT_STAGE`, `LLM_MODEL`, and `EMBED_MODEL` in [config/user_orchestrator.py](config/user_orchestrator.py)
+9. (Optional) Select KB files for this run in [config/user_orchestrator.py](config/user_orchestrator.py):
+  - set per-stage defaults in `KNOWLEDGE_BASE_FILES`
+  - set one-off stage swaps in `KB_FILE_OVERRIDES`
+10. Run:
    - Windows: `.venv\Scripts\python main.py`
    - macOS/Linux: `python main.py`
+
+## Initial Inputs for Optimal Pipeline Performance
+
+Provide these items before the first screening run:
+
+1. Positive example PDFs in [papers/pos_examples](papers/pos_examples) that clearly represent in-scope records.
+2. Negative example PDFs in [papers/neg_examples](papers/neg_examples) that clearly represent out-of-scope records.
+3. A balanced example set whenever possible (recommended minimum: 5 POS and 5 NEG, better: >=10 each).
+4. PDF files with selectable text (not image-only scans), because chunk selection quality depends on text extraction quality.
+5. Stage input CSV exports in [input](input) (`*_screen_csv_*`, `*_select_csv_*`, `*_included_csv_*`).
+
+Practical recommendation:
+- Keep file names descriptive (author/year/title style) to improve traceability in generated `source` fields.
+- Prefer representative examples over edge cases for the first bootstrap run.
+
+## KB and Prompt Bootstrap Utility
+
+Use this command to generate all stage knowledge bases and first-pass prompt suggestions from your local example PDFs:
+
+- `python -m pipeline.additions.bootstrap_stage_kb_and_prompts`
+
+Primary outputs:
+
+1. [knowledge-base/title_abstract_pos-neg_examples.csv](knowledge-base/title_abstract_pos-neg_examples.csv)
+2. [knowledge-base/full_text_pos-neg_examples.csv](knowledge-base/full_text_pos-neg_examples.csv)
+3. [knowledge-base/data_extraction_pos-neg_examples.csv](knowledge-base/data_extraction_pos-neg_examples.csv)
+4. [config/prompt_script_title_abstract_suggested.txt](config/prompt_script_title_abstract_suggested.txt)
+5. [config/prompt_script_full_text_suggested.txt](config/prompt_script_full_text_suggested.txt)
+6. [config/prompt_script_data_extraction_suggested.txt](config/prompt_script_data_extraction_suggested.txt)
+7. [knowledge-base/kb_bootstrap_summary.json](knowledge-base/kb_bootstrap_summary.json)
+
+If you want the pipeline to use the suggested prompts immediately, copy the selected suggested file content into the active prompt files in [config](config).
+
+## Optional Full-Text Cleaned-Hybrid KB Draft Utility
+
+Use this command when you want a conservative full-text KB draft that blends the short reasoning KB with cleaned chunk evidence while keeping your current KB files untouched:
+
+- `python -m pipeline.additions.generate_cleaned_hybrid_kb_draft`
+
+Draft outputs:
+
+1. [knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv](knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv)
+2. [knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json](knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json)
+
+Behavior notes:
+- Non-destructive: source KB files are not overwritten.
+- Balanced additions: draft generation keeps POS/NEG class balance.
+- Opt-in only: pipeline uses this draft only if selected through `KB_FILE_OVERRIDES["full_text"]` (or by changing `KNOWLEDGE_BASE_FILES["full_text"]`).
 
 ## Dependency Behavior
 
@@ -72,11 +132,15 @@ flowchart LR
 
 - `title_abstract`
   - input CSV: `*_screen_csv_*.csv`
-  - Knowledge-base: [knowledge-base/title_abstract_pos-neg_examples.csv](knowledge-base/title_abstract_pos-neg_examples.csv)
+  - Knowledge-base default: [knowledge-base/title_abstract_pos-neg_examples.csv](knowledge-base/title_abstract_pos-neg_examples.csv)
+  - Knowledge-base override: set `KNOWLEDGE_BASE_FILES["title_abstract"]` or `KB_FILE_OVERRIDES["title_abstract"]` in [config/user_orchestrator.py](config/user_orchestrator.py)
   - LLM input behavior: full `Title + Abstract` is passed directly to `{data}` (no chunking/top-k filtering in this stage)
 - `full_text`
   - input CSV: `*_select_csv_*.csv`
-  - Knowledge-base: [knowledge-base/full_text_pos-neg_examples.csv](knowledge-base/full_text_pos-neg_examples.csv)
+  - Knowledge-base default: [knowledge-base/full_text_pos-neg_examples.csv](knowledge-base/full_text_pos-neg_examples.csv)
+  - Knowledge-base override: set `KNOWLEDGE_BASE_FILES["full_text"]` or `KB_FILE_OVERRIDES["full_text"]` in [config/user_orchestrator.py](config/user_orchestrator.py)
+  - Optional cleaned-hybrid draft: [knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv](knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv)
+  - Optional draft report: [knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json](knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json)
   - PDFs: one PDF per folder in `input/per_paper_full_text/`
   - first run behavior: `main.py` creates `per_paper_full_text/` folders and stops; upload all PDFs, then rerun to start screening
   - per-paper machine artifacts use `SCREENING_DEFAULTS["artifact_mode"]` (default `compact`)
@@ -84,7 +148,8 @@ flowchart LR
   - full mode keeps legacy normalized cache sidecars (`*_normalized_text.txt`, `*_normalized_pages.json`, `*_normalized_meta.json`)
 - `data_extraction`
   - input CSV: `*_included_csv_*.csv`
-  - Knowledge-base: [knowledge-base/data_extraction_pos-neg_examples.csv](knowledge-base/data_extraction_pos-neg_examples.csv)
+  - Knowledge-base default: [knowledge-base/data_extraction_pos-neg_examples.csv](knowledge-base/data_extraction_pos-neg_examples.csv)
+  - Knowledge-base override: set `KNOWLEDGE_BASE_FILES["data_extraction"]` or `KB_FILE_OVERRIDES["data_extraction"]` in [config/user_orchestrator.py](config/user_orchestrator.py)
   - PDFs reused in `input/per_paper_data_extraction/`
 
 Eligibility criteria can be centrally stored in [knowledge-base/eligibility_criteria.txt](knowledge-base/eligibility_criteria.txt).
@@ -206,6 +271,7 @@ Data-extraction validation additionally writes run-level exports:
 ## Notes
 
 - Change only [config/user_orchestrator.py](config/user_orchestrator.py) for daily runs.
+- Knowledge-base file selection is configurable per stage/run using `KNOWLEDGE_BASE_FILES` and `KB_FILE_OVERRIDES` in [config/user_orchestrator.py](config/user_orchestrator.py).
 - Total context budget is model-configurable in `LLM_SETTINGS["context_window_total_tokens"]` (input + output).
 - Keep `LLM_SETTINGS["max_tokens"]` lower than `context_window_total_tokens`; effective prompt budget is computed as `context_window_total_tokens - max_tokens`.
 - Balanced optimization profile defaults are now set to: `SCREENING_DEFAULTS.top_k=10`, `EMBEDDING_SETTINGS.chunk_size=20`, `LLM_SETTINGS.async_max_concurrency=18`.

@@ -24,6 +24,21 @@ embedding_cache_size = require_setting(EMBEDDING_SETTINGS, "embedding_cache_size
 LabeledExample = typing.TypedDict("LabeledExample", {"label": str, "text": str})
 
 
+def _normalize_row_keys(row: typing.Any) -> dict[str, str]:
+	"""Normalize row keys/values to lowercase names and stripped string values."""
+
+	normalized: dict[str, str] = {}
+	if not hasattr(row, "items"):
+		return normalized
+
+	for key, value in row.items():
+		key_text = str(key or "").strip().lstrip("\ufeff").lower()
+		if not key_text:
+			continue
+		normalized[key_text] = str(value or "").strip()
+	return normalized
+
+
 def load_labeled_examples(path: str) -> list[LabeledExample]:
 	"""Load POS/NEG training examples used to score relevance."""
 
@@ -32,12 +47,23 @@ def load_labeled_examples(path: str) -> list[LabeledExample]:
 		raise ValueError("Knowledge base must be .csv or .jsonl with fields 'label' and 'text'.")
 
 	examples: list[LabeledExample] = []
-	with open(path, "r", encoding="utf-8") as handle:
+	with open(path, "r", encoding="utf-8-sig", newline="") as handle:
 		if ext == ".csv":
 			reader = csv.DictReader(handle)
+			if reader.fieldnames:
+				reader.fieldnames = [
+					(str(name or "").strip().lstrip("\ufeff") if name is not None else "")
+					for name in reader.fieldnames
+				]
 			for row in reader:
-				label = (row.get("label") or row.get("Label") or "").strip().upper()
-				text = (row.get("text") or row.get("sentence") or "").strip()
+				normalized = _normalize_row_keys(cast(typing.Any, row))
+				label = (normalized.get("label") or normalized.get("class") or "").strip().upper()
+				text = (
+					normalized.get("text")
+					or normalized.get("sentence")
+					or normalized.get("content")
+					or ""
+				).strip()
 				if not label or not text:
 					continue
 				if label not in {"POS", "NEG"}:
@@ -48,8 +74,16 @@ def load_labeled_examples(path: str) -> list[LabeledExample]:
 				if not line.strip():
 					continue
 				payload = json.loads(line)
-				label = (payload.get("label") or "").strip().upper()
-				text = (payload.get("text") or payload.get("sentence") or "").strip()
+				normalized_payload = _normalize_row_keys(
+					cast(typing.Any, payload if isinstance(payload, dict) else {})
+				)
+				label = (normalized_payload.get("label") or normalized_payload.get("class") or "").strip().upper()
+				text = (
+					normalized_payload.get("text")
+					or normalized_payload.get("sentence")
+					or normalized_payload.get("content")
+					or ""
+				).strip()
 				if not label or not text:
 					continue
 				if label not in {"POS", "NEG"}:
@@ -57,7 +91,9 @@ def load_labeled_examples(path: str) -> list[LabeledExample]:
 				examples.append({"label": label, "text": text})
 
 	if not examples:
-		raise ValueError("No labeled examples found. Provide POS/NEG sentences in the knowledge base file.")
+		raise ValueError(
+			f"No labeled examples found in {path}. Provide POS/NEG sentences in the knowledge base file."
+		)
 	return examples
 
 

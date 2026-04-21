@@ -150,6 +150,8 @@ def _normalize_section_label(value: str | None) -> str | None:
         return "results"
     if label in {"conclusions", "summary"}:
         return "conclusion"
+    if label in {"references", "reference", "bibliography", "acknowledgements", "acknowledgments"}:
+        return "reference"
     return None
 
 
@@ -167,6 +169,7 @@ def _infer_chunk_section_label(chunk: dict) -> str | None:
         "results": r"\b(results?|findings)\b",
         "discussion": r"\bdiscussion\b",
         "conclusion": r"\b(conclusion|conclusions|summary)\b",
+        "reference": r"\b(references?|bibliography|acknowledg(e)?ments?)\b",
     }
     for label, pattern in patterns.items():
         if re.search(pattern, text_prefix, flags=re.IGNORECASE):
@@ -180,8 +183,12 @@ def _format_chunks_for_prompt(
     title: str,
     authors: str,
     chunks: list[dict],
+    detected_language_code: str | None = None,
 ) -> str:
     """human readable hint: rebuild the same context text format sent to the model."""
+
+    if not chunks:
+        return ""
 
     title_text = (title or "").strip()
     if stage in {"title_abstract", "full_text"}:
@@ -189,7 +196,14 @@ def _format_chunks_for_prompt(
 
     parts: list[str] = [f"Paper ID: {paper_id}", f"Title: {title_text}".strip()]
 
-    for idx, chunk in enumerate(chunks, start=1):
+    if stage == "full_text" and detected_language_code:
+        parts.append(f"Detected full-text language code (auto): {detected_language_code}")
+
+    prompt_chunks = [
+        chunk for chunk in chunks if str(chunk.get("kind") or "") != "title"
+    ]
+
+    for idx, chunk in enumerate(prompt_chunks, start=1):
         text = str(chunk.get("text", "")).strip()
         if stage in {"title_abstract", "full_text"}:
             text = _strip_author_mentions(text, authors)
@@ -214,6 +228,99 @@ def _format_chunks_for_prompt(
         prefix = "[" + ", ".join(prefix_parts) + "]"
         parts.append(f"{prefix}\n{text}")
     return "\n\n".join(parts)
+
+
+def _iter_selected_chunk_candidates(eligibility_file: Path, stage: str) -> list[Path]:
+    """human readable hint: prefer selected_chunks files that match the eligibility run tag."""
+
+    stage_dir = eligibility_file.parent
+    names: list[str] = []
+
+    for token in (
+        "eligibility_select_",
+        "eligibility_irrelevant_",
+        "eligibility_included_",
+        "eligibility_excluded_",
+        "eligibility_",
+    ):
+        if token in eligibility_file.name:
+            names.append(eligibility_file.name.replace(token, "selected_chunks_", 1))
+
+    stem = eligibility_file.stem
+    suffix_match = re.search(
+        r"eligibility(?:_(?:select|irrelevant|included|excluded))?_(.+)$",
+        stem,
+    )
+    if suffix_match:
+        suffix = suffix_match.group(1)
+        names.append(f"{stage}_selected_chunks_{suffix}.jsonl")
+
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    for name in names:
+        candidate = stage_dir / name
+        if candidate.exists() and candidate not in seen:
+            candidates.append(candidate)
+            seen.add(candidate)
+
+    # Conservative fallback: newest stage selected-chunks outputs in this stage folder.
+    for candidate in sorted(
+        stage_dir.glob(f"{stage}_*_selected_chunks_*.jsonl"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    ):
+        if candidate not in seen:
+            candidates.append(candidate)
+            seen.add(candidate)
+
+    return candidates
+
+
+def _load_selected_chunks_from_stage_output(
+    eligibility_file: Path,
+    stage: str,
+    paper_id: str,
+) -> list[dict] | None:
+    """human readable hint: read selected chunks from stage output first to avoid per-folder drift."""
+
+    target = str(paper_id or "").strip()
+    target_normalized = target.lstrip("#")
+
+    for chunks_file in _iter_selected_chunk_candidates(eligibility_file, stage):
+        try:
+            with chunks_file.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    payload = json.loads(line)
+                    if not isinstance(payload, dict) or payload.get("meta"):
+                        continue
+                    pid = str(payload.get("paper_id", "")).strip()
+                    if not pid:
+                        continue
+                    if pid != target and pid.lstrip("#") != target_normalized:
+                        continue
+                    selected = payload.get("selected_chunks")
+                    if isinstance(selected, list):
+                        return selected
+        except Exception:
+            continue
+
+    return None
+
+
+def _detected_language_hint(diagnostics: dict) -> str | None:
+    """human readable hint: mirror runtime language hint line added to full_text prompts."""
+
+    trace = diagnostics.get("selection_trace")
+    if not isinstance(trace, dict):
+        return None
+    raw = trace.get("detected_language_code")
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip().lower()
+    return value or None
 
 
 def _title_abstract_context(stage: str, paper_id: str) -> tuple[str, list[dict]]:
@@ -342,24 +449,65 @@ def _load_selected_chunks(folder: Path, stage: str, paper_id: str) -> list[dict]
     raise ValueError(f"No selected chunks found for paper_id='{paper_id}' in {chunks_path}.")
 
 
-def _folder_stage_context(stage: str, paper_id: str, csv_root: Path) -> tuple[str, list[dict]]:
+def _folder_stage_context(
+    stage: str,
+    paper_id: str,
+    csv_root: Path,
+    diagnostics: dict | None = None,
+    eligibility_file: Path | None = None,
+    fallback_metadata: dict | None = None,
+) -> tuple[str, list[dict]]:
     """human readable hint: rebuild full_text/data_extraction model context from metadata + selected chunks."""
 
     folder = _find_paper_folder(stage, paper_id, csv_root)
     metadata = _load_folder_metadata(folder)
-    title = str(metadata.get("Title") or metadata.get("title") or "")
-    authors = str(metadata.get("Authors") or metadata.get("authors") or "")
-    chunks = _load_selected_chunks(folder, stage, paper_id)
-    context_text = _format_chunks_for_prompt(stage, paper_id, title, authors, chunks)
+    merged_metadata: dict = {}
+    if isinstance(fallback_metadata, dict):
+        merged_metadata.update(fallback_metadata)
+    if isinstance(metadata, dict):
+        merged_metadata.update(metadata)
+
+    title = str(merged_metadata.get("Title") or merged_metadata.get("title") or "")
+    authors = str(merged_metadata.get("Authors") or merged_metadata.get("authors") or "")
+
+    chunks = None
+    if eligibility_file is not None:
+        chunks = _load_selected_chunks_from_stage_output(eligibility_file, stage, paper_id)
+    if chunks is None:
+        chunks = _load_selected_chunks(folder, stage, paper_id)
+
+    language_hint = _detected_language_hint(diagnostics or {}) if stage == "full_text" else None
+    context_text = _format_chunks_for_prompt(
+        stage,
+        paper_id,
+        title,
+        authors,
+        chunks,
+        detected_language_code=language_hint,
+    )
     return context_text, chunks
 
 
-def _reconstruct_context(stage: str, paper_id: str, csv_root: Path) -> tuple[str, list[dict]]:
+def _reconstruct_context(
+    stage: str,
+    paper_id: str,
+    csv_root: Path,
+    diagnostics: dict | None = None,
+    eligibility_file: Path | None = None,
+    fallback_metadata: dict | None = None,
+) -> tuple[str, list[dict]]:
     """human readable hint: stage-aware reconstruction of exact model context with selected chunks."""
 
     if stage == "title_abstract":
         return _title_abstract_context(stage, paper_id)
-    return _folder_stage_context(stage, paper_id, csv_root)
+    return _folder_stage_context(
+        stage,
+        paper_id,
+        csv_root,
+        diagnostics=diagnostics,
+        eligibility_file=eligibility_file,
+        fallback_metadata=fallback_metadata,
+    )
 
 
 def _format_metric_value(value: object, digits: int = 6) -> str:
@@ -579,7 +727,15 @@ class InputTraceRunner:
         stored_prompt_campaign_id = str(diagnostics.get("prompt_campaign_id", "")).strip()
         csv_root = Path(PATH_SETTINGS.get("csv_dir", "input"))
 
-        context_text, selected_chunks = _reconstruct_context(stage, paper_id, csv_root)
+        record_metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        context_text, selected_chunks = _reconstruct_context(
+            stage,
+            paper_id,
+            csv_root,
+            diagnostics=diagnostics,
+            eligibility_file=eligibility_file,
+            fallback_metadata=record_metadata,
+        )
         recomputed_context_hash = _sha256_text(context_text)
 
         prompt_template, prompt_template_source = _load_prompt_template(stage, stored_prompt_campaign_id)

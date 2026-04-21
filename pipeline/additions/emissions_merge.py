@@ -37,17 +37,25 @@ def _read_csv_rows(path: Path) -> tuple[list[str], list[dict[str, str]]] | None:
     return fieldnames, rows
 
 
-def _ensure_run_column(fieldnames: list[str]) -> list[str]:
-    """human readable hint: ensure the emissions schema always includes a run column."""
+def _ensure_run_columns(fieldnames: list[str]) -> list[str]:
+    """human readable hint: ensure the emissions schema always includes run and run_id columns."""
 
-    if "run" in fieldnames:
-        return fieldnames
     updated = list(fieldnames)
-    if "project_name" in updated:
-        project_idx = updated.index("project_name")
-        updated.insert(project_idx + 1, "run")
-    else:
-        updated.append("run")
+
+    if "run" not in updated:
+        if "project_name" in updated:
+            project_idx = updated.index("project_name")
+            updated.insert(project_idx + 1, "run")
+        else:
+            updated.append("run")
+
+    if "run_id" not in updated:
+        if "run" in updated:
+            run_idx = updated.index("run")
+            updated.insert(run_idx + 1, "run_id")
+        else:
+            updated.append("run_id")
+
     return updated
 
 
@@ -69,10 +77,11 @@ def _write_csv_rows(path: Path, fieldnames: list[str], rows: list[dict[str, str]
 def _fill_run_values(
     rows: list[dict[str, str]],
     run_value: str,
+    run_id_value: str | None,
     *,
     override_existing: bool,
 ) -> list[dict[str, str]]:
-    """human readable hint: set run labels row-by-row with optional overwrite semantics."""
+    """human readable hint: set run/run_id values row-by-row with optional overwrite semantics."""
 
     updated: list[dict[str, str]] = []
     for row in rows:
@@ -80,11 +89,21 @@ def _fill_run_values(
         current = str(normalized.get("run", "") or "")
         if override_existing or not current:
             normalized["run"] = run_value
+
+        if run_id_value:
+            current_run_id = str(normalized.get("run_id", "") or "")
+            if override_existing or not current_run_id:
+                normalized["run_id"] = run_id_value
+
         updated.append(normalized)
     return updated
 
 
-def _label_single_file_retry_rows(rows: list[dict[str, str]], attempt_index: int) -> list[dict[str, str]]:
+def _label_single_file_retry_rows(
+    rows: list[dict[str, str]],
+    attempt_index: int,
+    run_id_value: str | None,
+) -> list[dict[str, str]]:
     """human readable hint: when only one emissions file exists, row 1 is main and later rows become retry_N."""
 
     retry_tag = f"retry_{attempt_index}"
@@ -98,6 +117,8 @@ def _label_single_file_retry_rows(rows: list[dict[str, str]], attempt_index: int
         else:
             if not current or current == "main":
                 normalized["run"] = retry_tag
+            if run_id_value and not str(normalized.get("run_id", "") or ""):
+                normalized["run_id"] = run_id_value
         labeled.append(normalized)
     return labeled
 
@@ -108,6 +129,7 @@ def merge_emissions_with_run_column(
     stage: str,
     run_label: str,
     attempt_index: int | None,
+    run_id: str | None = None,
 ) -> dict[str, Any] | None:
     """human readable hint: keep one per-run emissions CSV and append retry rows with explicit run labels."""
 
@@ -125,11 +147,11 @@ def merge_emissions_with_run_column(
         if loaded is None:
             return None
         fieldnames, rows = loaded
-        fieldnames = _ensure_run_column(fieldnames)
+        fieldnames = _ensure_run_columns(fieldnames)
         if not rows:
             return None
 
-        rewritten = _label_single_file_retry_rows(rows, int(attempt_index))
+        rewritten = _label_single_file_retry_rows(rows, int(attempt_index), run_id)
         if not _write_csv_rows(base_file, fieldnames, rewritten):
             return None
 
@@ -141,8 +163,8 @@ def merge_emissions_with_run_column(
     if base_loaded is None:
         return None
     base_fieldnames, base_rows = base_loaded
-    base_fieldnames = _ensure_run_column(base_fieldnames)
-    base_rows = _fill_run_values(base_rows, "main", override_existing=False)
+    base_fieldnames = _ensure_run_columns(base_fieldnames)
+    base_rows = _fill_run_values(base_rows, "main", None, override_existing=False)
     if not _write_csv_rows(base_file, base_fieldnames, base_rows):
         return None
 
@@ -153,10 +175,10 @@ def merge_emissions_with_run_column(
     if latest_loaded is None:
         return None
     latest_fieldnames, latest_rows = latest_loaded
-    latest_fieldnames = _ensure_run_column(latest_fieldnames)
+    latest_fieldnames = _ensure_run_columns(latest_fieldnames)
 
     run_value = "main" if attempt_index in {None, 0} else f"retry_{int(attempt_index)}"
-    latest_rows = _fill_run_values(latest_rows, run_value, override_existing=True)
+    latest_rows = _fill_run_values(latest_rows, run_value, run_id, override_existing=True)
 
     final_fieldnames = list(base_fieldnames)
     for name in latest_fieldnames:

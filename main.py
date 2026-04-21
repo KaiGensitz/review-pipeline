@@ -66,11 +66,37 @@ def _qc_screened_already(stage: str) -> bool:
         return False
 
 
+def _active_prompt_and_kb(stage: str) -> tuple[str, str]:
+    """Resolve the active prompt and stage KB paths from PATH_SETTINGS."""
+
+    prompt_path = PATH_SETTINGS.get("prompt_file") or "<unconfigured>"
+    kb_path = PATH_SETTINGS.get("knowledge_base_file")
+
+    kb_by_stage = PATH_SETTINGS.get("knowledge_base_files")
+    if isinstance(kb_by_stage, dict):
+        stage_kb = kb_by_stage.get(stage)
+        if stage_kb:
+            kb_path = stage_kb
+
+    if not kb_path:
+        kb_path = "<unconfigured>"
+
+    return str(prompt_path), str(kb_path)
+
+
 def _run_pipeline_guarded(*, mark_failure: bool = True, **kwargs) -> bool:
     """Run the pipeline and store artifacts; mark prompts as not-all-yes on failure."""
     if "enable_time_savings" not in kwargs:
         # Enable time-savings from the start so resource_usage captures human-rate fields before prompts.
         kwargs["enable_time_savings"] = True
+
+    if bool(kwargs.get("split_only")) and "run_label_override" not in kwargs:
+        # human readable hint: split-only preflight runs should not create remaining_sample artifacts.
+        kwargs["run_label_override"] = "preflight"
+
+    if bool(kwargs.get("split_only")) and "sustainability_tracking" not in kwargs:
+        # human readable hint: skip tracking during folder-prep preflight to reduce empty/stale artifacts.
+        kwargs["sustainability_tracking"] = False
 
     result = run_pipeline(**kwargs)
 
@@ -524,6 +550,7 @@ def _record_retry_manifest(
     manifest_entry = {
         "stage": stage,
         "run_label": run_label,
+        "run_id": retry_artifact.get("run_id"),
         "attempt_index": attempt_default,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "source_csv": str(source_csv) if source_csv else None,
@@ -548,7 +575,12 @@ def _record_retry_manifest(
         return
 
 
-def _merge_emissions_with_run_column(stage: str, run_label: str, attempt_index: int) -> dict[str, object] | None:
+def _merge_emissions_with_run_column(
+    stage: str,
+    run_label: str,
+    attempt_index: int,
+    run_id: str | None,
+) -> dict[str, object] | None:
     """human readable hint: delegate CodeCarbon merge to the dedicated CSV-safe emissions helper module."""
 
     stage_root = Path(PATH_SETTINGS["output_root"]) / stage
@@ -557,6 +589,7 @@ def _merge_emissions_with_run_column(stage: str, run_label: str, attempt_index: 
         stage=stage,
         run_label=run_label,
         attempt_index=attempt_index,
+        run_id=run_id,
     )
 
 
@@ -771,7 +804,8 @@ def _post_run_updates(stage: str, artifact: dict | None, attempt_index: int) -> 
     if not artifact.get("success", True):
         return None
     run_label = artifact.get("run_label") or "remaining_sample"
-    emissions_info = _merge_emissions_with_run_column(stage, run_label, attempt_index)
+    run_id = str(artifact.get("run_id") or "").strip() or None
+    emissions_info = _merge_emissions_with_run_column(stage, run_label, attempt_index, run_id)
     _update_index_from_artifact(stage, artifact, attempt_index)
     # human readable hint: after a successful remaining run, write explicit qc+remaining total summaries.
     if str(run_label) == "remaining_sample" and int(attempt_index or 0) == 0:
@@ -875,6 +909,9 @@ def _write_combined_qc_remaining_totals(stage: str) -> None:
         print("[summary] Skipping qc+remaining resource total file: TOTAL row not found in one of the logs.")
         return
 
+    qc_run_id = str(qc_total.get("run_id") or "")
+    rem_run_id = str(rem_total.get("run_id") or "")
+
     timestamp = datetime.now().strftime("%Y%m%d_%H-%M-%S")
 
     numeric_fields = [
@@ -912,6 +949,7 @@ def _write_combined_qc_remaining_totals(stage: str) -> None:
         "paper_id": "TOTAL_QC_PLUS_REMAINING",
         "stage": stage,
         "run_label": "qc_plus_remaining",
+        "run_id": f"{stage}_qc_plus_remaining_{timestamp}",
         "tokens_total": int(combined_numeric.get("tokens_total", 0.0)),
         "prompt_tokens": int(combined_numeric.get("prompt_tokens", 0.0)),
         "response_tokens": int(combined_numeric.get("response_tokens", 0.0)),
@@ -932,6 +970,10 @@ def _write_combined_qc_remaining_totals(stage: str) -> None:
         "source_resource_logs": {
             "qc_sample": str(qc_resource),
             "remaining_sample": str(rem_resource),
+        },
+        "source_run_ids": {
+            "qc_sample": qc_run_id,
+            "remaining_sample": rem_run_id,
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -963,6 +1005,8 @@ def _write_combined_qc_remaining_totals(stage: str) -> None:
                 fieldnames=[
                     "stage",
                     "run_scope",
+                    "qc_run_id",
+                    "remaining_run_id",
                     "qc_emissions_path",
                     "remaining_emissions_path",
                     "qc_rows",
@@ -986,6 +1030,8 @@ def _write_combined_qc_remaining_totals(stage: str) -> None:
                 {
                     "stage": stage,
                     "run_scope": "qc_plus_remaining",
+                    "qc_run_id": qc_run_id,
+                    "remaining_run_id": rem_run_id,
                     "qc_emissions_path": str(qc_emissions),
                     "remaining_emissions_path": str(rem_emissions),
                     "qc_rows": int(qc_em_totals["row_count"]),
@@ -1007,6 +1053,99 @@ def _write_combined_qc_remaining_totals(stage: str) -> None:
         print(f"[summary] Combined CodeCarbon totals written: {combined_emissions_path}")
     except Exception as exc:
         print(f"[summary] Could not write combined CodeCarbon totals: {exc}")
+
+
+def _minute_stamp_from_remaining_resource_name(stage: str, path: Path) -> str | None:
+    """human readable hint: extract YYYYMMDD_HH-MM stamp from remaining resource filename."""
+
+    prefix = f"{stage}_remaining_sample_main_resource_usage_"
+    name = path.name
+    if not name.startswith(prefix):
+        return None
+    tail = name[len(prefix) :]
+    parts = tail.split("_")
+    if len(parts) < 2:
+        return None
+    date_part = parts[0]
+    time_part = parts[1]
+    if len(date_part) != 8 or len(time_part) < 5:
+        return None
+    return f"{date_part}_{time_part[:5]}"
+
+
+def _minute_stamp_from_remaining_emissions_name(stage: str, path: Path) -> str | None:
+    """human readable hint: extract YYYYMMDD_HH-MM stamp from remaining emissions filename."""
+
+    prefix = f"{stage}_remaining_sample_codecarbon_emissions_"
+    name = path.name
+    if not name.startswith(prefix):
+        return None
+    tail = name[len(prefix) :]
+    if len(tail) < 14:
+        return None
+    stamp = tail[:14]
+    if len(stamp.split("_")) != 2:
+        return None
+    return stamp
+
+
+def _cleanup_stale_remaining_tracking_files(stage: str) -> None:
+    """human readable hint: delete stale zero-token remaining_sample tracking artifacts from earlier runs."""
+
+    stage_root = Path(PATH_SETTINGS.get("output_root", "output")) / stage
+    if not stage_root.exists():
+        return
+
+    resource_logs = sorted(stage_root.glob(f"{stage}_remaining_sample_main_resource_usage_*.log"))
+    if not resource_logs:
+        return
+
+    stale_logs: list[Path] = []
+    stale_minutes: set[str] = set()
+    nonstale_minutes: set[str] = set()
+
+    for log_path in resource_logs:
+        total = _latest_total_resource_entry(log_path)
+        if not total:
+            continue
+        tokens_total = _safe_float(total.get("tokens_total"))
+        paper_count = _safe_float(total.get("paper_count"))
+        minute_stamp = _minute_stamp_from_remaining_resource_name(stage, log_path)
+        if tokens_total <= 0.0 and paper_count <= 0.0:
+            stale_logs.append(log_path)
+            if minute_stamp:
+                stale_minutes.add(minute_stamp)
+        elif minute_stamp:
+            nonstale_minutes.add(minute_stamp)
+
+    removed_logs = 0
+    for log_path in stale_logs:
+        try:
+            log_path.unlink(missing_ok=True)
+            removed_logs += 1
+        except Exception:
+            continue
+
+    removed_emissions = 0
+    if stale_minutes:
+        emissions_files = sorted(stage_root.glob(f"{stage}_remaining_sample_codecarbon_emissions_*.csv"))
+        for emissions_path in emissions_files:
+            minute_stamp = _minute_stamp_from_remaining_emissions_name(stage, emissions_path)
+            if not minute_stamp:
+                continue
+            # Keep emissions files if a non-stale remaining run exists for the same minute stamp.
+            if minute_stamp in stale_minutes and minute_stamp not in nonstale_minutes:
+                try:
+                    emissions_path.unlink(missing_ok=True)
+                    removed_emissions += 1
+                except Exception:
+                    continue
+
+    if removed_logs or removed_emissions:
+        print(
+            f"[cleanup] Removed stale remaining_sample tracking files: "
+            f"resource_logs={removed_logs}, emissions_csv={removed_emissions}."
+        )
 
 
 def _auto_generate_qc_mismatch_csv(stage: str, artifact: dict[str, object] | None) -> None:
@@ -1664,6 +1803,8 @@ class MainWorkflow:
         if not _ensure_csv_inputs(csv_dir):
             return
 
+        _cleanup_stale_remaining_tracking_files(stage)
+
         _enforce_no_runtime_model_downloads()
 
         if not _ensure_nltk_tokenizers():
@@ -1673,8 +1814,15 @@ class MainWorkflow:
             print("[error] QC confirmation requires an interactive terminal. Rerun in an interactive session.")
             return
 
-        if not _prompt_yes_no("[qc] Are study tags the same since the last run? [y/n]: "):
-            print("[qc] Update STUDY_TAGS_INCLUDE/STUDY_TAGS_IGNORE in config/user_orchestrator.py.")
+        active_prompt_path, active_kb_path = _active_prompt_and_kb(stage)
+        print(f"[config] Active prompt file: {active_prompt_path}")
+        print(f"[config] Active knowledge-base file: {active_kb_path}")
+
+        if not _prompt_yes_no("[qc] Are the prompt, knowledge base, and study tags identical to previous runs? [y/n]: "):
+            print("[qc] Please confirm or update prompt, knowledge-base, and study-tag settings before running.")
+            print(f"[qc] Prompt file in use: {active_prompt_path}")
+            print(f"[qc] Knowledge-base file in use: {active_kb_path}")
+            print("[qc] Study-tag settings: STUDY_TAGS_INCLUDE and STUDY_TAGS_IGNORE in config/user_orchestrator.py.")
             return
 
         retry_csv = _latest_retry_csv(stage)

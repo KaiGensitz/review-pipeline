@@ -108,6 +108,15 @@ Placeholder behavior (all stages):
   - `knowledge-base/title_abstract_pos-neg_examples.csv`
   - `knowledge-base/full_text_pos-neg_examples.csv`
   - `knowledge-base/data_extraction_pos-neg_examples.csv`
+- Optional full_text draft generation utility:
+  - `python -m pipeline.additions.generate_cleaned_hybrid_kb_draft`
+  - writes `knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv`
+  - writes `knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json`
+  - non-destructive by design (source KB files are not modified)
+- Stage KB paths are configurable in `config/user_orchestrator.py` via:
+  - `KNOWLEDGE_BASE_FILES` (per-stage defaults)
+  - `KB_FILE_OVERRIDES` (one-run stage-specific swaps)
+  - for full_text draft use: `KB_FILE_OVERRIDES["full_text"] = FULL_TEXT_CLEANED_HYBRID_DRAFT`
 - Required KB columns: `label` (`POS`/`NEG`) and `text`.
 - Relevance selection uses embedding centroids (POS vs NEG) for `full_text`/`data_extraction`; `title_abstract` uses full text input directly.
 

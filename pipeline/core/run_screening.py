@@ -25,11 +25,36 @@ from config.user_orchestrator import (
 
 DEFAULT_STAGE_ROOT = Path(PATH_SETTINGS.get("output_root", REPO_ROOT / "output"))
 
-STAGE_KB_DEFAULTS = {
+FALLBACK_STAGE_KB_DEFAULTS = {
     "title_abstract": REPO_ROOT / "knowledge-base" / "title_abstract_pos-neg_examples.csv",
     "full_text": REPO_ROOT / "knowledge-base" / "full_text_pos-neg_examples.csv",
     "data_extraction": REPO_ROOT / "knowledge-base" / "data_extraction_pos-neg_examples.csv",
 }
+
+
+def _resolve_kb_path(path_value: str | Path) -> Path:
+    """Resolve a possibly relative KB path against repository root."""
+
+    path_obj = Path(path_value)
+    return path_obj if path_obj.is_absolute() else (REPO_ROOT / path_obj)
+
+
+def _load_stage_kb_defaults_from_config() -> dict[str, Path]:
+    """Load per-stage KB defaults from PATH_SETTINGS with safe fallbacks."""
+
+    configured = PATH_SETTINGS.get("knowledge_base_files")
+    resolved: dict[str, Path] = {}
+    for stage_name, fallback_path in FALLBACK_STAGE_KB_DEFAULTS.items():
+        if isinstance(configured, dict):
+            raw_path = configured.get(stage_name)
+            if raw_path:
+                resolved[stage_name] = _resolve_kb_path(raw_path)
+                continue
+        resolved[stage_name] = fallback_path
+    return resolved
+
+
+STAGE_KB_DEFAULTS = _load_stage_kb_defaults_from_config()
 
 
 class StagePipelineRunner:
@@ -59,6 +84,23 @@ def _timestamp_label() -> str:
     Note: timestamps prevent overwriting prior runs.
     """
     return datetime.now().strftime("%Y%m%d_%H-%M-%S")
+
+
+def _sanitize_run_component(value: str) -> str:
+    """Keep run-id components filename-safe and deterministic."""
+
+    cleaned = "".join(ch if (ch.isalnum() or ch in {"-", "_"}) else "-" for ch in str(value or "").strip())
+    cleaned = cleaned.strip("-_")
+    return cleaned or "run"
+
+
+def _build_run_id(stage: str, run_label: str, campaign_suffix: str) -> str:
+    """Build a stable run identifier shared across outputs for one invocation."""
+
+    stage_part = _sanitize_run_component(stage)
+    label_part = _sanitize_run_component(run_label)
+    campaign_part = _sanitize_run_component(campaign_suffix)
+    return f"{stage_part}_{label_part}_{campaign_part}"
 
 
 def _stage_root(stage: str) -> Path:
@@ -399,14 +441,16 @@ def run_pipeline(
         raise ValueError(f"Unknown stage '{stage}'. Expected one of {sorted(STAGE_KB_DEFAULTS)}.")
     stage_kb_default = STAGE_KB_DEFAULTS[stage]
     if kb_file is None:
-        kb_file = str(stage_kb_default)
-        if not Path(kb_file).exists():
+        kb_path = stage_kb_default
+        if not kb_path.exists():
             raise FileNotFoundError(
                 f"Missing stage-specific knowledge base for '{stage}'. Expected file at {stage_kb_default}."
             )
     else:
-        if not Path(kb_file).exists():
-            raise FileNotFoundError(f"Missing knowledge base override at {kb_file} for stage '{stage}'.")
+        kb_path = _resolve_kb_path(kb_file)
+        if not kb_path.exists():
+            raise FileNotFoundError(f"Missing knowledge base override at {kb_path} for stage '{stage}'.")
+    kb_file = str(kb_path)
 
     csv_dir = csv_dir or PATH_SETTINGS.get("csv_dir")
     csv_dir_path = Path(csv_dir) if csv_dir else REPO_ROOT / "input"
@@ -420,6 +464,7 @@ def run_pipeline(
         prompt_campaign_id = "unknown"
 
     campaign_suffix = f"{timestamp_label}_{prompt_campaign_id}"
+    run_id = _build_run_id(stage, run_label, campaign_suffix)
     eligibility_output = eligibility_output or stage_root / f"{base_prefix}_eligibility_{campaign_suffix}.jsonl"
     chunks_output = chunks_output or stage_root / f"{base_prefix}_selected_chunks_{campaign_suffix}.jsonl"
     text_output = text_output or stage_root / f"{base_prefix}_screening_results_readable_{campaign_suffix}.txt"
@@ -511,6 +556,7 @@ def run_pipeline(
         chunks_output_path=str(chunks_output),
         text_output_path=str(text_output),
         run_label=run_label,
+        run_id=run_id,
         error_log_path=str(error_log),
         resource_log_path=str(resource_log_path),
         codecarbon_enabled=codecarbon_enabled,
@@ -605,6 +651,7 @@ def run_pipeline(
         "text_path": str(text_path),
         "resource_log_path": str(resource_log_resolved),
         "run_label": run_label,
+        "run_id": run_id,
         "stage": stage,
         "prompt_campaign_id": prompt_campaign_id,
         "prompt_template_snapshot_path": str(pipeline._prompt_snapshot_path) if getattr(pipeline, "_prompt_snapshot_path", None) else None,

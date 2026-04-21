@@ -31,9 +31,32 @@ This document defines the execution order for screening and extraction runs.
 
 - Bern network access (eduroam/campus LAN/VPN).
 - `.env` with `LLM_API_KEY`.
+- POS/NEG example PDFs prepared in [papers/pos_examples](papers/pos_examples) and [papers/neg_examples](papers/neg_examples).
 - `CURRENT_STAGE` set in [config/user_orchestrator.py](config/user_orchestrator.py).
+- Active stage KB path configured in [config/user_orchestrator.py](config/user_orchestrator.py) (`KNOWLEDGE_BASE_FILES` and optional `KB_FILE_OVERRIDES`).
 - `LLM_SETTINGS["context_window_total_tokens"]` and `LLM_SETTINGS["max_tokens"]` set consistently for the active model (`max_tokens < context_window_total_tokens`).
 - Stage KB file exists with `label` (`POS`/`NEG`) and `text` columns.
+- Optional for `full_text`: cleaned-hybrid draft generated and selected via `KB_FILE_OVERRIDES["full_text"]` when you want the draft instead of the default full-text KB.
+
+## Stage 0: Bootstrap KB and Prompt Suggestions
+
+Run this once per new topic or whenever your POS/NEG example PDFs are updated:
+
+- `python -m pipeline.additions.bootstrap_stage_kb_and_prompts`
+
+This produces stage-ready KB CSVs and first-pass prompt suggestions, then writes a summary to [knowledge-base/kb_bootstrap_summary.json](knowledge-base/kb_bootstrap_summary.json).
+
+## Stage 0b (Optional): Generate Full-Text Cleaned-Hybrid KB Draft
+
+Run this when you want a cleaned full-text draft KB while keeping source KB files unchanged:
+
+- `python -m pipeline.additions.generate_cleaned_hybrid_kb_draft`
+
+Outputs:
+- [knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv](knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv)
+- [knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json](knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json)
+
+To use it in a run, set `KB_FILE_OVERRIDES["full_text"]` in [config/user_orchestrator.py](config/user_orchestrator.py).
 
 ## Stage Order
 
@@ -98,7 +121,7 @@ Use this section when you need to know exactly when parsing, embeddings, LLM cal
 ## Stage 1: Title Abstract
 
 1. Import screen CSV to `input/` (`*_screen_csv_*.csv`).
-2. Prepare `knowledge-base/title_abstract_pos-neg_examples.csv`.
+2. Prepare `knowledge-base/title_abstract_pos-neg_examples.csv` (or configure an override in `KB_FILE_OVERRIDES["title_abstract"]`).
 3. Run `main.py` to create and screen QC sample.
 4. Humans review the same QC sample.
 5. Run validation (`stats_engine`) with select/irrelevant CSVs.
@@ -107,7 +130,9 @@ Use this section when you need to know exactly when parsing, embeddings, LLM cal
 ## Stage 2: Full Text
 
 1. Export select CSV to `input/` (`*_select_csv_*.csv`).
-2. Prepare `knowledge-base/full_text_pos-neg_examples.csv`.
+2. Prepare `knowledge-base/full_text_pos-neg_examples.csv` (or configure an override in `KB_FILE_OVERRIDES["full_text"]`).
+	- Optional override target: `knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv`.
+	- If using the draft, confirm `knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json` exists.
 3. Run `main.py` once to create `input/per_paper_full_text/` folders (setup-only run).
 4. Add one PDF per paper folder.
 5. Run QC-only screening, then human QC, then validation.
@@ -120,7 +145,7 @@ Use this section when you need to know exactly when parsing, embeddings, LLM cal
 ## Stage 3: Data Extraction
 
 1. Export included CSV to `input/` (`*_included_csv_*.csv`).
-2. Prepare `knowledge-base/data_extraction_pos-neg_examples.csv`.
+2. Prepare `knowledge-base/data_extraction_pos-neg_examples.csv` (or configure an override in `KB_FILE_OVERRIDES["data_extraction"]`).
 3. Ensure `input/per_paper_full_text/` exists from prior stage.
 4. Run `main.py` to build `input/per_paper_data_extraction/`.
 5. Run QC-only extraction, then human QC extraction, then validation.
@@ -145,9 +170,11 @@ Use this section when you need to know exactly when parsing, embeddings, LLM cal
 ```text
 START -> run main.py
 	|
-	+-- Prompt: [qc] Are study tags the same since the last run? [y/n]:
+	+-- Startup echo: [config] Active prompt file: <path>
+	+-- Startup echo: [config] Active knowledge-base file: <path>
+	+-- Prompt: [qc] Are the prompt, knowledge base, and study tags identical to previous runs? [y/n]:
 	|     |- y -> continue
-	|     \- n -> STOP (update STUDY_TAGS_INCLUDE/STUDY_TAGS_IGNORE in config/user_orchestrator.py)
+	|     \- n -> STOP (review prompt file, knowledge-base file, and STUDY_TAGS_INCLUDE/STUDY_TAGS_IGNORE in config/user_orchestrator.py)
 	|
 	+-- If pending retry CSV exists:
 	|     Prompt: [retry] Run pending retry CSV first? [y/n]:

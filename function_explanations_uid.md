@@ -441,6 +441,46 @@ This appendix provides function-level explanations for scripts and classes in th
 #### run_validation()
 - Human readable hint: Compatibility wrapper for direct execution.
 
+## pipeline/additions/generate_cleaned_hybrid_kb_draft.py
+
+### Class ExampleRow
+- Human readable hint: typed container for one KB row (`label`, `source`, `text`).
+### Class ChunkCandidate
+- Human readable hint: typed container for one cleaned chunk candidate with score and source metadata.
+
+### Script-level functions
+- Human readable hint: compatibility wrappers or helper functions used by the primary class.
+
+#### _parse_args()
+- Human readable hint: parse CLI options for short/chunk KB inputs, draft outputs, and cleaning thresholds.
+
+#### _read_kb_rows(path)
+- Human readable hint: load KB rows from CSV (`utf-8-sig`), keeping only non-empty POS/NEG examples.
+
+#### _quality_metrics(text)
+- Human readable hint: compute chunk quality signals (token ratios, domain signals, low-value/legal-text flags).
+
+#### _best_window(text, max_words)
+- Human readable hint: select the highest-quality text window from long chunk rows while preserving punctuation.
+
+#### _build_chunk_candidates(rows, max_words, min_words)
+- Human readable hint: clean, filter, deduplicate, and score chunk rows into reusable candidate snippets.
+
+#### _select_candidates(candidates, needed, max_chunks_per_source)
+- Human readable hint: choose top-scoring candidates with per-source diversity limits.
+
+#### _to_hybrid_rows(candidates)
+- Human readable hint: convert selected chunk candidates into final POS/NEG KB rows with explicit reasoning preface.
+
+#### _write_csv(path, rows)
+- Human readable hint: write the cleaned-hybrid draft KB CSV without touching source KB files.
+
+#### _write_report(path, payload)
+- Human readable hint: write a JSON report with candidate stats, skip reasons, and final class-balance counts.
+
+#### main()
+- Human readable hint: end-to-end non-destructive draft generation entrypoint for full-text cleaned-hybrid KB creation.
+
 ## pipeline/core/pipeline.py
 
 ### Class PaperRecord

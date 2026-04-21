@@ -955,6 +955,7 @@ class PaperScreeningPipeline:
         resource_log_path: str | None = None,
         enable_time_savings: bool = False,
         run_label: str = "run",
+        run_id: str | None = None,
         codecarbon_enabled: bool | None = None,
         qc_sample_path: str | None = None,
         qc_sample_readable_path: str | None = None,
@@ -1097,6 +1098,7 @@ class PaperScreeningPipeline:
         self._monitoring_kb_neg_count = 0
         self._prompt_template_hash = self._sha256_text(self.prompt_template)
         self._prompt_campaign_id = self._prompt_template_hash[:12]
+        self.run_id = str(run_id).strip() if run_id else f"{self.stage}_{self.run_label}_{self._prompt_campaign_id}"
         self._prompt_snapshot_path: Path | None = None
         self._prompt_required_json_fields = self._extract_required_json_fields_from_prompt(self.prompt_template)
         self._configure_dynamic_screening_schema()
@@ -1111,6 +1113,7 @@ class PaperScreeningPipeline:
             stage=self.stage,
             qc_sample_path=self.qc_sample_path,
             run_label=self.run_label,
+            run_id=self.run_id,
             enable_time_savings=enable_time_savings,
         )
 
@@ -1555,6 +1558,8 @@ class PaperScreeningPipeline:
                         "diagnostics": record["diagnostics"],
                         "metadata": record["metadata"],
                         "stage": self.stage,
+                        "run_label": self.run_label,
+                        "run_id": self.run_id,
                     }
                     payload_line = json.dumps(payload) + "\n"
                     elig_buffer.append(payload_line)
@@ -1591,6 +1596,8 @@ class PaperScreeningPipeline:
                                 "error_flag": error_flag,
                                 "selected_chunks": record["selected_chunks"],
                                 "stage": self.stage,
+                                "run_label": self.run_label,
+                                "run_id": self.run_id,
                             }
                         )
                         + "\n"
@@ -1677,6 +1684,9 @@ class PaperScreeningPipeline:
                 time_stats = self._percentiles(self._paper_times if writer is elig_writer else decision_times)
                 summary: dict[str, object] = {
                     "meta": "summary",
+                    "stage": self.stage,
+                    "run_label": self.run_label,
+                    "run_id": self.run_id,
                     "paper_count": count,
                     "percent_of_stage": percent,
                     "total_paper_count": total_input_rows,
@@ -1694,6 +1704,8 @@ class PaperScreeningPipeline:
                     {
                         "sample_selection": sample_selection,
                         "stage": self.stage,
+                        "run_label": self.run_label,
+                        "run_id": self.run_id,
                         "decision_split": decision_label,
                         "paper_count": count,
                         "percent_of_stage": percent,
@@ -1727,6 +1739,8 @@ class PaperScreeningPipeline:
                 fieldnames = [
                     "sample_selection",
                     "stage",
+                    "run_label",
+                    "run_id",
                     "decision_split",
                     "paper_count",
                     "percent_of_stage",
@@ -1786,6 +1800,7 @@ class PaperScreeningPipeline:
                 "meta": "error_summary",
                 "stage": self.stage,
                 "run_label": self.run_label,
+                "run_id": self.run_id,
                 "paper_errors": paper_error_count,
                 "paper_total": total_planned,
                 "error_rate_percent": ((paper_error_count / total_planned) * 100.0) if total_planned else 0.0,
@@ -2023,6 +2038,7 @@ class PaperScreeningPipeline:
             "schema_version": 2,
             "stage": self.stage,
             "run_label": self.run_label,
+            "run_id": self.run_id,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "totals": {
                 "papers": total,
@@ -2519,6 +2535,8 @@ class PaperScreeningPipeline:
         output_metadata = self._metadata_without_authors(paper.metadata)
         record = {
             "paper_id": paper.paper_id,
+            "run_label": self.run_label,
+            "run_id": self.run_id,
             "selected_chunks": selected,
             "llm_decision": llm_decision,
             "diagnostics": {
@@ -2535,6 +2553,8 @@ class PaperScreeningPipeline:
                 "full_prompt_sha256": full_prompt_hash,
                 "prompt_campaign_id": self._prompt_campaign_id,
                 "prompt_template_snapshot_path": str(self._prompt_snapshot_path) if self._prompt_snapshot_path else None,
+                "run_label": self.run_label,
+                "run_id": self.run_id,
                 "llm_seed": llm_seed,
                 "llm_top_p": llm_top_p,
                 "selected_score_stats": selected_score_stats,
@@ -2978,6 +2998,8 @@ class PaperScreeningPipeline:
 
         record = {
             "paper_id": paper.paper_id,
+            "run_label": self.run_label,
+            "run_id": self.run_id,
             "selected_chunks": selected,
             "llm_decision": llm_decision,
             "diagnostics": {
@@ -2994,6 +3016,8 @@ class PaperScreeningPipeline:
                 "full_prompt_sha256": full_prompt_hash,
                 "prompt_campaign_id": self._prompt_campaign_id,
                 "prompt_template_snapshot_path": str(self._prompt_snapshot_path) if self._prompt_snapshot_path else None,
+                "run_label": self.run_label,
+                "run_id": self.run_id,
                 "llm_seed": llm_seed,
                 "llm_top_p": llm_top_p,
                 "raw_chunk_count": raw_chunk_count,
@@ -6337,6 +6361,7 @@ class PaperScreeningPipeline:
             "error": message,
             "stage": getattr(self, "stage", None),
             "run_label": getattr(self, "run_label", None),
+            "run_id": getattr(self, "run_id", None),
             "llm_model": llm_model,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
@@ -6410,6 +6435,8 @@ class PaperScreeningPipeline:
 
         payload = {
             "paper_id": paper.paper_id,
+            "run_label": self.run_label,
+            "run_id": self.run_id,
             "llm_decision": decision,
             "selected_chunks": selected,
             "extracted_data": extraction_payload.get("extracted_data") if extraction_payload else None,
@@ -6462,6 +6489,8 @@ class PaperScreeningPipeline:
                         "schema_version": 1,
                         "stage": "full_text",
                         "paper_id": str(paper.paper_id),
+                        "run_label": self.run_label,
+                        "run_id": self.run_id,
                         "metadata": metadata_snapshot,
                         "selected_chunks": selected,
                         "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -6482,6 +6511,8 @@ class PaperScreeningPipeline:
                         {
                             "meta": "selected_chunks",
                             "description": f"Chunks retained for LLM input for stage '{self.stage}' (JSONL).",
+                            "run_label": self.run_label,
+                            "run_id": self.run_id,
                         }
                     )
                     + "\n"
@@ -6493,6 +6524,8 @@ class PaperScreeningPipeline:
                             "error_flag": paper.paper_id in self._error_ids,
                             "selected_chunks": selected,
                             "stage": self.stage,
+                            "run_label": self.run_label,
+                            "run_id": self.run_id,
                         }
                     )
                     + "\n"
@@ -6571,6 +6604,8 @@ class PaperScreeningPipeline:
                         "meta": "extraction_results",
                         "description": "Per-paper extracted fields (JSONL).",
                         "criteria": self._extraction_criteria,
+                        "run_label": self.run_label,
+                        "run_id": self.run_id,
                     }
                 )
                 + "\n"
@@ -6579,7 +6614,7 @@ class PaperScreeningPipeline:
 
         extraction_csv_path = output_dir / f"{self.stage}_extraction_results.csv"
         flat_extracted = extraction_payload.get("extracted_data_flat") or {}
-        fieldnames = ["paper_id"]
+        fieldnames = ["paper_id", "run_id"]
         if isinstance(flat_extracted, dict) and flat_extracted:
             fieldnames.extend(sorted(str(key) for key in flat_extracted.keys()))
         elif self._extraction_criteria:
@@ -6590,10 +6625,13 @@ class PaperScreeningPipeline:
         with open(extraction_csv_path, "w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=fieldnames)
             writer.writeheader()
-            row = {"paper_id": extraction_payload.get("paper_id", "")}
+            row = {
+                "paper_id": extraction_payload.get("paper_id", ""),
+                "run_id": extraction_payload.get("run_id", self.run_id),
+            }
             extracted = extraction_payload.get("extracted_data") or {}
             if isinstance(flat_extracted, dict) and flat_extracted:
-                for key in fieldnames[1:]:
+                for key in fieldnames[2:]:
                     row[key] = flat_extracted.get(key, "")
             elif self._extraction_criteria:
                 for key in self._extraction_criteria:
@@ -6718,6 +6756,8 @@ class PaperScreeningPipeline:
 
         return {
             "paper_id": paper.paper_id,
+            "run_label": self.run_label,
+            "run_id": self.run_id,
             "extracted_data": filtered,
             "extracted_data_flat": flat_filtered,
             "field_provenance": field_provenance,

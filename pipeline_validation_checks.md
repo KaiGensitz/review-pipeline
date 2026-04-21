@@ -29,6 +29,7 @@ This document lists implementation-level checks to verify run readiness and outp
 - `.env` contains `LLM_API_KEY`.
 - `LLM_SETTINGS["context_window_total_tokens"]` is set for the selected model and `max_tokens` is lower than that value.
 - Stage KB file exists and has `POS` and `NEG` rows.
+- If full_text uses the cleaned-hybrid draft override, verify `knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json` exists and reports balanced output.
 - If a stage prompt uses `{eligibility_criteria}`, `knowledge-base/eligibility_criteria.txt` exists and is current.
 - QC is enabled unless intentionally bypassed (`QC_ENABLED=True`).
 - QC files exist in `output/<stage>/`:
@@ -103,7 +104,7 @@ This document lists implementation-level checks to verify run readiness and outp
 
 Required inputs:
 - `input/*_screen_csv_*.csv`
-- `knowledge-base/title_abstract_pos-neg_examples.csv`
+- `knowledge-base/title_abstract_pos-neg_examples.csv` (or stage-specific override configured in `config/user_orchestrator.py`)
 
 Expected outputs:
 - `output/title_abstract/title_abstract_<sample>_sample_<main|retry_#>_eligibility_*.jsonl`
@@ -125,7 +126,9 @@ Validation command:
 
 Required inputs:
 - `input/*_select_csv_*.csv`
-- `knowledge-base/full_text_pos-neg_examples.csv`
+- `knowledge-base/full_text_pos-neg_examples.csv` (or stage-specific override configured in `config/user_orchestrator.py`)
+- optional override file: `knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv`
+- optional draft report: `knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json`
 - one PDF per paper folder in `input/per_paper_full_text/`
 - first-run rule: `main.py` creates per-paper folders and stops; screening starts only after all folders contain a PDF
 
@@ -151,7 +154,7 @@ Validation command:
 
 Required inputs:
 - `input/*_included_csv_*.csv`
-- `knowledge-base/data_extraction_pos-neg_examples.csv`
+- `knowledge-base/data_extraction_pos-neg_examples.csv` (or stage-specific override configured in `config/user_orchestrator.py`)
 - consensus CSV: `input/data_extraction_consensus.csv` (or explicit `--consensus`)
 
 Expected outputs:

@@ -103,6 +103,9 @@ Edit [config/user_orchestrator.py](config/user_orchestrator.py):
 - `CURRENT_STAGE` (`title_abstract`, `full_text`, `data_extraction`)
 - `LLM_MODEL`
 - `EMBED_MODEL`
+- KB selection controls:
+	- `KNOWLEDGE_BASE_FILES` for per-stage default KB paths
+	- `KB_FILE_OVERRIDES` for one-run stage-specific swaps (absolute or repo-relative paths)
 - per-paper artifact controls in `SCREENING_DEFAULTS`:
 	- `artifact_mode`: `compact` (default) or `full`
 	- `compact_keep_legacy_selected_chunks`: keep/remove legacy per-paper `*_selected_chunks.jsonl` in compact mode
@@ -128,15 +131,63 @@ Place CSV exports in [input](input) with file names including:
 - `full_text`: `*_select_csv_*.csv`
 - `data_extraction`: `*_included_csv_*.csv`
 
+Prepare initial example PDFs for bootstrap generation:
+
+- Positive examples in [papers/pos_examples](papers/pos_examples)
+- Negative examples in [papers/neg_examples](papers/neg_examples)
+
+Recommended minimum for stable first-pass behavior:
+
+1. At least 5 POS and 5 NEG PDFs (better: >=10 each)
+2. Extractable text PDFs (avoid image-only scans)
+3. Representative records for your target question
+4. Clear file names (author/year/title) for cleaner source traceability
+
+Generate stage KB files and suggested prompts from those PDFs:
+
+~~~bash
+python -m pipeline.additions.bootstrap_stage_kb_and_prompts
+~~~
+
+This command creates/updates:
+
+1. [knowledge-base/title_abstract_pos-neg_examples.csv](knowledge-base/title_abstract_pos-neg_examples.csv)
+2. [knowledge-base/full_text_pos-neg_examples.csv](knowledge-base/full_text_pos-neg_examples.csv)
+3. [knowledge-base/data_extraction_pos-neg_examples.csv](knowledge-base/data_extraction_pos-neg_examples.csv)
+4. [config/prompt_script_title_abstract_suggested.txt](config/prompt_script_title_abstract_suggested.txt)
+5. [config/prompt_script_full_text_suggested.txt](config/prompt_script_full_text_suggested.txt)
+6. [config/prompt_script_data_extraction_suggested.txt](config/prompt_script_data_extraction_suggested.txt)
+7. [knowledge-base/kb_bootstrap_summary.json](knowledge-base/kb_bootstrap_summary.json)
+
+If you accept the generated prompt suggestions, copy them into the active prompt files under [config](config).
+
+Optional full-text cleaned-hybrid draft generation (non-destructive):
+
+~~~bash
+python -m pipeline.additions.generate_cleaned_hybrid_kb_draft
+~~~
+
+This command writes:
+
+1. [knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv](knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv)
+2. [knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json](knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json)
+
+Use this only if you want a cleaned-hybrid full-text draft. Existing KB source files remain unchanged.
+
 Prepare knowledge-base files:
 
 - [knowledge-base/title_abstract_pos-neg_examples.csv](knowledge-base/title_abstract_pos-neg_examples.csv)
 - [knowledge-base/full_text_pos-neg_examples.csv](knowledge-base/full_text_pos-neg_examples.csv)
 - [knowledge-base/data_extraction_pos-neg_examples.csv](knowledge-base/data_extraction_pos-neg_examples.csv)
+- Optional full_text draft: [knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv](knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv)
+- Optional draft report: [knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json](knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json)
 - Optional shared criteria file: [knowledge-base/eligibility_criteria.txt](knowledge-base/eligibility_criteria.txt)
 	- It is used only when the active prompt contains `{eligibility_criteria}`.
 	- If the placeholder is not present, prompt text is used as-is.
 	- If the placeholder is present but the file is missing, the run continues with a warning.
+
+If you want to use a non-default KB for a run, set the stage path in `KB_FILE_OVERRIDES` in [config/user_orchestrator.py](config/user_orchestrator.py).
+For `full_text`, this can point to the optional cleaned-hybrid draft file.
 
 Required columns in all knowledge-base files:
 - `label` (`POS`/`NEG`)
@@ -184,7 +235,8 @@ python -m pipeline.additions.input_trace --paper-id <ID> --stage <stage> --show-
 - `.env` has `LLM_API_KEY`.
 - Correct `CURRENT_STAGE` in [config/user_orchestrator.py](config/user_orchestrator.py).
 - Correct stage CSV present in [input](input).
-- Stage knowledge-base file exists and is not empty.
+- Stage knowledge-base file selected via `KNOWLEDGE_BASE_FILES`/`KB_FILE_OVERRIDES` exists and is not empty.
+- If you selected the cleaned-hybrid full_text draft, verify its report JSON exists and confirms balanced POS/NEG output.
 - If you use `{eligibility_criteria}` in a prompt, verify [knowledge-base/eligibility_criteria.txt](knowledge-base/eligibility_criteria.txt) exists and is up to date.
 - For PDF stages, PDFs are placed in the generated per-paper folders.
 

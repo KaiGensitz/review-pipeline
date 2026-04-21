@@ -253,6 +253,7 @@ class ResourceUsageConfig:
 		qc_sample_path: Optional QC sample CSV path to derive actual QC counts.
 		qc_paper_count: Optional precomputed QC size to avoid re-reading the QC CSV.
 		run_label: Run label suffix (qc_sample or remaining_sample) for file naming.
+		run_id: Stable run identifier shared across artifacts for this invocation.
 		enable_time_savings: If True, compute human-time savings (only when validation ran).
 	"""
 
@@ -263,6 +264,7 @@ class ResourceUsageConfig:
 	qc_sample_path: Path | None = None
 	qc_paper_count: int | None = None
 	run_label: str = "run"
+	run_id: str = ""
 	enable_time_savings: bool = False
 
 
@@ -486,6 +488,9 @@ class ResourceUsageTracker:
 
 		record = {
 			"paper_id": paper_id,
+			"stage": self.stage,
+			"run_label": self.config.run_label,
+			"run_id": self.config.run_id,
 			"tokens_total": total_tokens,
 			"prompt_tokens": prompt_tokens,
 			"response_tokens": response_tokens,
@@ -576,6 +581,9 @@ class ResourceUsageTracker:
 			json.dumps(
 				{
 					"paper_id": "TOTAL",
+					"stage": self.stage,
+					"run_label": self.config.run_label,
+					"run_id": self.config.run_id,
 					"tokens_total": self._resource_totals["tokens_total"],
 					"prompt_tokens": self._resource_totals["prompt_tokens"],
 					"response_tokens": self._resource_totals["response_tokens"],
@@ -629,6 +637,7 @@ class ResourceUsageEngine:
 		qc_sample_path: Path | None = None,
 		qc_paper_count: int | None = None,
 		run_label: str = "run",
+		run_id: str = "",
 		enable_time_savings: bool = False,
 	) -> None:
 		"""human readable hint: __init__ captures all run-level tracking parameters in one visible constructor."""
@@ -641,6 +650,7 @@ class ResourceUsageEngine:
 			qc_sample_path=qc_sample_path,
 			qc_paper_count=qc_paper_count,
 			run_label=run_label,
+			run_id=run_id,
 			enable_time_savings=enable_time_savings,
 		)
 		self._tracker = ResourceUsageTracker(self.config)
