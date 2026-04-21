@@ -366,11 +366,73 @@ def _latest_base_outputs(stage: str, run_label: str) -> dict[str, Path | None]:
         "eligibility": _latest_for("eligibility", "jsonl"),
         "split_select": _latest_for("eligibility_select", "jsonl"),
         "split_exclude": _latest_for("eligibility_irrelevant", "jsonl"),
+        "split_included": _latest_for("eligibility_included", "jsonl"),
+        "split_excluded": _latest_for("eligibility_excluded", "jsonl"),
         "chunks": _latest_for("selected_chunks", "jsonl"),
         "text": _latest_for("screening_results_readable", "txt"),
         "resource": _latest_for("resource_usage", "log"),
         "emissions": _latest_for("codecarbon_emissions", "csv"),
     }
+
+
+def _latest_qc_sample_csv(stage: str) -> Path | None:
+    """human readable hint: find the newest QC sample CSV for a stage, if present."""
+
+    stage_root = Path(PATH_SETTINGS.get("output_root", "output")) / stage
+    matches = sorted(stage_root.glob(f"{stage}_qc_sample_batch_*.csv"))
+    return max(matches, key=lambda p: p.stat().st_mtime) if matches else None
+
+
+def _artifact_from_latest_base_outputs(stage: str, run_label: str) -> dict[str, object] | None:
+    """human readable hint: synthesize a minimal run artifact from latest persisted base outputs."""
+
+    base = _latest_base_outputs(stage, run_label)
+    eligibility = base.get("eligibility")
+    if not eligibility or not eligibility.exists():
+        return None
+
+    split_paths: dict[str, str] = {}
+    if stage == "title_abstract":
+        select_path = base.get("split_select")
+        irrelevant_path = base.get("split_exclude")
+        if select_path and select_path.exists():
+            split_paths["select"] = str(select_path)
+        if irrelevant_path and irrelevant_path.exists():
+            split_paths["irrelevant"] = str(irrelevant_path)
+    elif stage == "full_text":
+        included_path = base.get("split_included")
+        excluded_path = base.get("split_excluded")
+        if included_path and included_path.exists():
+            split_paths["included"] = str(included_path)
+        if excluded_path and excluded_path.exists():
+            split_paths["excluded"] = str(excluded_path)
+
+    artifact: dict[str, object] = {
+        "success": True,
+        "run_label": run_label,
+        "stage": stage,
+        "eligibility_path": str(eligibility),
+        "split_paths": split_paths,
+    }
+
+    chunks_path = base.get("chunks")
+    if isinstance(chunks_path, Path) and chunks_path.exists():
+        artifact["chunks_path"] = str(chunks_path)
+
+    text_path = base.get("text")
+    if isinstance(text_path, Path) and text_path.exists():
+        artifact["text_path"] = str(text_path)
+
+    resource_path = base.get("resource")
+    if isinstance(resource_path, Path) and resource_path.exists():
+        artifact["resource_log_path"] = str(resource_path)
+
+    if run_label == "qc_sample":
+        qc_csv = _latest_qc_sample_csv(stage)
+        if qc_csv and qc_csv.exists():
+            artifact["qc_sample_path"] = str(qc_csv)
+
+    return artifact
 
 
 def _require_base_outputs(stage: str, run_label: str) -> dict[str, Path | None]:
@@ -627,6 +689,78 @@ def _extract_summary_stats(path: Path) -> tuple[int, float, float, float, float]
     return count, percent, p50, p95, pmax
 
 
+def _extract_total_paper_count_from_summary(path: Path | None) -> int | None:
+    """human readable hint: read total_paper_count from the summary meta row when present."""
+
+    if not path or not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(obj, dict) or obj.get("meta") != "summary":
+                    continue
+                raw_total = obj.get("total_paper_count")
+                parsed_total: int | None = None
+                if isinstance(raw_total, int) and raw_total > 0:
+                    parsed_total = raw_total
+                elif isinstance(raw_total, float) and raw_total > 0:
+                    parsed_total = int(raw_total)
+                elif isinstance(raw_total, str):
+                    try:
+                        parsed = int(float(raw_total.strip()))
+                        if parsed > 0:
+                            parsed_total = parsed
+                    except Exception:
+                        parsed_total = None
+
+                raw_count = obj.get("paper_count")
+                parsed_count: int | None = None
+                if isinstance(raw_count, int) and raw_count > 0:
+                    parsed_count = raw_count
+                elif isinstance(raw_count, float) and raw_count > 0:
+                    parsed_count = int(raw_count)
+                elif isinstance(raw_count, str):
+                    try:
+                        parsed = int(float(raw_count.strip()))
+                        if parsed > 0:
+                            parsed_count = parsed
+                    except Exception:
+                        parsed_count = None
+
+                raw_percent = obj.get("percent_of_input_file")
+                parsed_percent: float | None = None
+                if isinstance(raw_percent, (int, float)):
+                    parsed_percent = float(raw_percent)
+                elif isinstance(raw_percent, str):
+                    try:
+                        parsed_percent = float(raw_percent.strip())
+                    except Exception:
+                        parsed_percent = None
+
+                inferred_total: int | None = None
+                if isinstance(parsed_count, int) and isinstance(parsed_percent, float) and parsed_percent > 0:
+                    inferred = int(round((parsed_count * 100.0) / parsed_percent))
+                    if inferred > 0:
+                        inferred_total = inferred
+
+                if isinstance(parsed_total, int) and parsed_total > 0:
+                    if isinstance(inferred_total, int) and inferred_total > parsed_total and parsed_percent is not None and parsed_percent < 100.0:
+                        return inferred_total
+                    return parsed_total
+                if isinstance(inferred_total, int) and inferred_total > 0:
+                    return inferred_total
+                return None
+    except Exception:
+        return None
+    return None
+
+
 def _run_tag_for_path(path: Path, stage: str, output_token: str) -> str:
     """human readable hint: derive run tag (sample + timestamp + retry) from filename."""
 
@@ -720,6 +854,13 @@ def _update_index_from_artifact(stage: str, artifact: dict | None, attempt_index
     def _to_path(val: object) -> Path | None:
         return Path(val) if isinstance(val, (str, os.PathLike)) else None
 
+    def _existing_or_fallback(primary: Path | None, fallback: Path | None) -> Path | None:
+        if isinstance(primary, Path) and primary.exists():
+            return primary
+        if isinstance(fallback, Path) and fallback.exists():
+            return fallback
+        return None
+
     def _count_records(path: Path | None) -> int:
         if not path or not path.exists():
             return 0
@@ -754,7 +895,10 @@ def _update_index_from_artifact(stage: str, artifact: dict | None, attempt_index
                 continue
         return total
 
-    elig_path = _to_path(artifact.get("eligibility_path") or artifact.get("eligibility"))
+    base_outputs = _latest_base_outputs(stage, run_label)
+
+    elig_path_raw = _to_path(artifact.get("eligibility_path") or artifact.get("eligibility"))
+    elig_path = _existing_or_fallback(elig_path_raw, base_outputs.get("eligibility"))
     split_paths_raw = artifact.get("split_paths") if isinstance(artifact.get("split_paths"), dict) else {}
     split_paths: dict[str, object] = dict(split_paths_raw) if isinstance(split_paths_raw, dict) else {}
 
@@ -762,18 +906,29 @@ def _update_index_from_artifact(stage: str, artifact: dict | None, attempt_index
     qc_csv = _to_path(artifact.get("qc_sample_path"))
     input_paths = stage_csvs if stage_csvs else ([qc_csv] if qc_csv else [])
     total_input_rows = _count_input_rows(input_paths)
+    if total_input_rows <= 0:
+        summary_total = _extract_total_paper_count_from_summary(elig_path)
+        if isinstance(summary_total, int) and summary_total > 0:
+            total_input_rows = summary_total
+    if total_input_rows <= 0 and isinstance(elig_path, Path):
+        total_input_rows = _count_records(elig_path)
 
-    base_outputs = _latest_base_outputs(stage, run_label)
     baseline_total = _count_records(base_outputs.get("eligibility"))
+    if baseline_total <= 0 and isinstance(elig_path, Path):
+        baseline_total = _count_records(elig_path)
 
     entries: list[tuple[str, Path | None, str]] = []
     entries.append(("all", elig_path, "eligibility"))
     if stage == "title_abstract":
-        entries.append(("select", _to_path(split_paths.get("select")), "eligibility_select"))
-        entries.append(("irrelevant", _to_path(split_paths.get("irrelevant")), "eligibility_irrelevant"))
+        select_path = _existing_or_fallback(_to_path(split_paths.get("select")), base_outputs.get("split_select"))
+        irrelevant_path = _existing_or_fallback(_to_path(split_paths.get("irrelevant")), base_outputs.get("split_exclude"))
+        entries.append(("select", select_path, "eligibility_select"))
+        entries.append(("irrelevant", irrelevant_path, "eligibility_irrelevant"))
     elif stage == "full_text":
-        entries.append(("included", _to_path(split_paths.get("included")), "eligibility_included"))
-        entries.append(("excluded", _to_path(split_paths.get("excluded")), "eligibility_excluded"))
+        included_path = _existing_or_fallback(_to_path(split_paths.get("included")), base_outputs.get("split_included"))
+        excluded_path = _existing_or_fallback(_to_path(split_paths.get("excluded")), base_outputs.get("split_excluded"))
+        entries.append(("included", included_path, "eligibility_included"))
+        entries.append(("excluded", excluded_path, "eligibility_excluded"))
 
     for decision_label, path_obj, token in entries:
         if not path_obj or not path_obj.exists():
@@ -796,6 +951,14 @@ def _update_index_from_artifact(stage: str, artifact: dict | None, attempt_index
         )
 
 
+def _ensure_qc_rows_in_index(stage: str) -> None:
+    """human readable hint: guarantee QC sample rows are present in the eligibility index."""
+
+    qc_artifact = _artifact_from_latest_base_outputs(stage, "qc_sample")
+    if qc_artifact:
+        _update_index_from_artifact(stage, qc_artifact, 0)
+
+
 def _post_run_updates(stage: str, artifact: dict | None, attempt_index: int) -> dict[str, object] | None:
     """human readable hint: after any run, merge emissions and refresh eligibility index."""
 
@@ -807,6 +970,8 @@ def _post_run_updates(stage: str, artifact: dict | None, attempt_index: int) -> 
     run_id = str(artifact.get("run_id") or "").strip() or None
     emissions_info = _merge_emissions_with_run_column(stage, run_label, attempt_index, run_id)
     _update_index_from_artifact(stage, artifact, attempt_index)
+    if str(run_label) == "remaining_sample":
+        _ensure_qc_rows_in_index(stage)
     # human readable hint: after a successful remaining run, write explicit qc+remaining total summaries.
     if str(run_label) == "remaining_sample" and int(attempt_index or 0) == 0:
         _write_combined_qc_remaining_totals(stage)
@@ -1742,7 +1907,12 @@ def _run_qc_loop(stage: str, sample_rate: float, quiet: bool = False) -> bool:
         if not force_new_qc and _qc_screened_already(stage):
             print("[qc] Existing QC screening found; skipping re-screen of QC sample.")
             ran = True
-            _PROMPT_STATE["last_artifact"] = {"success": True}
+            qc_artifact = _artifact_from_latest_base_outputs(stage, "qc_sample")
+            if qc_artifact:
+                _PROMPT_STATE["last_artifact"] = qc_artifact
+                _update_index_from_artifact(stage, qc_artifact, 0)
+            else:
+                _PROMPT_STATE["last_artifact"] = {"success": True}
         else:
             ran = _run_pipeline_guarded(
                 stage=stage,
