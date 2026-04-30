@@ -1,4 +1,4 @@
-﻿"""Screening and extraction pipeline.
+"""Screening and extraction pipeline.
 
 This module materializes per-paper folders (for full text and data extraction),
 selects evidence via embeddings, calls the LLM, writes JSONL/CSV outputs, and
@@ -25,8 +25,8 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Generator, Iterable, Mapping, Tuple, TextIO, cast
-from typing import Any, Literal
+from typing import Generator, Iterable, Tuple, TextIO, cast
+from typing import Any
 from statistics import mean, median, pstdev
 
 try:
@@ -35,7 +35,7 @@ except ImportError:  # pragma: no cover - optional dependency
     tqdm = None
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import ValidationError
 
 from pipeline.integrations.embedding_utils import (
     read_pdf_file,
@@ -52,12 +52,21 @@ from pipeline.selection.pdf_parser import (
     PARSER_LEVEL_LOW_DENSITY,
 )
 from pipeline.integrations.llm_client import OpenAIResponder
+from pipeline.core.extraction_schema import (
+    DynamicExtractionSchema,
+    flatten_extracted_data,
+    parse_and_validate,
+)
+from pipeline.core.prompt_context import load_stage_prompt_template
+from pipeline.core.screening_schema import (
+    FullTextScreeningDecisionModel,
+    TitleAbstractScreeningDecisionModel,
+)
 from config.user_orchestrator import (
     CURRENT_STAGE,
     EMBEDDING_SETTINGS,
     LLM_SETTINGS,
     PATH_SETTINGS,
-    PROMPT_FILES,
     SCREENING_DEFAULTS,
     STUDY_TAGS_INCLUDE,
     STAGE_RULES,
@@ -65,6 +74,45 @@ from config.user_orchestrator import (
 )
 from pipeline.additions.resource_usage import ResourceUsageEngine
 from pipeline.selection.chunking import chunk_fulltext_sentences, chunk_paper_sentences
+from pipeline.selection.prompt_signals import (
+    CORE_SCREENING_SCHEMA_FIELDS,
+    LEGACY_DEFAULT_EXCLUSION_KEYS,
+    NEVER_MATCH_PATTERN,
+    SECTION_RESCUE_KEYWORDS,
+    build_monitoring_signal_config,
+    build_prompt_signal_config,
+    build_study_tag_field_keys,
+    looks_like_exclusion_field,
+    normalize_schema_key,
+    select_topic_absence_reason_key,
+)
+from pipeline.selection.retrieval_config import (
+    FULLTEXT_SENTENCE_TARGET,
+    RETRIEVAL_ASSUMED_CHUNK_TOKENS,
+    RETRIEVAL_CHUNK_PROMPT_OVERHEAD_TOKENS,
+    RETRIEVAL_COUNTEREVIDENCE_MAX_PAIRS,
+    RETRIEVAL_COUNTEREVIDENCE_MAX_SCORE,
+    RETRIEVAL_COUNTEREVIDENCE_MIN_NEG_SCORE,
+    RETRIEVAL_COUNTEREVIDENCE_MIN_NON_TITLE_CAP,
+    RETRIEVAL_COUNTEREVIDENCE_MIN_PRIMARY_SCORE,
+    RETRIEVAL_COUNTEREVIDENCE_PAGE_DISTANCE,
+    RETRIEVAL_DATA_PROMPT_BUDGET_MIN_TOKENS,
+    RETRIEVAL_DATA_PROMPT_BUDGET_RATIO,
+    RETRIEVAL_DIVERSITY_NEAR_DUPLICATE_JACCARD,
+    RETRIEVAL_DIVERSITY_PAGE_WINDOW_SIZE,
+    RETRIEVAL_DIVERSITY_PAGE_WINDOW_SOFT_CAP,
+    RETRIEVAL_DIVERSITY_SECTION_SOFT_CAP,
+    RETRIEVAL_FALLBACK_TOP_K,
+    RETRIEVAL_FRAGMENTED_MAX_SHARE,
+    RETRIEVAL_MAX_NON_TITLE_CHUNKS,
+    RETRIEVAL_MIN_METHOD_TARGET,
+    RETRIEVAL_MIN_NON_TITLE_TARGET,
+    RETRIEVAL_MIN_SENTENCE_FLOOR,
+    RETRIEVAL_MONITORING_ONLY_PENALTY,
+    RETRIEVAL_PRECISION_MEDIUM_NON_TITLE_CAP,
+    RETRIEVAL_WEAK_MIN_NON_TITLE,
+    RETRIEVAL_WEAK_MIN_WORDS,
+)
 from pipeline.selection.selector import EmbeddingBackend, SelectionEngine, load_labeled_examples
 
 # Load environment variables once per process.
@@ -110,60 +158,9 @@ CONTEXT_WINDOW = int(llm_context_window_total_tokens)
 PROMPT_TOKEN_BUDGET = max(1, CONTEXT_WINDOW - int(llm_max_tokens))
 TITLE_TRUNC = 50  # short folder names to avoid Windows path limits
 PAPER_PDF_NAME = "paper.pdf"
-ELIGIBILITY_CRITERIA_PLACEHOLDER = "{eligibility_criteria}"
-RETRIEVAL_FALLBACK_TOP_K = 20
-RETRIEVAL_WEAK_MIN_NON_TITLE = 3
-RETRIEVAL_WEAK_MIN_WORDS = 280
-RETRIEVAL_FRAGMENTED_MAX_SHARE = 0.40
-RETRIEVAL_MIN_NON_TITLE_TARGET = 2
-RETRIEVAL_MIN_METHOD_TARGET = 1
-RETRIEVAL_DATA_PROMPT_BUDGET_RATIO = 0.60
-RETRIEVAL_DATA_PROMPT_BUDGET_MIN_TOKENS = 12_000
-RETRIEVAL_ASSUMED_CHUNK_TOKENS = 420
-RETRIEVAL_MAX_NON_TITLE_CHUNKS = 24
-RETRIEVAL_CHUNK_PROMPT_OVERHEAD_TOKENS = 28
-RETRIEVAL_DIVERSITY_SECTION_SOFT_CAP = 2
-RETRIEVAL_DIVERSITY_PAGE_WINDOW_SIZE = 2
-RETRIEVAL_DIVERSITY_PAGE_WINDOW_SOFT_CAP = 2
-RETRIEVAL_DIVERSITY_NEAR_DUPLICATE_JACCARD = 0.82
-RETRIEVAL_COUNTEREVIDENCE_MAX_PAIRS = 2
-RETRIEVAL_COUNTEREVIDENCE_MAX_SCORE = 0.08
-RETRIEVAL_COUNTEREVIDENCE_MIN_NEG_SCORE = 0.02
-RETRIEVAL_COUNTEREVIDENCE_PAGE_DISTANCE = 4
-RETRIEVAL_COUNTEREVIDENCE_MIN_PRIMARY_SCORE = 0.02
-RETRIEVAL_COUNTEREVIDENCE_MIN_NON_TITLE_CAP = 6
-RETRIEVAL_PRECISION_MEDIUM_NON_TITLE_CAP = 4
-RETRIEVAL_MONITORING_ONLY_PENALTY = 0.10
-FULLTEXT_SENTENCE_TARGET = int(EMBEDDING_SETTINGS.get("chunk_size", 20) or 20)
-RETRIEVAL_MIN_SENTENCE_FLOOR = max(6, int(FULLTEXT_SENTENCE_TARGET * 0.6))
 SUPPORTED_FULLTEXT_LANGUAGE_CODES = {"en", "de"}
 FULLTEXT_BORDERLINE_CONFIDENCE_MIN = 0.45
 FULLTEXT_BORDERLINE_CONFIDENCE_MAX = 0.75
-SECTION_RESCUE_KEYWORDS = (
-    "introduction",
-    "background",
-    "method",
-    "methods",
-    "methodology",
-    "materials and methods",
-    "participant",
-    "participants",
-    "intervention",
-    "procedure",
-    "outcome",
-    "results",
-    "discussion",
-    "conclusion",
-    "conclusions",
-    "trial",
-    "protocol",
-    "urban",
-    "city",
-    "smartphone",
-    "mobile app",
-    "machine learning",
-    "artificial intelligence",
-)
 SECTION_PRIORITY = ("introduction", "method", "results", "discussion", "conclusion")
 SECTION_INFERENCE_PATTERNS: dict[str, re.Pattern[str]] = {
     "introduction": re.compile(r"\b(introduction|background)\b", re.IGNORECASE),
@@ -205,58 +202,6 @@ PUBLISHER_BOILERPLATE_WEAK_PATTERNS = [
     )
 ]
 ALWAYS_INCLUDED_CHUNK_KINDS = frozenset({"title"})
-DEFAULT_INTERVENTION_SIGNAL_TERMS = (
-    "intervention",
-    "trial",
-    "protocol",
-    "just-in-time",
-    "adaptive",
-    "personalized",
-    "feedback",
-    "coaching",
-    "rehabilitation",
-    "physical therapy",
-)
-DEFAULT_PRIMARY_TOPIC_SIGNAL_TERMS = (
-    "artificial intelligence",
-    "machine learning",
-    "deep learning",
-    "neural network",
-    "reinforcement learning",
-    "q-learning",
-    "contextual bandit",
-    "nlp",
-    "nlu",
-    "llm",
-    "cnn",
-    "model training",
-)
-DEFAULT_SECONDARY_TOPIC_SIGNAL_TERMS = (
-    "physical activity",
-    "exercise",
-    "workout",
-    "active mobility",
-    "walking",
-    "running",
-    "cycling",
-    "movement",
-    "motor fitness",
-    "sedentary",
-    "range of motion",
-    "fitness",
-)
-INTERVENTION_SIGNAL_PATTERN = re.compile(
-    r"\b(intervention|trial|protocol|just[- ]?in[- ]?time|adaptive|personalized|feedback|coaching|rehabilitation|physical\s+therapy)\b",
-    re.IGNORECASE,
-)
-AI_SIGNAL_PATTERN = re.compile(
-    r"\b(artificial\s+intelligence|machine\s+learning|deep\s+learning|neural\s+network|reinforcement\s+learning|q-learning|contextual\s+bandit|nlp|nlu|llm|cnn|model\s+training)\b",
-    re.IGNORECASE,
-)
-PA_SIGNAL_PATTERN = re.compile(
-    r"\b(physical\s+activity|exercise|workout|active\s+mobility|walking|running|cycling|movement|motor\s+fitness|sedentary|range\s+of\s+motion|fitness)\b",
-    re.IGNORECASE,
-)
 REFERENCE_HEAVY_PATTERN = re.compile(r"\b(references|bibliography|acknowledg(?:e)?ments?)\b", re.IGNORECASE)
 INLINE_CITATION_PATTERN = re.compile(r"\[[0-9,\s\-]+\]|\([12][0-9]{3}\)")
 METHOD_EVIDENCE_PATTERN = re.compile(
@@ -267,641 +212,16 @@ MONITORING_OR_PROTOCOL_PATTERN = re.compile(
     r"\b(monitor(?:ing)?|assessment|evaluation|feasibility|usability|acceptability|observational|classification|prediction|detection|framework|protocol|pilot)\b",
     re.IGNORECASE,
 )
-INTERVENTION_ACTION_PATTERN = re.compile(
-    r"\b(intervention|randomi[sz]ed|trial|assigned|arm|program|coaching|feedback|counsel(?:ing|ling)|behavior(?:al)?\s+change|exercise\s+prescription|treatment|support)\b",
-    re.IGNORECASE,
-)
-MONITORING_SIGNAL_SEED_PATTERN = re.compile(
-    r"\b(monitor|assess|evaluat|feasib|usabil|acceptab|observ|classif|predict|detect|framework|protocol|pilot|measur|diagnos|benchmark)\w*\b",
-    re.IGNORECASE,
-)
-INTERVENTION_ACTION_SEED_PATTERN = re.compile(
-    r"\b(interven|randomi|trial|assign|arm|program|coach|feedback|counsel|behavior|exercise|treat|support|nudge|goal|recommend|prescrib|prompt|deliver)\w*\b",
-    re.IGNORECASE,
-)
-KB_SIGNAL_CONTEXT_STOPWORDS = frozenset(
-    {
-        "the",
-        "and",
-        "for",
-        "with",
-        "without",
-        "from",
-        "into",
-        "onto",
-        "this",
-        "that",
-        "these",
-        "those",
-        "only",
-        "using",
-        "used",
-        "via",
-        "among",
-        "between",
-        "within",
-        "across",
-        "about",
-        "their",
-        "there",
-        "where",
-        "which",
-        "while",
-        "during",
-        "after",
-        "before",
-    }
-)
-NEVER_MATCH_PATTERN = re.compile(r"(?!)")
 SUBSTANTIVE_MAIN_TEXT_PATTERN = re.compile(
     r"\b(results?|findings|analysis|effect|improv(?:ed|ement)|increase|decrease|significant|comparison|group|sample|participants?|outcome|baseline|follow[- ]?up)\b",
     re.IGNORECASE,
 )
-CORE_SCREENING_SCHEMA_FIELDS = {
-    "step_by_step_deliberation",
-    "is_eligible",
-    "confidence_score",
-    "justification",
-    "exclusion_reason_category",
-    "seed_references",
-}
-EXCLUSION_FIELD_PREFIXES = (
-    "no_",
-    "not_",
-    "wrong_",
-    "insufficient_",
-    "language_",
-    "full_",
-    "outside_",
-    "without_",
-    "exclude_",
-    "non_",
-)
-LEGACY_DEFAULT_EXCLUSION_KEYS = (
-    "not_adult_population",
-    "no_smartphone_technology",
-    "no_artificial_intelligence",
-    "no_physical_activity",
-    "not_urban_context",
-    "wrong_publication_type",
-    "insufficient_context",
-)
-
-
-def _normalize_schema_key(value: str) -> str:
-    """Normalize human-readable labels into stable snake_case schema keys."""
-
-    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", str(value or "").strip().lower())
-    normalized = re.sub(r"_+", "_", normalized).strip("_")
-    return normalized
-
-
-def _build_study_tag_field_keys(tags: Iterable[str]) -> tuple[str, ...]:
-    """Convert STUDY_TAGS_INCLUDE labels into canonical schema key candidates."""
-
-    keys = {
-        _normalize_schema_key(tag)
-        for tag in tags
-        if _normalize_schema_key(tag)
-    }
-    return tuple(sorted(keys))
-
-
-def _looks_like_exclusion_field(field_name: str) -> bool:
-    """Heuristic detector for exclusion-flag style schema keys."""
-
-    key = _normalize_schema_key(field_name)
-    if not key or key in CORE_SCREENING_SCHEMA_FIELDS:
-        return False
-    if key.startswith(EXCLUSION_FIELD_PREFIXES):
-        return True
-    if key.endswith("_context"):
-        return True
-    return False
-
-
-def _select_topic_absence_reason_key(
-    reason_keys: Iterable[str],
-    topic_terms: Iterable[str],
-    preferred_key: str,
-) -> str | None:
-    """Pick the best reason key for topic-absence checks using configured topic terms."""
-
-    normalized_keys = [key for key in {_normalize_schema_key(k) for k in reason_keys} if key]
-    if preferred_key in normalized_keys:
-        return preferred_key
-
-    topic_tokens = {
-        token
-        for term in topic_terms
-        for token in re.findall(r"[a-z0-9]+", str(term).lower())
-        if len(token) >= 3
-    }
-    for key in normalized_keys:
-        if not key.startswith("no_"):
-            continue
-        key_tokens = set(key.split("_"))
-        if key_tokens & topic_tokens:
-            return key
-    return None
-
-
-def _normalize_prompt_heading(value: str) -> str:
-    """Normalize prompt section headings for resilient matching."""
-
-    heading = re.sub(r"\s+", " ", (value or "").strip().lower()).strip(":")
-    heading = heading.replace("\\", "/")
-    heading = heading.replace(" / ", "/").replace("/ ", "/").replace(" /", "/")
-    return heading
-
-
-def _split_prompt_terms(value: str) -> list[str]:
-    """Split prompt include/exclude lists into normalized term candidates."""
-
-    if not value:
-        return []
-
-    raw = str(value).replace("\u2013", ",").replace("\u2014", ",")
-    parts = [part.strip() for part in raw.split(";")]
-    if len(parts) == 1:
-        parts = [part.strip() for part in raw.split(",")]
-
-    cleaned: list[str] = []
-    seen: set[str] = set()
-    for part in parts:
-        term = re.sub(r"\s+", " ", part).strip(" .:-")
-        term = re.sub(r"^(?:for example|e\.g\.)\s+", "", term, flags=re.IGNORECASE)
-        term = term.strip()
-        if len(term) < 3 or len(term) > 120:
-            continue
-        lowered = term.lower()
-        if lowered in {"include", "exclude", "and", "or"}:
-            continue
-        if lowered in seen:
-            continue
-        seen.add(lowered)
-        cleaned.append(lowered)
-    return cleaned
-
-
-def _extract_prompt_rule_terms(
-    prompt_template: str,
-    section_aliases: set[str],
-    rule_label: str,
-) -> list[str]:
-    """Extract '- <rule>:' term lists from named sections in the active prompt."""
-
-    aliases = {_normalize_prompt_heading(alias) for alias in section_aliases}
-    rule = str(rule_label or "").strip().lower()
-    if not rule:
-        return []
-
-    active_section: str | None = None
-    extracted: list[str] = []
-
-    for raw_line in (prompt_template or "").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line.startswith("#"):
-            continue
-
-        if not line.startswith("-"):
-            heading = _normalize_prompt_heading(line)
-            active_section = heading if heading in aliases else None
-            continue
-
-        if active_section is None:
-            continue
-
-        match = re.match(
-            rf"^-\s*{re.escape(rule)}\s*:\s*(.+)$",
-            line,
-            flags=re.IGNORECASE,
-        )
-        if not match:
-            continue
-        extracted.extend(_split_prompt_terms(match.group(1)))
-
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for term in extracted:
-        if term in seen:
-            continue
-        seen.add(term)
-        deduped.append(term)
-    return deduped
-
-
-def _extract_prompt_include_terms(prompt_template: str, section_aliases: set[str]) -> list[str]:
-    """Extract '- Include:' term lists from named sections in the active prompt."""
-
-    return _extract_prompt_rule_terms(prompt_template, section_aliases, "include")
-
-
-def _extract_prompt_exclude_terms(prompt_template: str, section_aliases: set[str]) -> list[str]:
-    """Extract '- Exclude:' term lists from named sections in the active prompt."""
-
-    return _extract_prompt_rule_terms(prompt_template, section_aliases, "exclude")
-
-
-def _normalize_signal_term(term: str) -> str:
-    """Normalize one lexical signal term before regex compilation."""
-
-    value = re.sub(r"\s+", " ", str(term or "").strip().lower())
-    value = value.strip(" .;:,")
-    if not value or len(value) < 3 or len(value) > 80:
-        return ""
-    if re.fullmatch(r"[\W_]+", value):
-        return ""
-    return value
-
-
-def _compile_signal_pattern_from_terms(
-    terms: Iterable[str],
-    fallback_pattern: re.Pattern[str],
-    max_terms: int = 120,
-) -> tuple[re.Pattern[str], tuple[str, ...]]:
-    """Compile a safe regex from term candidates; fall back when empty/invalid."""
-
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for term in terms:
-        cleaned = _normalize_signal_term(str(term))
-        if not cleaned or cleaned in seen:
-            continue
-        seen.add(cleaned)
-        normalized.append(cleaned)
-
-    if not normalized:
-        return fallback_pattern, tuple()
-
-    fragments = [re.escape(term).replace(r"\ ", r"\s+") for term in normalized]
-    fragments = sorted(set(fragments), key=len, reverse=True)[: max(1, int(max_terms))]
-
-    try:
-        compiled = re.compile(r"(?<!\\w)(?:" + "|".join(fragments) + r")(?!\\w)", re.IGNORECASE)
-    except re.error:
-        return fallback_pattern, tuple()
-
-    return compiled, tuple(normalized[: max(1, int(max_terms))])
-
-
-def _dedupe_signal_terms(terms: Iterable[str], max_terms: int = 120) -> tuple[str, ...]:
-    """Normalize and deduplicate lexical terms while preserving input order."""
-
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for term in terms:
-        cleaned = _normalize_signal_term(str(term))
-        if not cleaned or cleaned in seen:
-            continue
-        seen.add(cleaned)
-        deduped.append(cleaned)
-        if len(deduped) >= max(1, int(max_terms)):
-            break
-    return tuple(deduped)
-
-
-def _collect_kb_seed_terms(
-    examples: Iterable[Any],
-    *,
-    target_label: str,
-    seed_pattern: re.Pattern[str],
-    max_terms: int = 80,
-    min_count: int = 1,
-) -> tuple[str, ...]:
-    """Harvest cue terms from KB examples using lightweight stem-based matching."""
-
-    label = str(target_label or "").strip().upper()
-    if not label:
-        return tuple()
-
-    counts: dict[str, int] = {}
-    for example in examples:
-        if not isinstance(example, Mapping):
-            continue
-        if str(example.get("label") or "").strip().upper() != label:
-            continue
-
-        text = str(example.get("text") or "")
-        if not text:
-            continue
-
-        tokens = re.findall(r"[a-z][a-z0-9\-]{2,}", text.lower())
-        for idx, token in enumerate(tokens):
-            if not seed_pattern.search(token):
-                continue
-
-            candidates = [token]
-            if idx > 0 and tokens[idx - 1] not in KB_SIGNAL_CONTEXT_STOPWORDS:
-                candidates.append(f"{tokens[idx - 1]} {token}")
-            if idx + 1 < len(tokens) and tokens[idx + 1] not in KB_SIGNAL_CONTEXT_STOPWORDS:
-                candidates.append(f"{token} {tokens[idx + 1]}")
-
-            for candidate in candidates:
-                cleaned = _normalize_signal_term(candidate)
-                if not cleaned or len(cleaned) > 60:
-                    continue
-                counts[cleaned] = counts.get(cleaned, 0) + 1
-
-    ranked = [
-        term
-        for term, count in sorted(
-            counts.items(),
-            key=lambda item: (-item[1], -len(item[0]), item[0]),
-        )
-        if count >= max(1, int(min_count))
-    ]
-    return tuple(ranked[: max(1, int(max_terms))])
-
-
-def _build_section_rescue_keywords(prompt_terms: Iterable[str]) -> tuple[str, ...]:
-    """Build section-rescue keywords by extending base keywords with concise prompt terms."""
-
-    keywords: set[str] = set(SECTION_RESCUE_KEYWORDS)
-    for term in prompt_terms:
-        cleaned = _normalize_signal_term(str(term))
-        if not cleaned:
-            continue
-        if len(cleaned.split()) > 4:
-            continue
-        if len(cleaned) > 40:
-            continue
-        keywords.add(cleaned)
-    return tuple(sorted(keywords))
-
-
-def _build_prompt_signal_config(prompt_template: str) -> dict[str, Any]:
-    """Derive topic-sensitive retrieval signals from the active prompt template."""
-
-    intervention_include = _extract_prompt_include_terms(
-        prompt_template,
-        {"intervention / exposure", "intervention/exposure", "intervention", "exposure"},
-    )
-    outcome_include = _extract_prompt_include_terms(prompt_template, {"outcome", "outcomes"})
-
-    intervention_seed_terms = list(DEFAULT_INTERVENTION_SIGNAL_TERMS) + intervention_include
-    primary_seed_terms = intervention_include if intervention_include else list(DEFAULT_PRIMARY_TOPIC_SIGNAL_TERMS)
-    secondary_seed_terms = outcome_include if outcome_include else list(DEFAULT_SECONDARY_TOPIC_SIGNAL_TERMS)
-
-    intervention_pattern, intervention_terms = _compile_signal_pattern_from_terms(
-        intervention_seed_terms,
-        INTERVENTION_SIGNAL_PATTERN,
-    )
-    primary_pattern, primary_terms = _compile_signal_pattern_from_terms(
-        primary_seed_terms,
-        AI_SIGNAL_PATTERN,
-    )
-    secondary_pattern, secondary_terms = _compile_signal_pattern_from_terms(
-        secondary_seed_terms,
-        PA_SIGNAL_PATTERN,
-    )
-
-    source = "prompt_criteria" if intervention_include or outcome_include else "default_signals"
-    section_rescue_keywords = _build_section_rescue_keywords(
-        list(intervention_include) + list(outcome_include)
-    )
-
-    return {
-        "source": source,
-        "intervention_pattern": intervention_pattern,
-        "primary_pattern": primary_pattern,
-        "secondary_pattern": secondary_pattern,
-        "intervention_terms": intervention_terms,
-        "primary_terms": primary_terms,
-        "secondary_terms": secondary_terms,
-        "section_rescue_keywords": section_rescue_keywords,
-    }
-
-
-def _build_monitoring_signal_config(
-    prompt_template: str,
-    topic_signal_config: dict[str, Any],
-    kb_examples: Iterable[Any],
-) -> dict[str, Any]:
-    """Build monitoring/action cues from prompt + user KB to avoid case-specific hardcoding."""
-
-    intervention_section_aliases = {
-        "intervention / exposure",
-        "intervention/exposure",
-        "intervention",
-        "exposure",
-    }
-    outcome_section_aliases = {"outcome", "outcomes"}
-
-    prompt_intervention_terms = _extract_prompt_include_terms(
-        prompt_template,
-        intervention_section_aliases,
-    )
-    prompt_outcome_terms = _extract_prompt_include_terms(prompt_template, outcome_section_aliases)
-    prompt_outcome_exclude_terms = _extract_prompt_exclude_terms(prompt_template, outcome_section_aliases)
-
-    kb_examples_list = [dict(item) for item in kb_examples if isinstance(item, Mapping)]
-    kb_pos_count = sum(1 for item in kb_examples_list if str(item.get("label") or "").strip().upper() == "POS")
-    kb_neg_count = sum(1 for item in kb_examples_list if str(item.get("label") or "").strip().upper() == "NEG")
-
-    kb_pos_action_terms = _collect_kb_seed_terms(
-        kb_examples_list,
-        target_label="POS",
-        seed_pattern=INTERVENTION_ACTION_SEED_PATTERN,
-        max_terms=80,
-        min_count=1,
-    )
-    kb_neg_monitor_terms = _collect_kb_seed_terms(
-        kb_examples_list,
-        target_label="NEG",
-        seed_pattern=MONITORING_SIGNAL_SEED_PATTERN,
-        max_terms=80,
-        min_count=1,
-    )
-    kb_pos_monitor_terms = set(
-        _collect_kb_seed_terms(
-            kb_examples_list,
-            target_label="POS",
-            seed_pattern=MONITORING_SIGNAL_SEED_PATTERN,
-            max_terms=80,
-            min_count=2,
-        )
-    )
-
-    topic_intervention_terms = tuple(topic_signal_config.get("intervention_terms") or ())
-    action_seed_terms = [
-        term
-        for term in list(prompt_intervention_terms) + list(topic_intervention_terms)
-        if INTERVENTION_ACTION_SEED_PATTERN.search(term)
-    ]
-    action_seed_terms.extend(kb_pos_action_terms)
-    action_seed_terms = list(_dedupe_signal_terms(action_seed_terms, max_terms=120))
-
-    intervention_action_pattern, intervention_action_terms = _compile_signal_pattern_from_terms(
-        action_seed_terms,
-        topic_signal_config.get("intervention_pattern") or INTERVENTION_ACTION_PATTERN,
-        max_terms=120,
-    )
-
-    monitoring_prompt_terms = [
-        term
-        for term in (list(prompt_outcome_terms) + list(prompt_outcome_exclude_terms))
-        if MONITORING_SIGNAL_SEED_PATTERN.search(term)
-    ]
-    monitoring_seed_terms = list(monitoring_prompt_terms) + list(kb_neg_monitor_terms)
-
-    action_term_set = {
-        _normalize_signal_term(term)
-        for term in list(intervention_action_terms) + list(topic_intervention_terms)
-        if _normalize_signal_term(term)
-    }
-    filtered_monitoring_terms = []
-    for term in monitoring_seed_terms:
-        cleaned = _normalize_signal_term(term)
-        if not cleaned:
-            continue
-        if cleaned in action_term_set:
-            continue
-        if cleaned in kb_pos_monitor_terms:
-            continue
-        filtered_monitoring_terms.append(cleaned)
-    filtered_monitoring_terms = list(_dedupe_signal_terms(filtered_monitoring_terms, max_terms=120))
-
-    monitoring_pattern, monitoring_terms = _compile_signal_pattern_from_terms(
-        filtered_monitoring_terms,
-        NEVER_MATCH_PATTERN,
-        max_terms=120,
-    )
-
-    prompt_requires_intervention = bool(prompt_intervention_terms) or bool(
-        re.search(r"\bintervention(?:[- ]first)?\b", prompt_template, re.IGNORECASE)
-    )
-    kb_has_contrastive_examples = kb_pos_count > 0 and kb_neg_count > 0
-    enabled = bool(
-        prompt_requires_intervention
-        and kb_has_contrastive_examples
-        and monitoring_terms
-        and (intervention_action_terms or topic_intervention_terms)
-    )
-
-    if enabled:
-        source = "prompt_kb_dynamic"
-    elif not prompt_requires_intervention:
-        source = "disabled_prompt_no_intervention_scope"
-    elif not kb_has_contrastive_examples:
-        source = "disabled_kb_missing_pos_neg"
-    elif not monitoring_terms:
-        source = "disabled_no_monitoring_terms"
-    else:
-        source = "disabled_no_intervention_action_terms"
-
-    if not enabled:
-        monitoring_pattern = NEVER_MATCH_PATTERN
-
-    return {
-        "source": source,
-        "enabled": enabled,
-        "monitoring_pattern": monitoring_pattern,
-        "monitoring_terms": tuple(monitoring_terms),
-        "intervention_action_pattern": intervention_action_pattern,
-        "intervention_action_terms": tuple(intervention_action_terms),
-        "kb_pos_count": kb_pos_count,
-        "kb_neg_count": kb_neg_count,
-    }
-
-
-def _load_optional_eligibility_criteria_text() -> str:
-    """human readable hint: load shared eligibility criteria text when configured and available."""
-
-    configured_path = PATH_SETTINGS.get("eligibility_criteria_file")
-    if not configured_path:
-        return ""
-
-    criteria_path = Path(configured_path)
-    if not criteria_path.exists():
-        print(
-            f"[warning] eligibility criteria file not found at: {criteria_path}. "
-            "Continuing without criteria injection.",
-            file=sys.stderr,
-        )
-        return ""
-
-    return criteria_path.read_text(encoding="utf-8").strip()
-
-
-def _load_stage_prompt_template(stage: str) -> str:
-    """human readable hint: load stage prompt and inject shared criteria only when placeholder is present."""
-
-    prompt_path = PROMPT_FILES.get(stage)
-    if not prompt_path:
-        raise ValueError(f"Missing prompt mapping for stage '{stage}'.")
-
-    prompt_template = prompt_path.read_text(encoding="utf-8")
-    if ELIGIBILITY_CRITERIA_PLACEHOLDER not in prompt_template:
-        return prompt_template.strip()
-
-    criteria_text = _load_optional_eligibility_criteria_text()
-    if not criteria_text:
-        print(
-            "[warning] prompt contains {eligibility_criteria} but no criteria text was loaded; "
-            "continuing with an empty replacement.",
-            file=sys.stderr,
-        )
-
-    return prompt_template.replace(ELIGIBILITY_CRITERIA_PLACEHOLDER, criteria_text).strip()
-
-
 @dataclass
 class PaperRecord:
     paper_id: str
     title: str
     abstract: str
     metadata: dict
-
-
-class _ScreeningDecisionBaseModel(BaseModel):
-    """human readable hint: shared schema for screening decisions returned by the LLM."""
-
-    model_config = ConfigDict(extra="allow")
-
-    step_by_step_deliberation: str
-    confidence_score: float = Field(ge=0.0, le=1.0)
-    justification: str = Field(min_length=1)
-    exclusion_reason_category: str | None
-
-    @model_validator(mode="after")
-    def _check_reason_for_exclusion(self):
-        """human readable hint: exclusion decisions must carry an explicit exclusion reason."""
-
-        if getattr(self, "is_eligible", None) is False and not self.exclusion_reason_category:
-            raise ValueError("exclusion_reason_category is required when is_eligible is false")
-        return self
-
-
-class TitleAbstractScreeningDecisionModel(_ScreeningDecisionBaseModel):
-    """human readable hint: title_abstract allows a NEUTRAL eligibility outcome."""
-
-    is_eligible: bool | Literal["NEUTRAL"]
-
-
-class FullTextScreeningDecisionModel(_ScreeningDecisionBaseModel):
-    """human readable hint: full_text requires a strict boolean eligibility outcome."""
-
-    seed_references: bool | None = None
-    is_eligible: bool
-
-    @model_validator(mode="after")
-    def _check_seed_references_threshold(self):
-        """human readable hint: enforce strict seed-reference semantics for high-confidence full_text inclusions."""
-
-        if self.seed_references is True and not (self.confidence_score > 0.98):
-            raise ValueError(
-                "seed_references can be true only when confidence_score is strictly greater than 0.98"
-            )
-        if self.seed_references is True and self.is_eligible is not True:
-            raise ValueError("seed_references can be true only when is_eligible is true")
-        if self.is_eligible is True and self.confidence_score > 0.98 and self.seed_references is None:
-            raise ValueError(
-                "seed_references must be explicitly true/false when confidence_score is strictly greater than 0.98 and is_eligible is true"
-            )
-        return self
 
 
 CANONICAL_FIELDS = [
@@ -1033,23 +353,25 @@ class PaperScreeningPipeline:
             }
         else:
             self.use_advanced_pdf_parser = bool(use_advanced_pdf_parser)
-        self._fulltext_preparse_enabled = (
-            self.stage == "full_text"
-            and str(os.getenv("FULLTEXT_PREPARSE_BEFORE_SCREENING", "1")).strip().lower() in {
+        preparse_default = bool(SCREENING_DEFAULTS.get("fulltext_preparse_before_screening", True))
+        preparse_env = os.getenv("FULLTEXT_PREPARSE_BEFORE_SCREENING")
+        if preparse_env is None:
+            preparse_enabled = preparse_default
+        else:
+            preparse_enabled = preparse_env.strip().lower() in {"1", "true", "yes", "on"}
+        self._fulltext_preparse_enabled = self.stage == "full_text" and preparse_enabled
+
+        preparse_log_default = bool(SCREENING_DEFAULTS.get("fulltext_preparse_log_each_paper", True))
+        preparse_log_env = os.getenv("FULLTEXT_PREPARSE_LOG_EACH_PAPER")
+        if preparse_log_env is None:
+            self._fulltext_preparse_log_each_paper = preparse_log_default
+        else:
+            self._fulltext_preparse_log_each_paper = preparse_log_env.strip().lower() in {
                 "1",
                 "true",
                 "yes",
                 "on",
             }
-        )
-        self._fulltext_preparse_log_each_paper = (
-            str(os.getenv("FULLTEXT_PREPARSE_LOG_EACH_PAPER", "1")).strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
-        )
         self.language_setting = str(EMBEDDING_SETTINGS.get("data_language", "en")) or "en"
         self._detect_language = detect_language
         self._detect_language_code = detect_language_code
@@ -1078,8 +400,14 @@ class PaperScreeningPipeline:
         self._paper_folders: list[Path] = []
         self._qc_sample_ids: set[str] = set()
         self._stage_csv_cache: dict[bool, list[Path]] = {}
-        self.prompt_template = _load_stage_prompt_template(self.stage)
-        topic_signal_config = _build_prompt_signal_config(self.prompt_template)
+        self._extraction_schema: DynamicExtractionSchema | None = None
+        self._base_prompt_template = load_stage_prompt_template(self.stage)
+        self.prompt_template = self._base_prompt_template
+        if self.stage == "data_extraction":
+            # human readable hint: data extraction fields, JSON schema, and prompt instructions come from the CSV KB.
+            self._extraction_schema = DynamicExtractionSchema.from_kb()
+            self.prompt_template = self._extraction_schema.inject_into_prompt(self._base_prompt_template)
+        topic_signal_config = build_prompt_signal_config(self.prompt_template)
         self._topic_signal_source = str(topic_signal_config.get("source") or "default_signals")
         self._intervention_signal_pattern = topic_signal_config["intervention_pattern"]
         self._topic_primary_signal_pattern = topic_signal_config["primary_pattern"]
@@ -1103,7 +431,11 @@ class PaperScreeningPipeline:
         self._prompt_required_json_fields = self._extract_required_json_fields_from_prompt(self.prompt_template)
         self._configure_dynamic_screening_schema()
         self._print_dynamic_schema_summary()
-        self._extraction_criteria = self._extract_criteria_from_prompt(self.prompt_template)
+        self._extraction_criteria = (
+            [variable.value_path for variable in self._extraction_schema.variables]
+            if self._extraction_schema is not None
+            else []
+        )
 
         # Resource usage tracker logs tokens and energy for each run.
         self.resource_tracker = ResourceUsageEngine(
@@ -1145,7 +477,7 @@ class PaperScreeningPipeline:
         else:
             kb_examples = load_labeled_examples(str(self.knowledge_base_path))
 
-        monitoring_signal_config = _build_monitoring_signal_config(
+        monitoring_signal_config = build_monitoring_signal_config(
             prompt_template=self.prompt_template,
             topic_signal_config=topic_signal_config,
             kb_examples=kb_examples,
@@ -2362,7 +1694,8 @@ class PaperScreeningPipeline:
                         return
 
                     paper_start_ts = time.time()
-                    record_obj, token_stats_obj, extraction_obj = await processor(paper_item)
+                    async with request_semaphore:
+                        record_obj, token_stats_obj, extraction_obj = await processor(paper_item)
                     result = (
                         paper_item,
                         record_obj,
@@ -2393,7 +1726,10 @@ class PaperScreeningPipeline:
                     queue.put(("result", result))
 
             heartbeat_task = asyncio.create_task(_heartbeat())
-            worker_count = max(1, min(self._async_max_concurrency, total if total > 0 else 1))
+            worker_limit = self._async_max_concurrency
+            worker_count = max(1, min(worker_limit, total if total > 0 else 1))
+            # human readable hint: this semaphore is the real API pressure valve; lower it when the endpoint returns 502/proxy errors.
+            request_semaphore = asyncio.Semaphore(worker_count)
             worker_tasks = [asyncio.create_task(_worker()) for _ in range(worker_count)]
 
             try:
@@ -2677,8 +2013,42 @@ class PaperScreeningPipeline:
         llm_top_p = float(LLM_SETTINGS.get("top_p", 1.0) or 1.0)
 
         if self.stage == "data_extraction":
+            data_extraction_evidence_mode = str(
+                LLM_SETTINGS.get("data_extraction_evidence_mode", "full_text") or "full_text"
+            ).strip().lower()
             preselected_chunks = self._load_selected_chunks_from_input(paper)
-            if preselected_chunks:
+            full_text_input = ""
+            if data_extraction_evidence_mode == "full_text":
+                full_text_input = self._load_data_extraction_full_text_input(paper)
+            if full_text_input:
+                selected = preselected_chunks
+                selected, selected_score_stats = self._attach_chunk_certainty_metrics(selected)
+                selected_page_coverage = self._build_selected_coverage_metrics(selected, page_count=None)
+                preselected = True
+                llm_input = full_text_input
+                prompt_tokens = len((llm_input or "").split())
+                estimated_input_tokens = prompt_tokens
+                selection_trace = {
+                    "fallback_triggered": False,
+                    "effective_top_k": self.top_k,
+                    "source": "full_normalized_text",
+                    "selected_chunks_available_for_audit": len(preselected_chunks),
+                    "topic_signal_source": self._topic_signal_source,
+                    "topic_intervention_term_count": len(self._topic_intervention_terms),
+                    "topic_primary_term_count": len(self._topic_primary_terms),
+                    "topic_secondary_term_count": len(self._topic_secondary_terms),
+                    "topic_primary_terms_preview": list(self._topic_primary_terms[:8]),
+                    "topic_secondary_terms_preview": list(self._topic_secondary_terms[:8]),
+                    "monitoring_signal_source": self._monitoring_signal_source,
+                    "monitoring_deprioritization_enabled": self._monitoring_deprioritization_enabled,
+                    "monitoring_term_count": len(self._monitoring_signal_terms),
+                    "intervention_action_term_count": len(self._intervention_action_terms),
+                    "monitoring_kb_pos_count": self._monitoring_kb_pos_count,
+                    "monitoring_kb_neg_count": self._monitoring_kb_neg_count,
+                    "schema_exclusion_tag_count": len(self._active_exclusion_flag_keys),
+                    "schema_exclusion_tags_preview": list(self._active_exclusion_flag_keys[:8]),
+                }
+            elif preselected_chunks:
                 selected = preselected_chunks
                 selected, selected_score_stats = self._attach_chunk_certainty_metrics(selected)
                 selected_page_coverage = self._build_selected_coverage_metrics(selected, page_count=None)
@@ -2788,7 +2158,7 @@ class PaperScreeningPipeline:
             prompt_tokens = len((llm_input or "").split())
             estimated_input_tokens = prompt_tokens + pdf_text_tokens + pdf_visual_tokens
 
-        if llm_decision is None and not selected:
+        if llm_decision is None and not selected and not str(llm_input or "").strip():
             llm_decision = "LLM skipped: no evidence available after selection."
             self._log_error(
                 paper.paper_id,
@@ -2818,7 +2188,14 @@ class PaperScreeningPipeline:
                 model_name = getattr(getattr(self, "llm_client", None), "model", None) or gpustack_model
                 attempt_context = llm_input
                 for attempt in range(1, max_attempts + 1):
-                    current_decision, llm_usage = await self._call_llm_async(attempt_context)
+                    domain_errors: dict[str, str] = {}
+                    if self.stage == "data_extraction" and bool(LLM_SETTINGS.get("data_extraction_split_by_domain", True)):
+                        current_decision, llm_usage, domain_errors = await self._call_data_extraction_domains_async(
+                            attempt_context,
+                            paper.paper_id,
+                        )
+                    else:
+                        current_decision, llm_usage = await self._call_llm_async(attempt_context)
 
                     if llm_usage:
                         prompt_tokens = int(
@@ -2835,6 +2212,24 @@ class PaperScreeningPipeline:
                         )
                         prompt_tokens_source = "api"
                         response_tokens_source = "api"
+
+                    if domain_errors:
+                        llm_decision_incomplete = True
+                        failure_reason = (
+                            "Data extraction failed for domain(s): "
+                            + ", ".join(f"{domain}={error}" for domain, error in domain_errors.items())
+                        )
+                        failure_type = "data_extraction_domain_validation_failed"
+                        failure_attempt = attempt
+                        if attempt < max_attempts:
+                            if not self.quiet:
+                                print(
+                                    f"[warn] async data extraction domain validation failed on attempt {attempt}/{max_attempts}; retrying paper {paper.paper_id}"
+                                )
+                            llm_decision = None
+                            continue
+                        llm_decision = current_decision
+                        break
 
                     if not current_decision:
                         if attempt == max_attempts:
@@ -2962,7 +2357,12 @@ class PaperScreeningPipeline:
         prompt_template_hash = self._sha256_text(self.prompt_template)
         full_prompt_hash = self._sha256_text(self.prompt_template.replace("{data}", llm_input or ""))
 
-        if failure_type is None and not api_disabled and self._decision_missing_fields(llm_decision):
+        if (
+            self.stage in {"title_abstract", "full_text"}
+            and failure_type is None
+            and not api_disabled
+            and self._decision_missing_fields(llm_decision)
+        ):
             llm_decision_incomplete = True
             near_token_limit = bool(response_tokens and response_tokens >= int(0.9 * llm_max_tokens))
             if near_token_limit:
@@ -3104,6 +2504,57 @@ class PaperScreeningPipeline:
                 prefix_parts.append(f"sentences {sentence_count}")
             prefix = "[" + ", ".join(prefix_parts) + "]"
             parts.append(f"{prefix}\n{text}")
+        return "\n\n".join(parts)
+
+    def _load_data_extraction_full_text_input(self, paper: PaperRecord) -> str:
+        """human readable hint: use the cached normalized full text as extraction evidence when available."""
+
+        folder = paper.metadata.get("folder_path")
+        if not folder:
+            return ""
+
+        folder_path = Path(folder)
+        candidates = [
+            folder_path / "full_text_normalized.txt",
+            folder_path / "data_extraction_normalized.txt",
+        ]
+        raw_text = ""
+        for candidate in candidates:
+            if not candidate.exists():
+                continue
+            try:
+                raw_text = candidate.read_text(encoding="utf-8")
+                break
+            except Exception as exc:  # pylint: disable=broad-except
+                self._log_error(
+                    paper.paper_id,
+                    f"failed to read normalized full text for extraction: {exc}",
+                    error_type="data_extraction_full_text_read_failed",
+                )
+                return ""
+
+        if not raw_text:
+            return ""
+
+        marker = "=== normalized_full_text ==="
+        marker_index = raw_text.find(marker)
+        if marker_index >= 0:
+            raw_text = raw_text[marker_index + len(marker):]
+        normalized_text = normalize_extracted_text(raw_text).strip()
+        if not normalized_text:
+            return ""
+
+        max_words = int(LLM_SETTINGS.get("data_extraction_full_text_max_words", 0) or 0)
+        if max_words > 0:
+            words = normalized_text.split()
+            if len(words) > max_words:
+                normalized_text = " ".join(words[:max_words])
+
+        title_text = (paper.title or "").strip()
+        parts = [f"Paper ID: {paper.paper_id}"]
+        if title_text:
+            parts.append(f"Title: {title_text}")
+        parts.append("[Full Normalized Text]\n" + normalized_text)
         return "\n\n".join(parts)
 
     def _title_abstract_full_input(self, paper: PaperRecord) -> str:
@@ -3704,10 +3155,12 @@ class PaperScreeningPipeline:
         all_candidate_rows.extend(supplemental_candidates)
 
         selected_all_ranked: list[dict] = []
+        scored_all_candidate_rows: list[dict] = []
         usage_all_ranked: dict | None = None
         if all_candidate_rows:
-            selected_all_ranked, _, usage_all_ranked = self.selector.select(
-                all_candidate_rows,
+            scored_all_candidate_rows, _, usage_all_ranked = self.selector.score_chunks(all_candidate_rows)
+            selected_all_ranked = self.selector.select_scored(
+                scored_all_candidate_rows,
                 top_k=None,
                 score_threshold=None,
             )
@@ -3753,11 +3206,22 @@ class PaperScreeningPipeline:
                 available_non_title_count,
             )
 
-        selected_primary, _, usage_primary = self.selector.select(
-            chunks,
+        original_chunk_ids = {
+            str(row.get("chunk_id") or "")
+            for row in chunks
+            if str(row.get("chunk_id") or "")
+        }
+        scored_primary_pool = [
+            row
+            for row in scored_all_candidate_rows
+            if str(row.get("chunk_id") or "") in original_chunk_ids
+        ]
+        selected_primary = self.selector.select_scored(
+            scored_primary_pool,
             self.top_k,
             self.score_threshold,
         )
+        usage_primary: dict | None = None
 
         primary_scored = [
             c for c in selected_primary if not self._is_always_included_chunk_kind(str(c.get("kind") or ""))
@@ -4514,11 +3978,12 @@ class PaperScreeningPipeline:
         else:
             fallback_top_k = max(configured_top_k, 0)
         fallback_threshold = configured_score_threshold
-        selected_fallback, _, usage_fallback = self.selector.select(
-            chunks,
+        selected_fallback = self.selector.select_scored(
+            scored_primary_pool,
             fallback_top_k,
             fallback_threshold,
         )
+        usage_fallback: dict | None = None
         _mark_sources(selected_fallback, "fallback")
 
         keyword_terms = self._section_rescue_keywords or SECTION_RESCUE_KEYWORDS
@@ -5236,6 +4701,9 @@ class PaperScreeningPipeline:
                 pdfs = sorted(folder.glob("*.pdf"))
                 if pdfs:
                     shutil.copy2(pdfs[0], dest / pdfs[0].name)
+                # human readable hint: PDFs are not duplicated; normalized text and artifact JSON are sufficient.
+                # pdfs = sorted(folder.glob("*.pdf"))
+                # if pdfs: shutil.copy2(pdfs[0], dest / pdfs[0].name)
 
                 full_text_chunks = folder / "full_text_selected_chunks.jsonl"
                 if full_text_chunks.exists():
@@ -5661,32 +5129,173 @@ class PaperScreeningPipeline:
 
         return pdf_path
 
-    def _call_llm(self, context: str) -> tuple[str | None, dict | None]:
+    @staticmethod
+    def _add_llm_usage(target: dict[str, int], usage: dict | None) -> None:
+        """human readable hint: sum provider token counters across several smaller domain-level calls."""
+
+        if not usage:
+            return
+        prompt_value = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+        response_value = int(
+            usage.get("completion_tokens")
+            or usage.get("output_tokens")
+            or usage.get("response_tokens")
+            or 0
+        )
+        total_value = int(usage.get("total_tokens") or 0)
+        target["prompt_tokens"] = target.get("prompt_tokens", 0) + prompt_value
+        target["completion_tokens"] = target.get("completion_tokens", 0) + response_value
+        target["response_tokens"] = target.get("response_tokens", 0) + response_value
+        target["total_tokens"] = target.get("total_tokens", 0) + total_value
+
+    async def _call_data_extraction_domains_async(
+        self,
+        context: str,
+        paper_id: str,
+    ) -> tuple[str | None, dict | None, dict[str, str]]:
+        """human readable hint: extract each KB domain separately, then merge validated domain JSON."""
+
+        if self._extraction_schema is None:
+            return "LLM error: data_extraction requires a configured DynamicExtractionSchema.", None, {
+                "schema": "missing_extraction_schema"
+            }
+
+        if not bool(LLM_SETTINGS.get("data_extraction_split_by_domain", True)):
+            raw_text, usage = await self._call_llm_async(context)
+            return raw_text, usage, {}
+
+        merged_payload = self._extraction_schema.default_payload()
+        errors_by_domain: dict[str, str] = {}
+        usage_totals: dict[str, int] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "response_tokens": 0,
+            "total_tokens": 0,
+        }
+        domain_max_tokens = max(256, int(LLM_SETTINGS.get("data_extraction_domain_max_tokens", 3000) or 3000))
+        response_format_mode = str(
+            LLM_SETTINGS.get("data_extraction_response_format_mode", "prompt_only") or "prompt_only"
+        ).strip().lower()
+
+        for domain in self._extraction_schema.domains:
+            domain_schema = self._extraction_schema.for_domain(domain)
+            domain_prompt = domain_schema.inject_into_prompt(self._base_prompt_template)
+            response_format_override: dict | None = None
+            use_schema_response_format = response_format_mode == "json_schema"
+            if response_format_mode == "json_object":
+                response_format_override = {"type": "json_object"}
+            raw_text, usage = await self._call_llm_async(
+                context,
+                prompt_template=domain_prompt,
+                extraction_schema=domain_schema,
+                response_format_override=response_format_override,
+                use_extraction_response_format=use_schema_response_format,
+                max_tokens=domain_max_tokens,
+                system_prompt="",
+            )
+            self._add_llm_usage(usage_totals, usage)
+            if not raw_text:
+                errors_by_domain[domain] = "empty_response"
+                continue
+            if isinstance(raw_text, str) and raw_text.startswith("LLM error"):
+                errors_by_domain[domain] = raw_text
+                continue
+
+            parsed_domain, validation_error = parse_and_validate(raw_text, domain_schema)
+            if validation_error:
+                errors_by_domain[domain] = validation_error
+                continue
+
+            domain_payload = parsed_domain.get(domain)
+            if isinstance(domain_payload, dict):
+                merged_payload[domain] = domain_payload
+            else:
+                errors_by_domain[domain] = "validated domain payload missing expected domain key"
+
+        try:
+            merged_payload = self._extraction_schema.validate_payload(merged_payload)
+        except Exception as exc:  # pylint: disable=broad-except
+            errors_by_domain["merged_payload"] = str(exc)
+            merged_payload = self._extraction_schema.default_payload()
+
+        usage_totals["domain_count"] = len(self._extraction_schema.domains)
+        usage_totals["domain_error_count"] = len(errors_by_domain)
+        return json.dumps(merged_payload, ensure_ascii=False), usage_totals, errors_by_domain
+
+    def _call_llm(
+        self,
+        context: str,
+        *,
+        prompt_template: str | None = None,
+        extraction_schema: DynamicExtractionSchema | None = None,
+        response_format_override: dict | None = None,
+        use_extraction_response_format: bool = True,
+        max_tokens: int | None = None,
+        system_prompt: str | None = None,
+    ) -> tuple[str | None, dict | None]:
         """Call the LLM and return both text and usage (if provided by the API)."""
 
         try:
             if use_api:
+                active_schema = extraction_schema if extraction_schema is not None else self._extraction_schema
+                response_format = response_format_override
+                if response_format is None and use_extraction_response_format:
+                    response_format = (
+                        active_schema.openai_response_format()
+                        if self.stage == "data_extraction" and active_schema is not None
+                        else None
+                    )
+                resolved_system_prompt = system_prompt
+                if resolved_system_prompt is None and self.stage == "data_extraction":
+                    resolved_system_prompt = ""
                 responder = OpenAIResponder(
                     data=context,
                     model=self._llm_model,
-                    prompt_template=self.prompt_template,
+                    prompt_template=prompt_template or self.prompt_template,
                     client=self._get_openai_client(base_url=self._llm_base_url),
+                    response_format=response_format,
+                    system_prompt=resolved_system_prompt,
+                    max_tokens=max_tokens,
                 )
                 return responder.generate_response()
         except Exception as exc:  # pylint: disable=broad-except
             return f"LLM error: {exc}", None
         return None, None
 
-    async def _call_llm_async(self, context: str) -> tuple[str | None, dict | None]:
+    async def _call_llm_async(
+        self,
+        context: str,
+        *,
+        prompt_template: str | None = None,
+        extraction_schema: DynamicExtractionSchema | None = None,
+        response_format_override: dict | None = None,
+        use_extraction_response_format: bool = True,
+        max_tokens: int | None = None,
+        system_prompt: str | None = None,
+    ) -> tuple[str | None, dict | None]:
         """Call the LLM asynchronously and return text plus usage metadata."""
 
         try:
             if use_api:
+                active_schema = extraction_schema if extraction_schema is not None else self._extraction_schema
+                response_format = response_format_override
+                if response_format is None and use_extraction_response_format:
+                    response_format = (
+                        active_schema.openai_response_format()
+                        if self.stage == "data_extraction" and active_schema is not None
+                        else None
+                    )
+                resolved_system_prompt = system_prompt
+                if resolved_system_prompt is None and self.stage == "data_extraction":
+                    resolved_system_prompt = ""
                 responder = OpenAIResponder(
                     data=context,
                     model=self._llm_model,
-                    prompt_template=self.prompt_template,
+                    prompt_template=prompt_template or self.prompt_template,
                     client=self._get_async_openai_client(base_url=self._llm_base_url),
+                    response_format=response_format,
+                    system_prompt=resolved_system_prompt,
+                    max_tokens=max_tokens,
                 )
                 return await responder.generate_response_async(
                     max_retries=self._async_max_retries,
@@ -5725,17 +5334,20 @@ class PaperScreeningPipeline:
     def _configure_dynamic_screening_schema(self) -> None:
         """Build dynamic exclusion schema keys from user tags and prompt-required fields."""
 
-        study_tag_flag_keys = set(_build_study_tag_field_keys(STUDY_TAGS_INCLUDE))
+        study_tag_flag_keys = set(build_study_tag_field_keys(STUDY_TAGS_INCLUDE))
         prompt_exclusion_flag_keys = {
-            _normalize_schema_key(field)
+            normalize_schema_key(field)
             for field in self._prompt_required_json_fields
-            if _looks_like_exclusion_field(field)
-            and _normalize_schema_key(field)
+            if looks_like_exclusion_field(field)
+            and normalize_schema_key(field)
         }
 
         active_keys = sorted(study_tag_flag_keys | prompt_exclusion_flag_keys)
         if not active_keys:
-            active_keys = list(LEGACY_DEFAULT_EXCLUSION_KEYS)
+            raise ValueError(
+                "No exclusion schema keys found. Define STUDY_TAGS_INCLUDE in config/user_orchestrator.py "
+                "or include exclusion flag keys in the prompt END GOAL section."
+            )
 
         self._study_tag_flag_keys = tuple(sorted(study_tag_flag_keys))
         self._prompt_exclusion_flag_keys = tuple(sorted(prompt_exclusion_flag_keys))
@@ -5743,8 +5355,6 @@ class PaperScreeningPipeline:
         self._allowed_exclusion_reason_categories = tuple(sorted(set(active_keys)))
 
         neutral_keys = {key for key in active_keys if key.endswith("_context")}
-        if "not_urban_context" in active_keys:
-            neutral_keys.add("not_urban_context")
         self._neutral_exclusion_flag_keys = tuple(sorted(neutral_keys))
 
         configured_reason_keys = set(self._allowed_exclusion_reason_categories)
@@ -5756,15 +5366,13 @@ class PaperScreeningPipeline:
                 None,
             )
 
-        self._primary_topic_absence_reason_key = _select_topic_absence_reason_key(
+        self._primary_topic_absence_reason_key = select_topic_absence_reason_key(
             configured_reason_keys,
             self._topic_primary_terms,
-            preferred_key="no_artificial_intelligence",
         )
-        self._secondary_topic_absence_reason_key = _select_topic_absence_reason_key(
+        self._secondary_topic_absence_reason_key = select_topic_absence_reason_key(
             configured_reason_keys,
             self._topic_secondary_terms,
-            preferred_key="no_physical_activity",
         )
 
     def _print_dynamic_schema_summary(self) -> None:
@@ -5875,7 +5483,7 @@ class PaperScreeningPipeline:
         for key in list(normalized.keys()):
             if not isinstance(key, str):
                 continue
-            normalized_key = _normalize_schema_key(key)
+            normalized_key = normalize_schema_key(key)
             if not normalized_key or normalized_key == key or normalized_key in normalized:
                 continue
             normalized[normalized_key] = normalized[key]
@@ -5907,20 +5515,17 @@ class PaperScreeningPipeline:
             for key in self._allowed_exclusion_reason_categories
             if isinstance(key, str)
         }
-        if not allowed_reasons:
-            allowed_reasons = {str(key) for key in LEGACY_DEFAULT_EXCLUSION_KEYS}
-
         payload_flag_like_keys = {
-            _normalize_schema_key(key)
+            normalize_schema_key(key)
             for key, value in payload.items()
             if isinstance(key, str)
             and key not in CORE_SCREENING_SCHEMA_FIELDS
             and (
                 isinstance(value, bool)
                 or (isinstance(value, str) and value.strip().upper() == "NEUTRAL")
-                or _looks_like_exclusion_field(key)
+                or looks_like_exclusion_field(key)
             )
-            and _normalize_schema_key(key)
+            and normalize_schema_key(key)
         }
         allowed_reasons.update(payload_flag_like_keys)
 
@@ -6037,7 +5642,7 @@ class PaperScreeningPipeline:
             for key in ("exclusion_reason_category", "exclusion_reason", "reason"):
                 val = payload.get(key)
                 if val:
-                    normalized = _normalize_schema_key(str(val))
+                    normalized = normalize_schema_key(str(val))
                     if normalized:
                         return normalized
         return None
@@ -6111,7 +5716,7 @@ class PaperScreeningPipeline:
         candidate_keys.update(
             key
             for key in payload.keys()
-            if isinstance(key, str) and _looks_like_exclusion_field(key)
+            if isinstance(key, str) and looks_like_exclusion_field(key)
         )
 
         values: dict[str, bool | None] = {}
@@ -6596,23 +6201,27 @@ class PaperScreeningPipeline:
         output_dir = self._data_extraction_output_dir(paper)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        extraction_jsonl_path = output_dir / f"{self.stage}_extraction_results.jsonl"
-        with open(extraction_jsonl_path, "w", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    {
-                        "meta": "extraction_results",
-                        "description": "Per-paper extracted fields (JSONL).",
-                        "criteria": self._extraction_criteria,
-                        "run_label": self.run_label,
-                        "run_id": self.run_id,
-                    }
-                )
-                + "\n"
+        extraction_jsonl_payload = (
+            json.dumps(
+                {
+                    "meta": "extraction_results",
+                    "description": "Per-paper extracted fields (JSONL).",
+                    "criteria": self._extraction_criteria,
+                    "run_label": self.run_label,
+                    "run_id": self.run_id,
+                }
             )
-            handle.write(json.dumps(extraction_payload) + "\n")
+            + "\n"
+            + json.dumps(extraction_payload)
+            + "\n"
+        )
+        # human readable hint: write one canonical extraction JSONL to avoid duplicate artifact names.
+        extraction_jsonl_path = output_dir / f"{self.stage}_results.jsonl"
+        extraction_jsonl_path.write_text(extraction_jsonl_payload, encoding="utf-8")
+        stale_jsonl_path = output_dir / f"{self.stage}_extraction_results.jsonl"
+        if stale_jsonl_path.exists():
+            stale_jsonl_path.unlink()
 
-        extraction_csv_path = output_dir / f"{self.stage}_extraction_results.csv"
         flat_extracted = extraction_payload.get("extracted_data_flat") or {}
         fieldnames = ["paper_id", "run_id"]
         if isinstance(flat_extracted, dict) and flat_extracted:
@@ -6622,101 +6231,34 @@ class PaperScreeningPipeline:
         else:
             fieldnames.append("extracted_data")
 
+        csv_rows: list[dict[str, Any]] = []
+        row = {
+            "paper_id": extraction_payload.get("paper_id", ""),
+            "run_id": extraction_payload.get("run_id", self.run_id),
+        }
+        extracted = extraction_payload.get("extracted_data") or {}
+        if isinstance(flat_extracted, dict) and flat_extracted:
+            for key in fieldnames[2:]:
+                row[key] = flat_extracted.get(key, "")
+        elif self._extraction_criteria:
+            for key in self._extraction_criteria:
+                value = extracted.get(key, "")
+                if isinstance(value, (dict, list)):
+                    value = json.dumps(value, ensure_ascii=False)
+                row[key] = value
+        else:
+            row["extracted_data"] = json.dumps(extracted, ensure_ascii=False)
+        csv_rows.append(row)
+
+        # human readable hint: write one canonical extraction CSV with machine-readable dot-path columns.
+        extraction_csv_path = output_dir / f"{self.stage}_results.csv"
         with open(extraction_csv_path, "w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=fieldnames)
             writer.writeheader()
-            row = {
-                "paper_id": extraction_payload.get("paper_id", ""),
-                "run_id": extraction_payload.get("run_id", self.run_id),
-            }
-            extracted = extraction_payload.get("extracted_data") or {}
-            if isinstance(flat_extracted, dict) and flat_extracted:
-                for key in fieldnames[2:]:
-                    row[key] = flat_extracted.get(key, "")
-            elif self._extraction_criteria:
-                for key in self._extraction_criteria:
-                    value = extracted.get(key, "")
-                    if isinstance(value, (dict, list)):
-                        value = json.dumps(value, ensure_ascii=False)
-                    row[key] = value
-            else:
-                row["extracted_data"] = json.dumps(extracted, ensure_ascii=False)
-            writer.writerow(row)
-
-    @staticmethod
-    def _normalize_criterion(text: str) -> str:
-        """Normalize a prompt bullet line into a clean field name."""
-
-        cleaned = text.strip().strip("- ").strip()
-        cleaned = re.sub(r"\s+[\u2013\u2014-]\s+", ":", cleaned)
-        if ":" in cleaned:
-            cleaned = cleaned.split(":", 1)[0].strip()
-        return cleaned
-
-    @classmethod
-    def _extract_criteria_from_prompt(cls, prompt_text: str) -> list[str]:
-        """Infer extraction fields from the "Fields to extract" section only."""
-
-        criteria: list[str] = []
-        seen = set()
-        in_fields_section = False
-
-        for line in prompt_text.splitlines():
-            stripped = line.strip()
-
-            lower = stripped.lower()
-            if "fields to extract" in lower:
-                in_fields_section = True
-                continue
-            if in_fields_section and (
-                lower.startswith("formatting rules")
-                or lower.startswith("response shape")
-                or lower.startswith("evidence block")
-                or lower.startswith("external eligibility criteria")
-            ):
-                break
-
-            if not in_fields_section:
-                continue
-
-            item = ""
-            if stripped.startswith(("- ", "* ")):
-                item = stripped[2:].strip()
-            else:
-                numbered = re.match(r"^\d+\)\s+(.*)$", stripped)
-                if numbered:
-                    item = numbered.group(1).strip()
-
-            if item:
-                key = cls._normalize_criterion(item)
-                if key and key.lower() not in seen:
-                    criteria.append(key)
-                    seen.add(key.lower())
-        return criteria
-
-    @staticmethod
-    def _flatten_extracted_data(payload: Any, prefix: str = "") -> dict[str, str]:
-        """Flatten nested extraction JSON into dot-path scalar fields for CSV/validation exports."""
-
-        flat: dict[str, str] = {}
-        if isinstance(payload, dict):
-            for key, value in payload.items():
-                key_str = str(key)
-                full_key = f"{prefix}.{key_str}" if prefix else key_str
-                flat.update(PaperScreeningPipeline._flatten_extracted_data(value, full_key))
-            return flat
-
-        if isinstance(payload, list):
-            if all(not isinstance(item, (dict, list)) for item in payload):
-                joined = "; ".join(str(item) for item in payload if item is not None)
-                flat[prefix] = joined
-                return flat
-            flat[prefix] = json.dumps(payload, ensure_ascii=False)
-            return flat
-
-        if prefix:
-            flat[prefix] = "" if payload is None else str(payload)
-        return flat
+            writer.writerows(csv_rows)
+        stale_csv_path = output_dir / f"{self.stage}_extraction_results.csv"
+        if stale_csv_path.exists():
+            stale_csv_path.unlink()
 
     def _build_extraction_payload(self, paper: PaperRecord, llm_decision: str | None) -> dict | None:
         """Parse the LLM output into structured extraction data."""
@@ -6724,42 +6266,25 @@ class PaperScreeningPipeline:
         if not llm_decision:
             return None
 
-        extracted_data = None
-        field_provenance = {}
-        raw_text = llm_decision
+        if self._extraction_schema is None:
+            raise RuntimeError("data_extraction requires a configured DynamicExtractionSchema.")
 
-        try:
-            extracted_data = json.loads(raw_text)
-        except Exception:
-            match = re.search(r"\{.*\}", raw_text, re.DOTALL)
-            if match:
-                try:
-                    extracted_data = json.loads(match.group(0))
-                except Exception:
-                    extracted_data = None
-
-        if isinstance(extracted_data, dict):
-            if "field_provenance" in extracted_data and isinstance(extracted_data["field_provenance"], dict):
-                field_provenance = extracted_data.pop("field_provenance")
-            if self._extraction_criteria:
-                criteria_set = {c.lower() for c in self._extraction_criteria}
-                filtered = {k: v for k, v in extracted_data.items() if k.lower() in criteria_set}
-                if not filtered and extracted_data:
-                    # human readable hint: keep full payload when prompt criteria are conceptual and response is nested JSON.
-                    filtered = extracted_data
-            else:
-                filtered = extracted_data
-        else:
-            filtered = {}
-
-        flat_filtered = self._flatten_extracted_data(filtered)
-
+        # human readable hint: validate LLM JSON against the same KB-generated Pydantic model sent to OpenAI.
+        filtered, validation_error = parse_and_validate(llm_decision, self._extraction_schema)
+        if validation_error:
+            self._log_error(
+                paper.paper_id,
+                f"data extraction schema validation failed: {validation_error}",
+                error_type="data_extraction_schema_validation_failed",
+            )
         return {
             "paper_id": paper.paper_id,
             "run_label": self.run_label,
             "run_id": self.run_id,
             "extracted_data": filtered,
-            "extracted_data_flat": flat_filtered,
-            "field_provenance": field_provenance,
-            "raw_output": raw_text,
+            "extracted_data_flat": flatten_extracted_data(filtered),
+            "field_provenance": {},
+            "raw_output": llm_decision,
+            "schema_kb_path": str(self._extraction_schema.kb_path),
+            "schema_validation_error": validation_error,
         }

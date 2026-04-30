@@ -101,6 +101,7 @@ Primary outputs:
 7. [knowledge-base/kb_bootstrap_summary.json](knowledge-base/kb_bootstrap_summary.json)
 
 If you want the pipeline to use the suggested prompts immediately, copy the selected suggested file content into the active prompt files in [config](config).
+The bootstrap utility derives suggested prompt terms and chunk-ranking cues from your local POS/NEG example PDFs instead of fixed review-topic term lists.
 
 ## Optional Full-Text Cleaned-Hybrid KB Draft Utility
 
@@ -151,6 +152,9 @@ Behavior notes:
   - Knowledge-base default: [knowledge-base/data_extraction_pos-neg_examples.csv](knowledge-base/data_extraction_pos-neg_examples.csv)
   - Knowledge-base override: set `KNOWLEDGE_BASE_FILES["data_extraction"]` or `KB_FILE_OVERRIDES["data_extraction"]` in [config/user_orchestrator.py](config/user_orchestrator.py)
   - PDFs reused in `input/per_paper_data_extraction/`
+  - extraction schema and Covidence validation mapping are read from `DATA_EXTRACTION_SCHEMA_FILE` in [config/user_orchestrator.py](config/user_orchestrator.py)
+  - extraction is split by KB `domain` by default, so each LLM call receives a smaller schema and the validated domain outputs are merged
+  - direct async command remains available: `python -m pipeline.core.run_extraction`
 
 Eligibility criteria can be centrally stored in [knowledge-base/eligibility_criteria.txt](knowledge-base/eligibility_criteria.txt).
 - The file is injected only when a stage prompt contains `{eligibility_criteria}`.
@@ -168,10 +172,11 @@ Use this block when you switch to a different review topic.
   - In `# END GOAL`, define the exclusion flag keys for your topic as JSON keys.
   - Keep core keys present: `is_eligible`, `confidence_score`, `justification`, `exclusion_reason_category`.
 2. Update study tags in [config/user_orchestrator.py](config/user_orchestrator.py).
-  - Edit `STUDY_TAGS_INCLUDE` so each tag represents one exclusion category you expect in QC validation.
+  - Edit the `USER-EDITABLE STUDY TAGS` block so each `STUDY_TAGS_INCLUDE` entry represents one exclusion category you expect in QC validation.
   - Tags are normalized to snake_case internally, so `No intervention` maps to `no_intervention`.
 3. Update the stage knowledge base.
   - Replace POS/NEG examples with topic-matched examples in [knowledge-base](knowledge-base).
+  - For data extraction, set `DATA_EXTRACTION_SCHEMA_FILE` if the schema CSV is renamed or moved.
 4. Run QC first, then confirm alignment.
   - Start with QC sampling and verify AI vs human output before full screening.
 5. Verify startup and diagnostics.
@@ -180,7 +185,10 @@ Use this block when you switch to a different review topic.
 
 Dynamic behavior implemented in pipeline:
 - Exclusion schema is built from `STUDY_TAGS_INCLUDE` plus prompt `END GOAL` exclusion fields.
-- Topic retrieval signals are derived from prompt include lists (`Intervention / Exposure` and `Outcome`).
+- Topic retrieval signals are derived from prompt include lists and KB examples, without hidden protocol-specific seed terms in Python code.
+- Prompt-derived retrieval/schema signal helpers live in `pipeline/selection/prompt_signals.py`, keeping the main pipeline class focused on orchestration.
+- `main.py` keeps the interactive stage flow; retry bookkeeping, output indexing, and startup checks live in focused `pipeline/additions` modules.
+- Data-extraction validation is dynamic: each KB `variable_name` maps to the exact Covidence header in `covidence_column_name`.
 - No code edits are required for topic changes if prompt, knowledge base, and `user_orchestrator.py` are updated consistently.
 
 ## Quality Control and Retry Behavior
@@ -218,7 +226,7 @@ Dynamic behavior implemented in pipeline:
 - full text:
   - `python -m pipeline.additions.stats_engine --included <included_csv> --excluded <excluded_csv>`
 - data extraction:
-  - `python -m pipeline.additions.stats_engine --consensus <data_extraction_consensus.csv>`
+  - `python -m pipeline.additions.stats_engine --consensus <Covidence_gold_standard.csv>`
 
 ## Input-Forensics Utility
 
@@ -245,14 +253,21 @@ Full-text per-paper input artifacts (`input/per_paper_full_text/<paper_folder>/`
 - full mode: legacy normalized sidecars (`*_normalized_text.txt`, `*_normalized_pages.json`, `*_normalized_meta.json`)
 
 Data extraction additionally writes per-paper:
-- `data_extraction_extraction_results.jsonl`
-- `data_extraction_extraction_results.csv`
+- `data_extraction_results.jsonl` and `data_extraction_results.csv`
 - `data_extraction_evidence.json`
 
 Data-extraction validation additionally writes run-level exports:
-- `data_extraction_qc_sample_extraction_accuracy_summary_<timestamp>.json`
-- `data_extraction_qc_sample_extraction_accuracy_by_field_<timestamp>.csv`
-- `data_extraction_qc_sample_extraction_scoring_<timestamp>.csv`
+- `data_extraction_extraction_accuracy_report.txt`
+- `data_extraction_extraction_accuracy_report.csv`
+- `extraction_error_audit.csv`
+
+Data-extraction schema and validation mapping:
+- The configured extraction schema CSV defines `domain`, `variable_name`, `variable_type`, `allowed_options`, `instruction`, and `covidence_column_name`.
+- The LLM output uses `{variable_name}_value` and `{variable_name}_quote` under each domain.
+- Validation maps each LLM value field to the exact Covidence header named in `covidence_column_name`.
+- `LLM_SETTINGS["data_extraction_split_by_domain"]` defaults to `True`; `data_extraction_domain_max_tokens` caps each domain response to prevent runaway malformed JSON.
+- `LLM_SETTINGS["data_extraction_response_format_mode"]` defaults to `prompt_only` for GPUSstack compatibility; use `json_schema` only with a backend proven to enforce OpenAI Structured Outputs.
+- `LLM_SETTINGS["data_extraction_evidence_mode"]` defaults to `full_text`, so extraction uses cached `full_text_normalized.txt` instead of only the selected screening chunks.
 
 ## High-Priority Failure Checks
 
@@ -274,13 +289,16 @@ Data-extraction validation additionally writes run-level exports:
 - Knowledge-base file selection is configurable per stage/run using `KNOWLEDGE_BASE_FILES` and `KB_FILE_OVERRIDES` in [config/user_orchestrator.py](config/user_orchestrator.py).
 - Total context budget is model-configurable in `LLM_SETTINGS["context_window_total_tokens"]` (input + output).
 - Keep `LLM_SETTINGS["max_tokens"]` lower than `context_window_total_tokens`; effective prompt budget is computed as `context_window_total_tokens - max_tokens`.
-- Balanced optimization profile defaults are now set to: `SCREENING_DEFAULTS.top_k=10`, `EMBEDDING_SETTINGS.chunk_size=20`, `LLM_SETTINGS.async_max_concurrency=18`.
+- Endpoint-safe optimization profile defaults are now set to: `SCREENING_DEFAULTS.top_k=10`, `EMBEDDING_SETTINGS.chunk_size=20`, `LLM_SETTINGS.async_max_concurrency=2`.
 - Async LLM controls are in `LLM_SETTINGS`: `async_max_concurrency`, `async_max_retries`, `async_backoff_base_seconds`, `async_backoff_max_seconds`, `async_jitter_seconds`.
+- Data-extraction output controls are in `LLM_SETTINGS`: `data_extraction_split_by_domain`, `data_extraction_response_format_mode`, `data_extraction_domain_max_tokens`, `data_extraction_evidence_mode`, and `data_extraction_full_text_max_words`.
 - Stage toggles for async processing: `async_enable_full_text`, `async_enable_data_extraction`.
 - Async heartbeat log interval: `async_heartbeat_seconds` (default `30`).
 - Per-paper artifact controls are in `SCREENING_DEFAULTS`:
   - `artifact_mode`: `compact` (default) or `full`
   - `compact_keep_legacy_selected_chunks`: keep/remove `*_selected_chunks.jsonl` sidecars in compact mode
+  - `fulltext_preparse_before_screening`: default `True`; set `False` for fastest large full-text runs
+  - `fulltext_preparse_log_each_paper`: default `True`; set `False` for quieter preparse
 - Optional UBELIX rough estimate in `config/user_orchestrator.py` via `UBELIX_ESTIMATION_CONFIG` (uses runtime + TDP + PUE; excludes embodied emissions).
 - UBELIX assumption log fields can be filled in `UBELIX_ESTIMATION_CONFIG["assumptions"]` (source + date for PUE, grid intensity, and resource usage) and are written to the `TOTAL` resource log line.
 - Green-Algorithms style factors supported in `UBELIX_ESTIMATION_CONFIG`: `core_usage_factor`, `memory_gb`, `memory_power_watts_per_gb`, `multiplicative_factor`.

@@ -12,6 +12,7 @@ import re
 from typing import Callable
 import unicodedata
 
+from config.user_orchestrator import STUDY_TAGS_INCLUDE
 from pipeline.integrations.embedding_utils import detect_language_code, read_pdf_pages
 from pipeline.selection.chunking import chunk_fulltext_sentences
 
@@ -93,78 +94,6 @@ STOPWORDS = {
 }
 
 
-FULLTEXT_CORE_TERMS = {
-	"smartphone",
-	"mobile",
-	"app",
-	"mhealth",
-	"digital",
-	"physical activity",
-	"exercise",
-	"walking",
-	"steps",
-	"intervention",
-}
-
-
-FULLTEXT_POS_TERMS = {
-	"artificial intelligence",
-	"machine learning",
-	"deep learning",
-	"reinforcement learning",
-	"contextual bandit",
-	"chatbot",
-	"large language model",
-	"jitai",
-	"adaptive",
-	"personalized",
-}
-
-
-FULLTEXT_NEG_TERMS = {
-	"scoping review",
-	"systematic review",
-	"review",
-	"agent-based",
-	"simulation",
-	"conceptual model",
-	"methodological",
-}
-
-
-EXTRACTION_TERMS = {
-	"randomized",
-	"trial",
-	"protocol",
-	"sample",
-	"participants",
-	"eligibility",
-	"outcome",
-	"primary outcome",
-	"secondary outcome",
-	"algorithm",
-	"reinforcement learning",
-	"machine learning",
-	"llm",
-	"large language model",
-	"architecture",
-	"cloud",
-	"on-device",
-	"privacy",
-	"ethics",
-	"sustainability",
-}
-
-
-EXTRACTION_TAG_RULES: dict[str, set[str]] = {
-	"methods": {"randomized", "trial", "protocol", "sample", "participants", "eligibility", "baseline"},
-	"outcomes": {"outcome", "primary", "secondary", "step", "mvpa", "weight", "blood pressure"},
-	"ai": {"algorithm", "machine learning", "reinforcement", "llm", "chatbot", "contextual bandit"},
-	"architecture": {"cloud", "on-device", "hybrid", "api", "mobile app"},
-	"ethics": {"privacy", "ethics", "bias", "inclusivity", "gdpr"},
-}
-
-
 SECTION_BONUS = {
 	"introduction": 0.2,
 	"method": 1.2,
@@ -198,6 +127,15 @@ class PaperRecord:
 	page_count: int
 	language: str
 	chunks: list[dict]
+
+
+@dataclass(frozen=True, slots=True)
+class BootstrapSignals:
+	"""human readable hint: data-derived cue terms learned from the local POS/NEG example PDFs."""
+
+	include_terms: tuple[str, ...]
+	exclude_terms: tuple[str, ...]
+	extraction_terms: tuple[str, ...]
 
 
 def _normalize_ascii(value: str) -> str:
@@ -261,7 +199,9 @@ def _truncate_words(text: str, max_words: int) -> str:
 	return " ".join(words[:max_words]).strip() + " ..."
 
 
-def _score_fulltext_chunk(chunk: dict, paper: PaperRecord) -> float:
+def _score_fulltext_chunk(chunk: dict, paper: PaperRecord, signals: BootstrapSignals) -> float:
+	"""human readable hint: rank chunks using terms learned from the local POS/NEG example PDFs."""
+
 	text = str(chunk.get("text") or "").strip()
 	if not text:
 		return -1000.0
@@ -274,9 +214,8 @@ def _score_fulltext_chunk(chunk: dict, paper: PaperRecord) -> float:
 	section = str(chunk.get("section") or "").strip().lower()
 
 	score = 0.0
-	score += _keyword_hits(lower_text, FULLTEXT_CORE_TERMS) * 1.6
-	score += _keyword_hits(lower_text, FULLTEXT_POS_TERMS) * (1.3 if paper.label == "POS" else 0.3)
-	score += _keyword_hits(lower_text, FULLTEXT_NEG_TERMS) * (1.3 if paper.label == "NEG" else -0.5)
+	score += _keyword_hits(lower_text, set(signals.include_terms)) * (1.4 if paper.label == "POS" else 0.4)
+	score += _keyword_hits(lower_text, set(signals.exclude_terms)) * (1.4 if paper.label == "NEG" else -0.4)
 	score += SECTION_BONUS.get(section, 0.0)
 
 	if _looks_reference_like(text, section=section):
@@ -292,7 +231,9 @@ def _score_fulltext_chunk(chunk: dict, paper: PaperRecord) -> float:
 	return score
 
 
-def _score_data_extraction_chunk(chunk: dict, paper: PaperRecord) -> float:
+def _score_data_extraction_chunk(chunk: dict, paper: PaperRecord, signals: BootstrapSignals) -> float:
+	"""human readable hint: rank extraction examples using terms learned from included example PDFs."""
+
 	text = str(chunk.get("text") or "").strip()
 	if not text:
 		return -1000.0
@@ -302,8 +243,8 @@ def _score_data_extraction_chunk(chunk: dict, paper: PaperRecord) -> float:
 	word_count = len(text.split())
 
 	score = 0.0
-	score += _keyword_hits(lower_text, EXTRACTION_TERMS) * 1.6
-	score += _keyword_hits(lower_text, FULLTEXT_CORE_TERMS) * 0.6
+	score += _keyword_hits(lower_text, set(signals.extraction_terms)) * 1.6
+	score += _keyword_hits(lower_text, set(signals.include_terms)) * 0.6
 	score += SECTION_BONUS.get(section, 0.0)
 	score += min(word_count, 260) / 260.0
 
@@ -376,44 +317,42 @@ def _page_tag(chunk: dict) -> str:
 	return "pNA"
 
 
-def _infer_negative_reason(title: str, snippet: str) -> str:
+def _infer_negative_reason(title: str, snippet: str, signals: BootstrapSignals) -> str:
+	"""human readable hint: explain NEG examples using exclusion-like terms learned from local PDFs."""
+
 	lower_title = title.lower()
 	lower_text = snippet.lower()
 	joined = lower_title + " " + lower_text
+	matched = [term for term in signals.exclude_terms[:12] if term in joined]
+	if matched:
+		return "Negative example because the provided evidence matches local NEG-example terms: " + ", ".join(matched[:4]) + "."
 
 	if "review" in joined or "scoping" in joined:
-		return "Negative example because this paper is a review-style publication, not a direct empirical intervention study."
+		return "Negative example because this paper is a review-style publication rather than direct primary evidence."
 	if "agent-based" in joined or "simulation" in joined:
-		return "Negative example because this paper focuses on simulation/modeling rather than participant-level smartphone intervention delivery."
+		return "Negative example because this paper focuses on simulation/modeling rather than direct participant-level evidence."
 	if "children" in joined or "adolescent" in joined:
 		return "Negative example because the target population is non-adult."
-	if "protocol" in joined and "physical activity" not in joined:
-		return "Negative example because it does not provide a direct physical-activity intervention signal in the screened evidence."
 
 	return "Negative example from the provided neg_examples set to represent non-eligible or weak-fit screening patterns."
 
 
-def _extract_signals_for_reasoning(text: str) -> list[str]:
+def _extract_signals_for_reasoning(text: str, signals: BootstrapSignals) -> list[str]:
+	"""human readable hint: summarize why a POS example matched using local data-derived cue terms."""
+
 	lower_text = text.lower()
-	signals = []
-	if any(term in lower_text for term in {"smartphone", "mobile", "app", "mhealth"}):
-		signals.append("smartphone/mobile delivery")
-	if any(term in lower_text for term in {"artificial intelligence", "machine learning", "reinforcement learning", "llm", "chatbot"}):
-		signals.append("AI personalization")
-	if any(term in lower_text for term in {"physical activity", "exercise", "walking", "steps", "mvpa"}):
-		signals.append("physical activity target")
-	return signals
+	matched = [term for term in signals.include_terms[:12] if term in lower_text]
+	return matched[:4]
 
 
-def _infer_extraction_tags(text: str) -> list[str]:
+def _infer_extraction_tags(text: str, signals: BootstrapSignals) -> list[str]:
+	"""human readable hint: label extraction snippets with matched local cue terms rather than fixed domains."""
+
 	lower_text = text.lower()
-	tags = []
-	for tag, rule_terms in EXTRACTION_TAG_RULES.items():
-		if any(term in lower_text for term in rule_terms):
-			tags.append(tag)
+	tags = [term for term in signals.extraction_terms[:12] if term in lower_text]
 	if not tags:
 		tags.append("general")
-	return tags
+	return tags[:5]
 
 
 def _tokenize(text: str) -> list[str]:
@@ -435,6 +374,37 @@ def _top_discriminative_terms(primary: Counter[str], contrast: Counter[str], top
 	return [term for _, term in scored[:top_n]]
 
 
+def _top_common_terms(counter: Counter[str], top_n: int) -> list[str]:
+	"""human readable hint: choose frequent local terms as fallback extraction cues when POS/NEG contrast is sparse."""
+
+	return [term for term, count in counter.most_common() if count >= 3][:top_n]
+
+
+def _build_bootstrap_signals(papers: list[PaperRecord]) -> BootstrapSignals:
+	"""human readable hint: learn prompt and chunk-ranking cue terms from the current POS/NEG PDF examples."""
+
+	pos_counter: Counter[str] = Counter()
+	neg_counter: Counter[str] = Counter()
+	all_counter: Counter[str] = Counter()
+
+	for paper in papers:
+		token_counter = Counter(_tokenize(paper.full_text))
+		all_counter.update(token_counter)
+		if paper.label == "POS":
+			pos_counter.update(token_counter)
+		else:
+			neg_counter.update(token_counter)
+
+	include_terms = tuple(_top_discriminative_terms(pos_counter, neg_counter, top_n=30))
+	exclude_terms = tuple(_top_discriminative_terms(neg_counter, pos_counter, top_n=30))
+	extraction_terms = tuple(include_terms[:20] or _top_common_terms(all_counter, top_n=20))
+	return BootstrapSignals(
+		include_terms=include_terms,
+		exclude_terms=exclude_terms,
+		extraction_terms=extraction_terms,
+	)
+
+
 def _write_csv(path: Path, rows: list[dict]) -> None:
 	path.parent.mkdir(parents=True, exist_ok=True)
 	with path.open("w", encoding="utf-8", newline="") as handle:
@@ -448,28 +418,28 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
 			})
 
 
-def _build_title_abstract_rows(papers: list[PaperRecord]) -> list[dict]:
+def _build_title_abstract_rows(papers: list[PaperRecord], signals: BootstrapSignals) -> list[dict]:
 	rows: list[dict] = []
 	for paper in papers:
 		selected = _select_diverse_chunks(
 			chunks=paper.chunks,
 			paper=paper,
-			score_fn=_score_fulltext_chunk,
+			score_fn=lambda chunk, paper_arg: _score_fulltext_chunk(chunk, paper_arg, signals),
 			max_items=1,
 		)
 		chunk = selected[0] if selected else None
 		snippet = _truncate_words(str(chunk.get("text") or paper.full_text), max_words=170)
 
 		if paper.label == "POS":
-			signals = _extract_signals_for_reasoning(snippet)
-			signal_text = ", ".join(signals) if signals else "smartphone-AI-PA alignment"
+			reason_signals = _extract_signals_for_reasoning(snippet, signals)
+			signal_text = ", ".join(reason_signals) if reason_signals else "local positive-example alignment"
 			reasoning = (
 				"Positive example because the provided evidence shows "
 				+ signal_text
 				+ ", matching the target screening focus."
 			)
 		else:
-			reasoning = _infer_negative_reason(paper.title, snippet)
+			reasoning = _infer_negative_reason(paper.title, snippet, signals)
 
 		rows.append(
 			{
@@ -482,13 +452,13 @@ def _build_title_abstract_rows(papers: list[PaperRecord]) -> list[dict]:
 	return rows
 
 
-def _build_full_text_rows(papers: list[PaperRecord], chunks_per_paper: int) -> list[dict]:
+def _build_full_text_rows(papers: list[PaperRecord], chunks_per_paper: int, signals: BootstrapSignals) -> list[dict]:
 	rows: list[dict] = []
 	for paper in papers:
 		selected = _select_diverse_chunks(
 			chunks=paper.chunks,
 			paper=paper,
-			score_fn=_score_fulltext_chunk,
+			score_fn=lambda chunk, paper_arg: _score_fulltext_chunk(chunk, paper_arg, signals),
 			max_items=chunks_per_paper,
 		)
 		for rank, chunk in enumerate(selected, start=1):
@@ -502,18 +472,18 @@ def _build_full_text_rows(papers: list[PaperRecord], chunks_per_paper: int) -> l
 	return rows
 
 
-def _build_data_extraction_rows(papers: list[PaperRecord], chunks_per_paper: int) -> list[dict]:
+def _build_data_extraction_rows(papers: list[PaperRecord], chunks_per_paper: int, signals: BootstrapSignals) -> list[dict]:
 	rows: list[dict] = []
 	for paper in papers:
 		selected = _select_diverse_chunks(
 			chunks=paper.chunks,
 			paper=paper,
-			score_fn=_score_data_extraction_chunk,
+			score_fn=lambda chunk, paper_arg: _score_data_extraction_chunk(chunk, paper_arg, signals),
 			max_items=chunks_per_paper,
 		)
 		for rank, chunk in enumerate(selected, start=1):
 			chunk_text = str(chunk.get("text") or "").strip()
-			tags = ", ".join(_infer_extraction_tags(chunk_text))
+			tags = ", ".join(_infer_extraction_tags(chunk_text, signals))
 			rows.append(
 				{
 					"label": paper.label,
@@ -524,14 +494,35 @@ def _build_data_extraction_rows(papers: list[PaperRecord], chunks_per_paper: int
 	return rows
 
 
+def _study_tag_key(tag: str) -> str:
+	"""human readable hint: convert configured study tags into suggested JSON exclusion keys."""
+
+	key = re.sub(r"[^a-z0-9]+", "_", str(tag).strip().lower()).strip("_")
+	return key
+
+
+def _configured_exclusion_key_lines() -> str:
+	"""human readable hint: render user-configured exclusion tags as prompt key suggestions."""
+
+	keys = [_study_tag_key(tag) for tag in STUDY_TAGS_INCLUDE if _study_tag_key(tag)]
+	if not keys:
+		keys = ["wrong_publication_type", "insufficient_context"]
+	lines = [f"- {key} (boolean)" for key in keys]
+	for key in ["wrong_publication_type", "insufficient_context"]:
+		if key not in keys:
+			lines.append(f"- {key} (boolean)")
+	return "\n".join(lines)
+
+
 def _render_prompt_title_abstract(include_terms: list[str], exclude_terms: list[str]) -> str:
-	include_text = ", ".join(include_terms[:18]) if include_terms else "smartphone, app, ai, physical activity"
+	include_text = ", ".join(include_terms[:18]) if include_terms else "positive-example terms from your local PDFs"
 	exclude_text = ", ".join(exclude_terms[:18]) if exclude_terms else "review, simulation, non-adult"
+	exclusion_key_lines = _configured_exclusion_key_lines()
 
 	return f"""SCREENING PROMPT (Title/Abstract - Suggested Bootstrap Version)
 
 # ROLE
-You are an expert reviewer for smartphone-based AI interventions targeting physical activity.
+You are an expert reviewer for the review topic defined by the local examples, knowledge base, and user_orchestrator.py.
 
 # DOMAIN SIGNALS DERIVED FROM LOCAL EXAMPLE PDFS
 - Include-leaning signals: {include_text}
@@ -543,13 +534,7 @@ Apply strict exclusion only for explicit evidence. If information is missing but
 
 # REQUIRED JSON KEYS
 - step_by_step_deliberation (string)
-- not_adult_population (boolean)
-- no_smartphone_technology (boolean)
-- no_artificial_intelligence (boolean)
-- no_physical_activity (boolean)
-- not_urban_context (boolean or \"NEUTRAL\")
-- wrong_publication_type (boolean)
-- insufficient_context (boolean)
+{exclusion_key_lines}
 - justification (string)
 - is_eligible (boolean or \"NEUTRAL\")
 - confidence_score (number between 0.0 and 1.0)
@@ -566,13 +551,14 @@ Apply strict exclusion only for explicit evidence. If information is missing but
 
 
 def _render_prompt_full_text(include_terms: list[str], exclude_terms: list[str]) -> str:
-	include_text = ", ".join(include_terms[:20]) if include_terms else "smartphone, mobile app, machine learning, physical activity"
+	include_text = ", ".join(include_terms[:20]) if include_terms else "positive-example terms from your local PDFs"
 	exclude_text = ", ".join(exclude_terms[:20]) if exclude_terms else "review, simulation, conceptual"
+	exclusion_key_lines = _configured_exclusion_key_lines()
 
 	return f"""SCREENING PROMPT (Full-Text - Suggested Bootstrap Version)
 
 # ROLE
-You are an expert reviewer for empirical smartphone-based AI physical-activity interventions.
+You are an expert reviewer for the review topic defined by the local examples, knowledge base, and user_orchestrator.py.
 
 # DOMAIN SIGNALS DERIVED FROM LOCAL EXAMPLE PDFS
 - Include-leaning signals: {include_text}
@@ -584,13 +570,7 @@ For full_text stage, is_eligible must be boolean (true/false), never neutral.
 
 # REQUIRED JSON KEYS
 - step_by_step_deliberation (string)
-- not_adult_population (boolean)
-- no_smartphone_technology (boolean)
-- no_artificial_intelligence (boolean)
-- no_physical_activity (boolean)
-- not_urban_context (boolean)
-- wrong_publication_type (boolean)
-- insufficient_context (boolean)
+{exclusion_key_lines}
 - seed_references (boolean or null)
 - justification (string)
 - is_eligible (boolean)
@@ -599,7 +579,7 @@ For full_text stage, is_eligible must be boolean (true/false), never neutral.
 
 # DECISION RULE
 - Return false if any exclusion flag is true.
-- Return true only when the intervention is empirically documented as smartphone + AI + physical-activity focused.
+- Return true only when the evidence matches the inclusion logic defined by your prompt, tags, and knowledge base.
 
 # OUTPUT RULES
 - Output JSON only.
@@ -612,38 +592,28 @@ For full_text stage, is_eligible must be boolean (true/false), never neutral.
 
 
 def _render_prompt_data_extraction(include_terms: list[str], exclude_terms: list[str]) -> str:
-	include_text = ", ".join(include_terms[:20]) if include_terms else "trial, sample, algorithm, outcome"
-	exclude_text = ", ".join(exclude_terms[:20]) if exclude_terms else "review, simulation"
+	include_text = ", ".join(include_terms[:20]) if include_terms else "positive-example terms from your local PDFs"
+	exclude_text = ", ".join(exclude_terms[:20]) if exclude_terms else "negative-example terms from your local PDFs"
 
 	return f"""DATA EXTRACTION PROMPT (Suggested Bootstrap Version)
 
 # ROLE
-You are an expert reviewer extracting methodological evidence from full-text papers.
+You are an expert reviewer extracting variables defined by the external extraction schema CSV.
 
 # TERM HINTS FROM LOCAL EXAMPLE PDFS
 - Frequent extraction-positive terms: {include_text}
 - Frequent extraction-negative terms: {exclude_text}
 
+# KB-DRIVEN RESPONSE SCHEMA
+{{extraction_schema_instructions}}
+
 # TASK
 Extract only what is explicitly present in the text evidence.
-If a value is not explicit, return null.
-Return one valid JSON object.
-
-# RESPONSE SHAPE
-{{
-  "study_id": {{"first_author": null, "year": null, "country": null}},
-  "methods": {{"study_design": null, "sample_size_n": null, "population_description": {{"value": null, "provenance": null}}, "duration": null}},
-  "urban_context": {{"value": null, "provenance": null, "definition_type": null, "specific_location": null, "environmental_inputs": []}},
-  "ai_system": {{"algorithm_type": {{"value": null, "provenance": null}}, "computing_architecture": {{"value": null, "provenance": null}}, "system_function": null, "sensing_modalities": null}},
-  "psychosocial_theory": {{"theories_cited": [], "operationalization": {{"value": null, "provenance": null, "level_of_integration": null, "key_bcts": []}}}},
-  "responsible_ai": {{"inclusivity_ethics": {{"privacy_ethics_discussed": false, "inclusivity_focus": false, "value": null, "provenance": null}}, "sustainability_aspects": {{"value": null, "provenance": null, "sustainability_features": []}}}},
-  "outcomes": {{"pa_outcome_measure": null, "primary_finding": null}},
-  "notes": null
-}}
+If a value is not explicit, use the missing-value conventions from the KB-driven schema block.
+Return one valid JSON object matching the schema exactly.
 
 # OUTPUT RULES
 - Output JSON only.
-- Use null when unknown.
 - Do not add Markdown fences.
 
 # DATA
@@ -651,20 +621,11 @@ Return one valid JSON object.
 """
 
 
-def _build_prompt_suggestions(papers: list[PaperRecord]) -> dict[str, str]:
-	pos_counter: Counter[str] = Counter()
-	neg_counter: Counter[str] = Counter()
+def _build_prompt_suggestions(signals: BootstrapSignals) -> dict[str, str]:
+	"""human readable hint: render suggested prompts from local data-derived cue terms."""
 
-	for paper in papers:
-		token_counter = Counter(_tokenize(paper.full_text))
-		if paper.label == "POS":
-			pos_counter.update(token_counter)
-		else:
-			neg_counter.update(token_counter)
-
-	include_terms = _top_discriminative_terms(pos_counter, neg_counter, top_n=30)
-	exclude_terms = _top_discriminative_terms(neg_counter, pos_counter, top_n=30)
-
+	include_terms = list(signals.include_terms)
+	exclude_terms = list(signals.exclude_terms)
 	return {
 		"title_abstract": _render_prompt_title_abstract(include_terms=include_terms, exclude_terms=exclude_terms),
 		"full_text": _render_prompt_full_text(include_terms=include_terms, exclude_terms=exclude_terms),
@@ -759,10 +720,11 @@ def main() -> None:
 		)
 
 	all_papers = pos_papers + neg_papers
+	signals = _build_bootstrap_signals(all_papers)
 
-	title_rows = _build_title_abstract_rows(all_papers)
-	full_rows = _build_full_text_rows(all_papers, chunks_per_paper=max(1, args.fulltext_chunks_per_paper))
-	data_rows = _build_data_extraction_rows(all_papers, chunks_per_paper=max(1, args.dataextraction_chunks_per_paper))
+	title_rows = _build_title_abstract_rows(all_papers, signals)
+	full_rows = _build_full_text_rows(all_papers, chunks_per_paper=max(1, args.fulltext_chunks_per_paper), signals=signals)
+	data_rows = _build_data_extraction_rows(all_papers, chunks_per_paper=max(1, args.dataextraction_chunks_per_paper), signals=signals)
 
 	kb_dir.mkdir(parents=True, exist_ok=True)
 	prompt_dir.mkdir(parents=True, exist_ok=True)
@@ -775,7 +737,7 @@ def main() -> None:
 	_write_csv(full_kb_path, full_rows)
 	_write_csv(data_kb_path, data_rows)
 
-	prompts = _build_prompt_suggestions(all_papers)
+	prompts = _build_prompt_suggestions(signals)
 	prompt_paths = {
 		"title_abstract": prompt_dir / "prompt_script_title_abstract_suggested.txt",
 		"full_text": prompt_dir / "prompt_script_full_text_suggested.txt",
@@ -803,6 +765,11 @@ def main() -> None:
 			"prompt_script_title_abstract_suggested": str(prompt_paths["title_abstract"]),
 			"prompt_script_full_text_suggested": str(prompt_paths["full_text"]),
 			"prompt_script_data_extraction_suggested": str(prompt_paths["data_extraction"]),
+		},
+		"data_derived_signals": {
+			"include_terms": list(signals.include_terms),
+			"exclude_terms": list(signals.exclude_terms),
+			"extraction_terms": list(signals.extraction_terms),
 		},
 	}
 	summary_path = kb_dir / "kb_bootstrap_summary.json"

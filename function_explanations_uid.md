@@ -45,6 +45,8 @@ This appendix provides function-level explanations for scripts and classes in th
 
 ### Class UserConfig
 - Human readable hint: Static snapshot of user-facing settings for the current run. Note: this bundles all inputs so other scripts can read a single object.
+- Human readable hint: The top block marked `USER-EDITABLE` is the protocol boundary: change `CURRENT_STAGE`, prompts/KBs, `STUDY_TAGS_INCLUDE`, `STUDY_TAGS_IGNORE`, and `DATA_EXTRACTION_SCHEMA_FILE` there when the review topic changes.
+- Human readable hint: `DATA_EXTRACTION_SCHEMA_FILE` points to the CSV that defines extraction variables and exact Covidence header mappings.
 ### Script-level functions
 - Human readable hint: compatibility wrappers or helper functions used by the primary class.
 
@@ -59,7 +61,9 @@ This appendix provides function-level explanations for scripts and classes in th
 
 #### load_user_config()
 - Human readable hint: Build and validate a UserConfig from module globals (one call per run). Note: you do not edit this function; it just packages the values above.
-- Human readable hint: Current balanced default profile in this config snapshot uses `top_k=10`, `chunk_size=20`, and `async_max_concurrency=18` for faster large-batch runs with moderate recall safeguards.
+- Human readable hint: Current endpoint-safe default profile uses `top_k=10`, `chunk_size=20`, and `async_max_concurrency=2` so full-text/data-extraction runs do not overload the LLM proxy during QC.
+- Human readable hint: Data extraction defaults to `data_extraction_response_format_mode="prompt_only"` because this GPUSstack model returned malformed JSON when sent strict `json_schema` response_format payloads.
+- Human readable hint: Data extraction defaults to `data_extraction_evidence_mode="full_text"` so extraction prompts use cached normalized full text rather than only the screening-selected chunks.
 - Human readable hint: Total model context budget is configured in `LLM_SETTINGS["context_window_total_tokens"]` and combined with `max_tokens` to derive prompt budget at runtime.
 
 ## main.py
@@ -67,122 +71,99 @@ This appendix provides function-level explanations for scripts and classes in th
 ### Class MainWorkflow
 - Human readable hint: one-class orchestrator for terminal flow, retries, QC gating, and stage execution.
 - __init__ parameters: none
+
 #### MainWorkflow.__init__()
-- Human readable hint: __init__ keeps the key runtime attributes visible in one place.
+- Human readable hint: stores the active stage, input folder, and QC sample rate.
 
 #### MainWorkflow.run()
-- Human readable hint: Run the pipeline for the selected stage with safety checks.
+- Human readable hint: readable stage decision tree; helper details now live in focused `pipeline/additions` modules.
 
 ### Script-level functions
-- Human readable hint: compatibility wrappers or helper functions used by the primary class.
+- Human readable hint: main.py now keeps interactive workflow control only; bookkeeping helpers are imported from focused modules.
 
 #### _last_artifact_dict()
-- Human readable hint: Return last_artifact only when it is a dict; otherwise None for type safety.
-
-#### _qc_screened_already(stage)
-- Human readable hint: Detect whether a QC sample for this stage was already screened.
+- Human readable hint: return the last pipeline artifact only when it is a dictionary.
 
 #### _run_pipeline_guarded()
-- Human readable hint: Run the pipeline and store artifacts; mark prompts as not-all-yes on failure.
+- Human readable hint: run one pipeline pass, store the returned artifact, and mark failures for the backup prompt.
 
-#### _parse_is_eligible(decision, stage)
-- Human readable hint: Best-effort extraction of is_eligible from an LLM decision payload (stage-aware).
+#### _execute_retry_run(stage, run_label, retry_csv, attempt_map)
+- Human readable hint: run one retry attempt while delegating retry file naming and manifests to `pipeline/additions/retry_flow.py`.
 
-#### _parse_exclusion_reason(decision)
-- Human readable hint: extract exclusion_reason_category if present.
-
-#### _collect_missing_is_eligible(error_log_path, eligibility_path, stage)
-- Human readable hint: Find paper_ids that have errors AND no is_eligible in eligibility output.
-
-#### _unique_retry_path(path)
-- Human readable hint: Ensure retry artifacts never overwrite an existing file with the same timestamped name.
-
-#### _write_retry_csv(source_csv, target_dir, paper_ids, stage, run_label)
-- Human readable hint: Create a stage-valid retry CSV using run_label and stage-specific token (screen/select) with collision-safe filenames.
-
-#### _retry_output_paths(stage, run_label, attempt_index)
-- Human readable hint: retry outputs stay separate using stage_runlabel_retry_attempt_output_timestamp order with collision-safe paths.
-
-#### _latest_base_outputs(stage, run_label)
-- Human readable hint: locate the most recent outputs for a stage+run_label.
-
-#### _require_base_outputs(stage, run_label)
-- Human readable hint: Ensure base outputs exist before running a retry; avoid orphan retry files.
-
-#### _infer_run_label_from_retry_csv(path, stage)
-- Human readable hint: infer run_label from retry CSV name or existing base files.
-
-#### _first_available_run_label(stage, preferred)
-- Human readable hint: pick a run_label that has base outputs (eligibility + emissions).
-
-#### _record_retry_manifest(retry_artifact, stage, attempt_map, source_csv, emissions_info)
-- Human readable hint: Keep retry artifacts separate and append a manifest entry listing files and paper_ids.
-
-#### _merge_emissions_with_run_column(stage, run_label, attempt_index)
-- Human readable hint: keep one CodeCarbon CSV per run_label; append new rows with run=main/retry_N and report row numbers.
-
-#### _extract_summary_stats(path)
-- Human readable hint: derive counts and summary percentiles from eligibility JSONL.
-
-#### _run_tag_for_path(path, stage, output_token)
-- Human readable hint: derive run tag (sample + timestamp + retry) from filename.
-
-#### _append_index_row(idx_path, sample_selection, stage, decision_split, path, stats, total_paper_count)
-- Human readable hint: write/update one row in eligibility index for a decision split.
-
-#### _update_index_from_artifact(stage, artifact, attempt_index)
-- Human readable hint: append index rows for all eligibility splits from a run (base or retry).
-
-#### _post_run_updates(stage, artifact, attempt_index)
-- Human readable hint: after any run, merge emissions and refresh eligibility index.
-
-#### _next_retry_attempt(stage, run_label)
-- Human readable hint: derive the next retry attempt index from the manifest (per run_label).
-
-#### _latest_eligibility_map(stage)
-- Human readable hint: load the most recent eligibility JSONL into a paper_id->decision map.
-
-#### _decision_is_complete(decision, stage)
-- Human readable hint: validate presence of is_eligible and required justification/reason.
-
-#### _retry_csv_needed(retry_csv, stage)
-- Human readable hint: return paper_ids in retry_csv that still lack complete decisions.
-
-#### _archive_retry_csv(retry_csv)
-- Human readable hint: archive a fully resolved retry CSV to processed/.
-
-#### _latest_retry_csv(stage)
-- Human readable hint: Locate the most recent retry CSV under input/retry_runs for this stage (any sample, screen/select).
-
-#### _error_ids_by_type(error_log_path, blocked_types)
-- Human readable hint: collect paper_ids with deterministic errors that should not trigger auto-retry.
-
-#### _prompt_retry_if_needed(stage, artifact)
-- Human readable hint: Prompt for re-screening when errors are present for this stage.
-
-#### _ensure_csv_inputs(csv_dir)
-- Human readable hint: Check that the input folder exists and has at least one CSV file. Args: csv_dir: Path to the input/ folder containing Covidence exports. Returns: True if at least one CSV exists; False otherwise. Note: this prevents running the pipeline with missing exports.
-
-#### _require_pattern(csv_dir, pattern, description, stage)
-- Human readable hint: Ensure required CSVs exist for the current stage (pick latest when multiple). Args: csv_dir: Path to the input/ folder. pattern: Glob pattern for required CSV files. description: Human-readable description of the required export. stage: Optional stage label for extra sanity checks. Returns: A list containing the latest matching CSV path (empty if none found). Note: deterministic choice avoids ambiguity when several exports are present.
-
-#### _missing_pdf_folders(base_dir)
-- Human readable hint: List per-paper folders that still have no PDF file. Args: base_dir: Path to the per-paper folder root (e.g., input/per_paper_full_text/). Returns: A list of folder names missing a PDF file. Note: missing PDFs are skipped in full_text/data_extraction.
-
-#### _ensure_nltk_tokenizers()
-- Human readable hint: Download NLTK sentence tokenizers once so sentence splitting works. Note: required for consistent sentence chunking.
+#### _prompt_retry_if_needed(stage, artifact, depth)
+- Human readable hint: ask whether incomplete/error cases should be retried, then create a focused retry CSV.
 
 #### _prompt_yes_no(message)
-- Human readable hint: Ask a yes/no question in the terminal and return True for yes. Args: message: Prompt text displayed to the user. Returns: True for yes, False for no (or non-interactive terminal). Note: keeps QC decisions explicit and auditable.
+- Human readable hint: ask one explicit yes/no terminal question and update the run's all-yes audit flag.
 
 #### _run_validation()
-- Human readable hint: run validation and return True on success.
+- Human readable hint: confirm reviewer minutes, backfill time-savings, then run `pipeline.additions.stats_engine`.
 
 #### _run_qc_loop(stage, sample_rate, quiet)
-- Human readable hint: Run QC-only screening, validation prompt, and decision loop. Returns True if the user approves validation and wants full screening. Args: stage: Current pipeline stage (title_abstract/full_text/data_extraction). sample_rate: Fraction of planned papers to include in QC. quiet: If True, suppress most console output. Returns: True if user approves validation and proceeds to full screening; False otherwise.
+- Human readable hint: run QC screening, validation, and the user decision gate before remaining-paper processing.
 
 #### main()
-- Human readable hint: Compatibility entrypoint that runs the class-based main workflow.
+- Human readable hint: compatibility entrypoint that runs `MainWorkflow`.
+
+## pipeline/additions/retry_flow.py
+
+### Script-level functions
+- Human readable hint: retry CSV creation, retry artifact naming, retry manifests, and retry-completeness checks.
+
+#### _write_retry_csv(source_csv, target_dir, paper_ids, stage, run_label)
+- Human readable hint: create a focused retry CSV containing only papers that still need decisions.
+
+#### _retry_output_paths(stage, run_label, attempt_index)
+- Human readable hint: create collision-safe retry output paths separated from base run outputs.
+
+#### _record_retry_manifest(retry_artifact, stage, attempt_map, source_csv, emissions_info)
+- Human readable hint: append one manifest row listing retry files and paper IDs.
+
+#### _retry_csv_needed(retry_csv, stage)
+- Human readable hint: identify retry rows that still lack complete eligibility decisions.
+
+#### _latest_retry_csv(stage)
+- Human readable hint: find the newest pending retry CSV for the active stage.
+
+## pipeline/additions/run_index.py
+
+### Script-level functions
+- Human readable hint: output discovery, eligibility index maintenance, emissions/resource summaries, and stale tracking cleanup.
+
+#### _latest_base_outputs(stage, run_label)
+- Human readable hint: find the newest base output files for a stage and run label.
+
+#### _artifact_from_latest_base_outputs(stage, run_label)
+- Human readable hint: synthesize a minimal artifact when existing outputs already exist on disk.
+
+#### _update_index_from_artifact(stage, artifact, attempt_index)
+- Human readable hint: refresh the eligibility index rows for all decision splits from a run artifact.
+
+#### _post_run_updates(stage, artifact, attempt_index)
+- Human readable hint: merge CodeCarbon rows, update the eligibility index, and refresh QC+remaining summaries.
+
+#### _cleanup_stale_remaining_tracking_files(stage)
+- Human readable hint: remove duplicate minute-stamped tracking sidecars after a cleaner run-level file exists.
+
+## pipeline/additions/startup_checks.py
+
+### Script-level functions
+- Human readable hint: startup checks that keep `main.py` focused on workflow decisions.
+
+#### active_prompt_and_kb(stage)
+- Human readable hint: resolve prompt and KB paths shown to the operator before running.
+
+#### ensure_csv_inputs(csv_dir)
+- Human readable hint: confirm that the input folder exists and contains CSV exports.
+
+#### require_pattern(csv_dir, pattern, description, stage)
+- Human readable hint: pick the newest required stage CSV and warn about ambiguous naming.
+
+#### missing_pdf_folders(base_dir)
+- Human readable hint: list per-paper folders without uploaded PDFs.
+
+#### ensure_nltk_tokenizers()
+- Human readable hint: verify sentence tokenizer assets are preloaded without runtime downloads.
 
 ## pipeline/additions/input_trace.py
 
@@ -432,8 +413,21 @@ This appendix provides function-level explanations for scripts and classes in th
 #### _load_ai_extraction_records()
 - Human readable hint: Load extraction outputs from per-paper JSONL files.
 
+#### _value_from_extracted_data(extracted, variable)
+- Human readable hint: read the KB-generated `{variable_name}_value` field from the LLM JSON.
+
+#### _quote_from_extracted_data(extracted, variable)
+- Human readable hint: read the KB-generated `{variable_name}_quote` field for audit review.
+
+#### _normalization_key(value, variable)
+- Human readable hint: coerce AI and Covidence values into comparable typed values using the KB variable type.
+
 #### validate_extraction(consensus_path)
-- Human readable hint: Validate extraction outputs against the adjudicated consensus table.
+- Human readable hint: validate extraction outputs against a Covidence gold-standard CSV by mapping each KB `variable_name` to its exact `covidence_column_name`.
+- Concordance is exact matches among human-present values divided by human-present values, excluding `Not Available` and `n/a`.
+- Accuracy is exact matches plus correctly identified missing values divided by all variable-paper comparisons parsed from the KB.
+- Variables below concordance `<0.80` or accuracy `<0.90` log a critical `Prompt Refinement Triggered` warning.
+- Mismatches are written to `output/data_extraction/extraction_error_audit.csv` with the LLM quote retained for manual review.
 
 #### _parse_args()
 - Human readable hint: Parse CLI arguments for validation.
@@ -481,21 +475,33 @@ This appendix provides function-level explanations for scripts and classes in th
 #### main()
 - Human readable hint: end-to-end non-destructive draft generation entrypoint for full-text cleaned-hybrid KB creation.
 
+## pipeline/additions/bootstrap_stage_kb_and_prompts.py
+
+### Class PaperRecord
+- Human readable hint: one POS/NEG example PDF after parsing, chunking, and metadata extraction.
+
+### Class BootstrapSignals
+- Human readable hint: data-derived include, exclude, and extraction cue terms learned from the local POS/NEG example PDFs.
+
+### Script-level functions
+- Human readable hint: build stage KB CSVs and suggested prompts without fixed review-topic term lists.
+
+#### _build_bootstrap_signals(papers)
+- Human readable hint: calculate discriminative include/exclude terms from POS and NEG examples for prompt suggestions and chunk ranking.
+
+#### _score_fulltext_chunk(chunk, paper, signals)
+- Human readable hint: score candidate full-text chunks using local data-derived signals plus generic section/readability checks.
+
+#### _score_data_extraction_chunk(chunk, paper, signals)
+- Human readable hint: score candidate extraction chunks using local data-derived extraction terms.
+
+#### _build_prompt_suggestions(signals)
+- Human readable hint: render suggested prompt files from the learned bootstrap signals.
+
 ## pipeline/core/pipeline.py
 
 ### Class PaperRecord
 - Human readable hint: No class docstring in source; placeholder retained intentionally for exhaustive traceability.
-### Class _ScreeningDecisionBaseModel
-- Human readable hint: shared schema for screening decisions returned by the LLM.
-#### _ScreeningDecisionBaseModel._check_reason_for_exclusion()
-- Human readable hint: exclusion decisions must carry an explicit exclusion reason.
-
-### Class TitleAbstractScreeningDecisionModel
-- Human readable hint: title_abstract allows a NEUTRAL eligibility outcome.
-### Class FullTextScreeningDecisionModel
-- Human readable hint: full_text requires a strict boolean eligibility outcome.
-#### FullTextScreeningDecisionModel._check_seed_references_threshold()
-- Human readable hint: enforce strict seed-reference semantics (true only when eligible and confidence > 0.98; explicit true/false required for high-confidence eligible decisions).
 ### Class PaperScreeningPipeline
 - Human readable hint: No class docstring in source; placeholder retained intentionally for exhaustive traceability.
 - __init__ parameters: csv_dir, knowledge_base_path, eligibility_output_path, chunks_output_path, text_output_path, top_k, score_threshold, batch_size, embedder, examples, sample_size, sample_seed, sustainability_tracking, resource_log_path, enable_time_savings, run_label, codecarbon_enabled, qc_sample_path, qc_sample_readable_path, confirm_sampling, sample_rate, qc_only, qc_enabled, force_new_qc, error_log_path, stage, pdf_root, overflow_log_path, split_only, quiet, summary_to_console, artifact_mode
@@ -550,12 +556,16 @@ This appendix provides function-level explanations for scripts and classes in th
 #### PaperScreeningPipeline._process_paper_async(paper)
 - Human readable hint: run stage-specific chunking, selection, LLM calls, validation, and diagnostics in one async flow.
 - Human readable hint: full_text keeps the final valid adjudication output and records borderline state in diagnostics instead of forcing a final hard validation failure.
+- Human readable hint: data_extraction calls the LLM once per KB domain, validates each small response, merges domains, and logs only domains that fail.
 
 #### PaperScreeningPipeline._process_paper(paper)
 - Human readable hint: sync mode reuses the async processing core to avoid duplicate decision logic.
 
 #### PaperScreeningPipeline._format_chunks_for_prompt(paper, chunks, detected_language_code)
 - Human readable hint: Format selected chunks into a readable prompt section.
+
+#### PaperScreeningPipeline._load_data_extraction_full_text_input(paper)
+- Human readable hint: load cached normalized full text for extraction prompts and apply the optional word cap from `LLM_SETTINGS`.
 
 #### PaperScreeningPipeline._title_abstract_full_input(paper)
 - Human readable hint: Build one full context block for title_abstract (no chunking/retrieval).
@@ -645,7 +655,10 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: Find the PDF inside the per-paper folder and normalize its filename.
 
 #### PaperScreeningPipeline._call_llm(context)
-- Human readable hint: Call the LLM and return both text and usage (if provided by the API).
+- Human readable hint: call the LLM and return both text and usage; optional prompt/schema/max-token overrides support small domain-level extraction calls.
+
+#### PaperScreeningPipeline._call_data_extraction_domains_async(context, paper_id)
+- Human readable hint: run data extraction as one smaller Structured Outputs request per KB domain, then merge validated domain payloads.
 
 #### PaperScreeningPipeline._get_openai_client(base_url)
 - Human readable hint: Create a configured OpenAI API client.
@@ -693,25 +706,159 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: Load preselected chunks from the input folder, if present.
 
 #### PaperScreeningPipeline._write_data_extraction_outputs(paper, extraction_payload)
-- Human readable hint: Write per-paper extraction outputs (JSONL + CSV).
-
-#### PaperScreeningPipeline._normalize_criterion(text)
-- Human readable hint: Normalize a prompt bullet line into a clean field name.
-
-#### PaperScreeningPipeline._extract_criteria_from_prompt(cls, prompt_text)
-- Human readable hint: Infer extraction fields from the "Fields to extract" section only.
+- Human readable hint: write one canonical per-paper `data_extraction_results.jsonl` and `data_extraction_results.csv` pair.
 
 #### PaperScreeningPipeline._build_extraction_payload(paper, llm_decision)
-- Human readable hint: Parse the LLM output into structured extraction data.
+- Human readable hint: validate data-extraction JSON strictly against the KB-generated schema; the older prompt-field fallback path has been removed.
+
+## pipeline/core/prompt_context.py
 
 ### Script-level functions
-- Human readable hint: compatibility wrappers or helper functions used by the primary class.
+- Human readable hint: prompt-template loading and optional shared eligibility-criteria injection.
 
-#### _load_optional_eligibility_criteria_text()
-- Human readable hint: load shared eligibility criteria text when configured and available.
+#### load_optional_eligibility_criteria_text()
+- Human readable hint: read configured eligibility criteria text when present.
 
-#### _load_stage_prompt_template(stage)
-- Human readable hint: load stage prompt and inject shared criteria only when placeholder is present.
+#### load_stage_prompt_template(stage)
+- Human readable hint: load the active stage prompt and replace `{eligibility_criteria}` only when the prompt requests it.
+
+## pipeline/core/screening_schema.py
+
+### Class ScreeningDecisionBaseModel
+- Human readable hint: shared strict fields expected from every screening LLM response.
+
+#### ScreeningDecisionBaseModel._check_reason_for_exclusion()
+- Human readable hint: exclusion decisions must carry an explicit exclusion reason.
+
+### Class TitleAbstractScreeningDecisionModel
+- Human readable hint: title/abstract screening allows a neutral uncertainty outcome.
+
+### Class FullTextScreeningDecisionModel
+- Human readable hint: full-text screening requires a strict include/exclude decision.
+
+#### FullTextScreeningDecisionModel._check_seed_references_threshold()
+- Human readable hint: seed references are only accepted for very high-confidence eligible calls.
+
+## pipeline/selection/retrieval_config.py
+
+### Script-level constants
+- Human readable hint: retrieval tuning constants that control chunk counts, diversity, fallback, and prompt-budget trimming.
+
+## pipeline/selection/prompt_signals.py
+
+### Script-level functions
+- Human readable hint: prompt and KB signal helpers moved out of `pipeline/core/pipeline.py` so retrieval/schema adaptation is easier to inspect.
+
+#### build_prompt_signal_config(prompt_template)
+- Human readable hint: derive topic-sensitive retrieval regexes from the active prompt include lists.
+
+#### build_monitoring_signal_config(prompt_template, topic_signal_config, kb_examples)
+- Human readable hint: derive monitoring/action deprioritization cues from prompt terms and POS/NEG KB examples.
+
+#### normalize_schema_key(value)
+- Human readable hint: normalize Covidence tag labels and prompt JSON fields into comparable snake_case keys.
+
+#### build_study_tag_field_keys(tags)
+- Human readable hint: convert user-editable study tags into dynamic screening schema exclusion candidates.
+
+#### looks_like_exclusion_field(field_name)
+- Human readable hint: detect exclusion-style JSON fields without hardcoding one review protocol.
+
+#### select_topic_absence_reason_key(reason_keys, topic_terms, preferred_key)
+- Human readable hint: connect topic terms to the most likely `no_*` exclusion reason key.
+
+## pipeline/core/run_extraction.py
+
+### Script-level functions
+- Human readable hint: async data-extraction entrypoint that keeps direct execution (`python -m pipeline.core.run_extraction`) while delegating schema and file handling to smaller modules.
+
+#### _truncate_to_budget(text, max_tokens)
+- Human readable hint: trim evidence text using a lightweight token estimate before sending it to the model.
+
+#### _build_llm_input(paper, prompt_template, max_prompt_tokens)
+- Human readable hint: insert paper evidence into `{data}` or append it as an Evidence block.
+
+#### _call_llm(client, model, prompt, response_format, max_tokens, temperature, top_p)
+- Human readable hint: send one extraction prompt with the KB-generated OpenAI `response_format` and return the raw JSON text.
+
+#### _process_paper(...)
+- Human readable hint: process one paper with bounded concurrency, domain-wise dynamic validation, fallback output, and append-only errors.
+
+#### run_extraction()
+- Human readable hint: direct async runner for prepared `input/per_paper_data_extraction/` folders.
+
+## pipeline/core/extraction_schema.py
+
+### Class ExtractionVariable
+- Human readable hint: one row from `knowledge-base/data_extraction_schema.csv`, including the Covidence column used for validation.
+
+### Class DynamicExtractionSchema
+- Human readable hint: KB-derived runtime Pydantic model, prompt instruction block, default missing-data payload, and OpenAI Structured Outputs schema.
+
+#### DynamicExtractionSchema.from_kb(kb_path)
+- Human readable hint: read the configured extraction schema CSV, validate required columns, and build the grouped extraction model.
+
+#### DynamicExtractionSchema.from_prompt(prompt_text)
+- Human readable hint: compatibility shim; extraction schemas now come from the CSV KB, not from prompt JSON.
+
+#### DynamicExtractionSchema.inject_into_prompt(prompt_template)
+- Human readable hint: inject KB-generated variable instructions and response shape into the active extraction prompt.
+
+#### DynamicExtractionSchema.domains
+- Human readable hint: list KB domains in CSV order so extraction can split one paper into smaller schema requests.
+
+#### DynamicExtractionSchema.for_domain(domain)
+- Human readable hint: build a one-domain schema and instruction block for short, more reliable extraction responses.
+
+#### DynamicExtractionSchema.validate_payload(payload)
+- Human readable hint: validate one model JSON response and serialize it with exact KB-generated keys.
+
+#### DynamicExtractionSchema.default_payload()
+- Human readable hint: create a complete fallback payload for failed or empty extractions.
+
+#### DynamicExtractionSchema.openai_response_format()
+- Human readable hint: convert the generated Pydantic model into the `response_format` JSON schema sent to OpenAI.
+
+### Script-level functions
+- Human readable hint: CSV parsing, model generation, prompt formatting, value coercion, and JSON parsing helpers used by extraction and validation.
+
+#### default_extraction_schema_path()
+- Human readable hint: resolve the user-configured extraction schema path from `config/user_orchestrator.py`, falling back to `knowledge-base/data_extraction_schema.csv`.
+
+#### load_extraction_variables(kb_path)
+- Human readable hint: parse required KB columns: `domain`, `variable_name`, `variable_type`, `allowed_options`, `instruction`, and `covidence_column_name`.
+
+#### build_pydantic_model(variables)
+- Human readable hint: create one nested domain model where every variable has `{variable_name}_value` and `{variable_name}_quote`.
+
+#### format_instruction_block(variables, response_shape)
+- Human readable hint: turn KB rows into LLM instructions and include the Covidence mapping for audit traceability.
+
+#### parse_and_validate(raw_text, schema)
+- Human readable hint: parse raw LLM output, validate dynamically, and return fallback data on failure.
+
+## pipeline/core/extraction_io.py
+
+### Class PaperItem
+- Human readable hint: one prepared paper folder with metadata, selected chunks, optional PDF path, and normalized text.
+
+### Script-level functions
+- Human readable hint: file and formatting helpers for data extraction.
+
+#### collect_papers(csv_dir)
+- Human readable hint: collect prepared paper folders from `input/per_paper_data_extraction/`.
+
+#### format_evidence(paper)
+- Human readable hint: build the compact evidence block used by the extraction prompt.
+
+#### flatten_extracted(payload, prefix)
+- Human readable hint: flatten nested extraction output into dot-path CSV columns while keeping quote columns separate.
+
+#### serialize_result(paper, extracted_data, run_id, raw_output, error)
+- Human readable hint: build one stable JSONL record for downstream validation and audit.
+
+#### write_outputs(payload, output_root, folder_name)
+- Human readable hint: write per-paper JSONL and CSV extraction artifacts.
 
 ## pipeline/core/run_screening.py
 
@@ -970,5 +1117,3 @@ This appendix provides function-level explanations for scripts and classes in th
 
 ---
 **Read next:** [readme.md](readme.md)
-
-

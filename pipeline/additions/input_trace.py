@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from config.user_orchestrator import CURRENT_STAGE, PATH_SETTINGS, PROMPT_FILES
+from config.user_orchestrator import CURRENT_STAGE, LLM_SETTINGS, PATH_SETTINGS, PROMPT_FILES
 from pipeline.integrations.embedding_utils import normalize_extracted_text
 
 ELIGIBILITY_CRITERIA_PLACEHOLDER = "{eligibility_criteria}"
@@ -228,6 +228,33 @@ def _format_chunks_for_prompt(
         prefix = "[" + ", ".join(prefix_parts) + "]"
         parts.append(f"{prefix}\n{text}")
     return "\n\n".join(parts)
+
+
+def _load_data_extraction_full_text_context(folder: Path, paper_id: str, title: str) -> str:
+    """human readable hint: rebuild the full normalized text evidence block used by data extraction."""
+
+    for candidate in (folder / "full_text_normalized.txt", folder / "data_extraction_normalized.txt"):
+        if not candidate.exists():
+            continue
+        raw_text = candidate.read_text(encoding="utf-8")
+        marker = "=== normalized_full_text ==="
+        marker_index = raw_text.find(marker)
+        if marker_index >= 0:
+            raw_text = raw_text[marker_index + len(marker):]
+        normalized_text = normalize_extracted_text(raw_text).strip()
+        if not normalized_text:
+            continue
+        max_words = int(LLM_SETTINGS.get("data_extraction_full_text_max_words", 0) or 0)
+        if max_words > 0:
+            words = normalized_text.split()
+            if len(words) > max_words:
+                normalized_text = " ".join(words[:max_words])
+        parts = [f"Paper ID: {paper_id}"]
+        if title:
+            parts.append(f"Title: {title.strip()}")
+        parts.append("[Full Normalized Text]\n" + normalized_text)
+        return "\n\n".join(parts)
+    return ""
 
 
 def _iter_selected_chunk_candidates(eligibility_file: Path, stage: str) -> list[Path]:
@@ -475,6 +502,13 @@ def _folder_stage_context(
         chunks = _load_selected_chunks_from_stage_output(eligibility_file, stage, paper_id)
     if chunks is None:
         chunks = _load_selected_chunks(folder, stage, paper_id)
+
+    if stage == "data_extraction":
+        evidence_mode = str(LLM_SETTINGS.get("data_extraction_evidence_mode", "full_text") or "full_text").strip().lower()
+        if evidence_mode == "full_text":
+            full_text_context = _load_data_extraction_full_text_context(folder, paper_id, title)
+            if full_text_context:
+                return full_text_context, chunks
 
     language_hint = _detected_language_hint(diagnostics or {}) if stage == "full_text" else None
     context_text = _format_chunks_for_prompt(

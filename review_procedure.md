@@ -36,6 +36,7 @@ This document defines the execution order for screening and extraction runs.
 - Active stage KB path configured in [config/user_orchestrator.py](config/user_orchestrator.py) (`KNOWLEDGE_BASE_FILES` and optional `KB_FILE_OVERRIDES`).
 - `LLM_SETTINGS["context_window_total_tokens"]` and `LLM_SETTINGS["max_tokens"]` set consistently for the active model (`max_tokens < context_window_total_tokens`).
 - Stage KB file exists with `label` (`POS`/`NEG`) and `text` columns.
+- For `data_extraction`, `DATA_EXTRACTION_SCHEMA_FILE` in `config/user_orchestrator.py` points to an existing schema CSV with Covidence column mappings.
 - Optional for `full_text`: cleaned-hybrid draft generated and selected via `KB_FILE_OVERRIDES["full_text"]` when you want the draft instead of the default full-text KB.
 
 ## Stage 0: Bootstrap KB and Prompt Suggestions
@@ -45,6 +46,7 @@ Run this once per new topic or whenever your POS/NEG example PDFs are updated:
 - `python -m pipeline.additions.bootstrap_stage_kb_and_prompts`
 
 This produces stage-ready KB CSVs and first-pass prompt suggestions, then writes a summary to [knowledge-base/kb_bootstrap_summary.json](knowledge-base/kb_bootstrap_summary.json).
+The suggested terms and chunk-ranking cues are learned from the local POS/NEG example PDFs, not from fixed protocol-specific Python term lists.
 
 ## Stage 0b (Optional): Generate Full-Text Cleaned-Hybrid KB Draft
 
@@ -146,10 +148,11 @@ Use this section when you need to know exactly when parsing, embeddings, LLM cal
 
 1. Export included CSV to `input/` (`*_included_csv_*.csv`).
 2. Prepare `knowledge-base/data_extraction_pos-neg_examples.csv` (or configure an override in `KB_FILE_OVERRIDES["data_extraction"]`).
-3. Ensure `input/per_paper_full_text/` exists from prior stage.
-4. Run `main.py` to build `input/per_paper_data_extraction/`.
-5. Run QC-only extraction, then human QC extraction, then validation.
-6. If validation is acceptable, continue to remaining papers.
+3. Prepare the schema CSV referenced by `DATA_EXTRACTION_SCHEMA_FILE`; each row maps a dynamic LLM variable to an exact Covidence `covidence_column_name`.
+4. Ensure `input/per_paper_full_text/` exists from prior stage.
+5. Run `main.py` to build `input/per_paper_data_extraction/`.
+6. Run QC-only extraction, then human QC extraction, then validation. Extraction fields are read from the schema KB, not from hardcoded prompt JSON.
+7. If validation is acceptable, continue to remaining papers.
 
 ## Terminal Commands and Decision Tree
 
@@ -158,6 +161,7 @@ Use this section when you need to know exactly when parsing, embeddings, LLM cal
 - Windows main run: `.venv\Scripts\python main.py`
 - macOS/Linux main run: `python main.py`
 - Manual validation (optional): `python -m pipeline.additions.stats_engine`
+- Manual direct data extraction (optional): `python -m pipeline.core.run_extraction`
 - Manual reproducibility trace (optional): `python -m pipeline.additions.input_trace --paper-id <ID> --stage <stage>`
 - Manual backup (optional): `python backup_to_github.py`
 

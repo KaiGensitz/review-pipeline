@@ -35,6 +35,8 @@ For publication and reproducibility packages, document:
 
 - Exact model identifiers and runtime settings (including temperature, `max_tokens`, and `context_window_total_tokens`).
 - Prompt versions used per stage.
+- Data-extraction schema KB version (`DATA_EXTRACTION_SCHEMA_FILE`, default `knowledge-base/data_extraction_schema.csv`) and its Covidence `covidence_column_name` mappings.
+- Current protocol-specific study tags are user-editable in `config/user_orchestrator.py`; changing topic should require prompt/KB/config edits, not Python code edits.
 - Per-paper input fingerprint policy (`llm_input_sha256` and `full_prompt_sha256`) and how discrepant cases were traced.
 - Per-paper artifact persistence mode used in full_text (`artifact_mode=compact|full`) and whether legacy sidecars were retained.
 - Chunking and retrieval settings (`chunk_size`, overlap, `top_k`, threshold).

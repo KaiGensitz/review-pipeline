@@ -52,19 +52,13 @@ def _recommended_fix(human_tag: str, human_note: str, mismatch_type: str) -> str
     if "language not en/de" in tag:
         return "Verify language gate diagnostics and detected language code handling."
 
-    if "no artificial intelligence" in tag:
-        return "Require explicit AI method controlling intervention decisions; do not accept generic proxy wording."
-
-    if "no physical activity" in tag:
-        return "Reinforce intervention-vs-monitoring distinction for PA outcomes."
-
     if "wrong publication type" in tag or "no intervention" in note:
-        return "Increase exclusion weight for conceptual/framework/guideline papers without participant intervention exposure."
+        return "Increase exclusion weight for papers without the required empirical design or participant exposure."
 
     if mismatch_type == "FP":
-        return "Tighten exclusion logic for non-intervention or weak method evidence."
+        return "Tighten the prompt logic for the human exclusion tag and require stronger direct evidence."
 
-    return "Review false-negative context and recover missing intervention evidence in selected chunks."
+    return "Review false-negative context and recover missing topic evidence in selected chunks."
 
 
 def _load_selection_trace(eligibility_path: Path) -> dict[str, dict[str, Any]]:

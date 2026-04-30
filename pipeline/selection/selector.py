@@ -238,7 +238,14 @@ class RelevanceSelector:
 		top_k: int | None,
 		score_threshold: float | None = None,
 	) -> tuple[list[dict], list[float], dict | None]:
-		"""human readable hint: score only candidate chunks; always-include kinds bypass embedding for speed."""
+		"""human readable hint: score chunks once, then return the selected subset."""
+
+		enriched, scores_out, usage = self.score_chunks(chunks)
+		selected = self.select_scored(enriched, top_k=top_k, score_threshold=score_threshold)
+		return selected, scores_out, usage
+
+	def score_chunks(self, chunks: list[dict]) -> tuple[list[dict], list[float], dict | None]:
+		"""human readable hint: enrich chunks with relevance scores without applying top-k filters."""
 
 		always_chunks = [chunk for chunk in chunks if chunk.get("kind") in self.always_include_kinds]
 		candidate_chunks = [chunk for chunk in chunks if chunk.get("kind") not in self.always_include_kinds]
@@ -267,8 +274,19 @@ class RelevanceSelector:
 				item["neg_score"] = float(detail.get("neg_score", 0.0))
 			enriched.append(item)
 
-		always = [c for c in enriched if c.get("kind") in self.always_include_kinds]
-		remaining = [c for c in enriched if c.get("kind") not in self.always_include_kinds]
+		scores_out = [float(item.get("score", 0.0)) for item in enriched]
+		return enriched, scores_out, usage
+
+	def select_scored(
+		self,
+		scored_chunks: list[dict],
+		top_k: int | None,
+		score_threshold: float | None = None,
+	) -> list[dict]:
+		"""human readable hint: choose a subset from already-scored chunks without extra embedding calls."""
+
+		always = [dict(c) for c in scored_chunks if c.get("kind") in self.always_include_kinds]
+		remaining = [dict(c) for c in scored_chunks if c.get("kind") not in self.always_include_kinds]
 		remaining.sort(key=lambda item: item["score"], reverse=True)
 
 		if score_threshold is not None:
@@ -291,9 +309,7 @@ class RelevanceSelector:
 				item.get("chunk_id", ""),
 			)
 		)
-
-		scores_out = [float(item.get("score", 0.0)) for item in enriched]
-		return selected, scores_out, usage
+		return selected
 
 
 class SelectionEngine:
@@ -327,3 +343,22 @@ class SelectionEngine:
 		"""human readable hint: return selected chunks and scores using the configured embedding+relevance backend."""
 
 		return self._selector.select(chunks=chunks, top_k=top_k, score_threshold=score_threshold)
+
+	def score_chunks(self, chunks: list[dict]) -> tuple[list[dict], list[float], dict | None]:
+		"""human readable hint: score chunks once so callers can reuse rankings for fallback logic."""
+
+		return self._selector.score_chunks(chunks=chunks)
+
+	def select_scored(
+		self,
+		scored_chunks: list[dict],
+		top_k: int | None,
+		score_threshold: float | None = None,
+	) -> list[dict]:
+		"""human readable hint: select from already-scored chunks without calling the embedding API."""
+
+		return self._selector.select_scored(
+			scored_chunks=scored_chunks,
+			top_k=top_k,
+			score_threshold=score_threshold,
+		)

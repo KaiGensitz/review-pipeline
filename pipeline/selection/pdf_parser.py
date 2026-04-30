@@ -26,38 +26,89 @@ PARSER_LEVEL_LOW_DENSITY = "Low text density"
 PARSER_LEVEL_OCR_SUCCESS = "Fallback parser: OCR"
 
 
-try:
-    _docling_module = importlib.import_module("docling.document_converter")
-    _DoclingConverter = getattr(_docling_module, "DoclingDocumentConverter", None)
-    if _DoclingConverter is None:
-        # Backward-compatible class name fallback.
-        _DoclingConverter = getattr(_docling_module, "DocumentConverter", None)
-except Exception:
-    _DoclingConverter = None
+_DoclingConverter: Any | None = None
+_docling_import_attempted = False
+pymupdf4llm: Any | None = None
+_pymupdf4llm_import_attempted = False
+fitz: Any | None = None
+_fitz_import_attempted = False
+pytesseract: Any | None = None
+_pytesseract_import_attempted = False
+Image: Any | None = None
+_pil_import_attempted = False
 
 
-try:
-    import pymupdf4llm
-except Exception:
-    pymupdf4llm = None
+def _load_docling_converter() -> Any | None:
+    """human readable hint: import Docling lazily so ordinary pipeline imports stay fast."""
+
+    global _DoclingConverter, _docling_import_attempted
+    if _docling_import_attempted:
+        return _DoclingConverter
+    _docling_import_attempted = True
+    try:
+        docling_module = importlib.import_module("docling.document_converter")
+        _DoclingConverter = getattr(docling_module, "DoclingDocumentConverter", None)
+        if _DoclingConverter is None:
+            _DoclingConverter = getattr(docling_module, "DocumentConverter", None)
+    except Exception:
+        _DoclingConverter = None
+    return _DoclingConverter
 
 
-try:
-    import fitz
-except Exception:
-    fitz = None
+def _load_pymupdf4llm() -> Any | None:
+    """human readable hint: import pymupdf4llm only when the advanced parser is used."""
+
+    global pymupdf4llm, _pymupdf4llm_import_attempted
+    if _pymupdf4llm_import_attempted:
+        return pymupdf4llm
+    _pymupdf4llm_import_attempted = True
+    try:
+        pymupdf4llm = importlib.import_module("pymupdf4llm")
+    except Exception:
+        pymupdf4llm = None
+    return pymupdf4llm
 
 
-try:
-    import pytesseract
-except Exception:
-    pytesseract = None
+def _load_fitz() -> Any | None:
+    """human readable hint: import PyMuPDF only when page rendering or page counts are needed."""
+
+    global fitz, _fitz_import_attempted
+    if _fitz_import_attempted:
+        return fitz
+    _fitz_import_attempted = True
+    try:
+        fitz = importlib.import_module("fitz")
+    except Exception:
+        fitz = None
+    return fitz
 
 
-try:
-    from PIL import Image
-except Exception:
-    Image = None
+def _load_pytesseract() -> Any | None:
+    """human readable hint: import pytesseract only when OCR fallback is actually attempted."""
+
+    global pytesseract, _pytesseract_import_attempted
+    if _pytesseract_import_attempted:
+        return pytesseract
+    _pytesseract_import_attempted = True
+    try:
+        pytesseract = importlib.import_module("pytesseract")
+    except Exception:
+        pytesseract = None
+    return pytesseract
+
+
+def _load_pil_image() -> Any | None:
+    """human readable hint: import Pillow only when OCR image conversion is needed."""
+
+    global Image, _pil_import_attempted
+    if _pil_import_attempted:
+        return Image
+    _pil_import_attempted = True
+    try:
+        Image = importlib.import_module("PIL.Image")
+    except Exception:
+        Image = None
+    return Image
 
 
 REFERENCE_HEADER_PATTERN = re.compile(
@@ -129,10 +180,11 @@ def _extract_markdown_from_docling_result(result: Any) -> str:
 def _run_docling(pdf_path: Path) -> str:
     """Run Docling conversion synchronously and return Markdown text."""
 
-    if _DoclingConverter is None:
+    converter_cls = _load_docling_converter()
+    if converter_cls is None:
         raise RuntimeError("Docling is not installed or unavailable.")
 
-    converter = _DoclingConverter()
+    converter = converter_cls()
     result = converter.convert(str(pdf_path))
     markdown = _extract_markdown_from_docling_result(result)
     if not markdown.strip():
@@ -197,10 +249,11 @@ def _extract_with_docling(pdf_path: Path, timeout_seconds: int | None = DOCLING_
 def _extract_with_pymupdf4llm(pdf_path: Path) -> str:
     """Fallback parser using pymupdf4llm Markdown export."""
 
-    if pymupdf4llm is None:
+    pymupdf_module = _load_pymupdf4llm()
+    if pymupdf_module is None:
         raise RuntimeError("pymupdf4llm is not installed or unavailable.")
 
-    markdown = _coerce_to_text(pymupdf4llm.to_markdown(str(pdf_path)))
+    markdown = _coerce_to_text(pymupdf_module.to_markdown(str(pdf_path)))
     if not markdown.strip():
         raise RuntimeError("pymupdf4llm returned empty Markdown output.")
     return markdown
@@ -209,11 +262,12 @@ def _extract_with_pymupdf4llm(pdf_path: Path) -> str:
 def _get_num_pages(pdf_path: Path) -> int:
     """Safely read PDF page count using fitz; return 0 when unavailable."""
 
-    if fitz is None:
+    fitz_module = _load_fitz()
+    if fitz_module is None:
         return 0
 
     try:
-        with fitz.open(str(pdf_path)) as document:
+        with fitz_module.open(str(pdf_path)) as document:
             return int(document.page_count)
     except Exception:
         return 0
@@ -256,11 +310,14 @@ def _resolve_tesseract_command() -> str | None:
 def _ocr_with_tesseract(pdf_path: Path) -> str:
     """Render pages with fitz and run page-wise OCR through pytesseract."""
 
-    if fitz is None:
+    fitz_module = _load_fitz()
+    pytesseract_module = _load_pytesseract()
+    image_module = _load_pil_image()
+    if fitz_module is None:
         raise RuntimeError("PyMuPDF (fitz) is required for OCR rendering but is unavailable.")
-    if pytesseract is None:
+    if pytesseract_module is None:
         raise RuntimeError("pytesseract is not installed or unavailable.")
-    if Image is None:
+    if image_module is None:
         raise RuntimeError("Pillow is required for OCR image conversion but is unavailable.")
 
     tesseract_cmd = _resolve_tesseract_command()
@@ -268,21 +325,21 @@ def _ocr_with_tesseract(pdf_path: Path) -> str:
         raise RuntimeError(
             "Tesseract executable not found. Set TESSERACT_CMD or add tesseract to PATH."
         )
-    pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+    pytesseract_module.pytesseract.tesseract_cmd = tesseract_cmd
 
     extracted_pages: list[str] = []
-    with fitz.open(str(pdf_path)) as document:
+    with fitz_module.open(str(pdf_path)) as document:
         for page_idx in range(int(document.page_count)):
             page_index = page_idx + 1
             page = document.load_page(page_idx)
             try:
                 # 2x scaling improves OCR quality on small-font scientific PDFs.
-                pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), alpha=False)
+                pix = page.get_pixmap(matrix=fitz_module.Matrix(2.0, 2.0), alpha=False)
                 mode = "RGBA" if pix.alpha else "RGB"
-                image = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
+                image = image_module.frombytes(mode, (pix.width, pix.height), pix.samples)
                 if mode == "RGBA":
                     image = image.convert("RGB")
-                page_text = _coerce_to_text(pytesseract.image_to_string(image))
+                page_text = _coerce_to_text(pytesseract_module.image_to_string(image))
                 extracted_pages.append(page_text)
             except Exception as exc:
                 LOGGER.warning(

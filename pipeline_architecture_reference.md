@@ -37,7 +37,7 @@ Cross-reference: for an operator-facing 1-X runtime sequence (including exactly 
 - Prompt scripts are normalized to strict JSON-shape expectations to reduce malformed model outputs and retry churn.
 - Before schema validation, the pipeline performs a narrow normalization pass for known near-valid drift (for example, object-form `step_by_step_deliberation`), then applies strict validation.
 - Sync execution path reuses the same async paper-processing core to reduce duplicate decision logic.
-- Relevance selection skips embedding/scoring for always-included chunk kinds (for example title chunks), reducing avoidable embedding workload.
+- Relevance selection skips embedding/scoring for always-included chunk kinds (for example title chunks), and full-text/data-extraction retrieval reuses one ranked chunk list for primary, fallback, and rescue selection.
 - Full-text PDF loading avoids duplicate page-count reads when page-level text is already loaded, reducing per-paper I/O overhead.
 - A conservative text-normalization pass now runs before sentence splitting (whitespace cleanup, punctuation boundary spacing, soft-hyphen cleanup), improving chunk readability without changing eligibility decision rules.
 - Full-text PDF extraction now uses a hybrid backend (pdfplumber primary + PyPDF fallback) and strips repeated header/footer lines.
@@ -59,9 +59,18 @@ Cross-reference: for an operator-facing 1-X runtime sequence (including exactly 
 
 - `title_abstract`: full `Title + Abstract` is injected directly into prompt `{data}` (no chunking/top-k filtering), eligibility JSONL outputs.
 - `full_text`: per-paper folder/PDF workflow, page-line chunking with relevance selection (`top_k`/threshold), eligibility JSONL outputs, and compact/full per-paper artifact persistence.
-- `data_extraction`: extraction-focused prompt, per-paper extraction JSONL/CSV outputs, evidence JSON.
+- `data_extraction`: extraction-focused prompt plus the configured extraction schema CSV, KB-derived dynamic schema validation, per-domain LLM calls, merged per-paper extraction JSONL/CSV outputs, evidence JSON.
+- Direct extraction runner: `pipeline/core/run_extraction.py` remains executable and delegates schema validation to `pipeline/core/extraction_schema.py` and file handling to `pipeline/core/extraction_io.py`.
+- Prompt-derived retrieval/schema signals are isolated in `pipeline/selection/prompt_signals.py`; `pipeline/core/pipeline.py` now consumes those helpers instead of carrying the parsing logic inline.
+- Retrieval tuning constants live in `pipeline/selection/retrieval_config.py`, screening response schemas live in `pipeline/core/screening_schema.py`, and prompt loading lives in `pipeline/core/prompt_context.py`.
+- Interactive workflow bookkeeping is split out of `main.py`: retry helpers in `pipeline/additions/retry_flow.py`, run indexes/summaries in `pipeline/additions/run_index.py`, and startup checks in `pipeline/additions/startup_checks.py`.
 
 Placeholder behavior (all stages):
+- `data_extraction` generates `{variable_name}_value` and `{variable_name}_quote` for every row in the configured extraction schema CSV; missing values use `Not Available`, `false`, or `[]`, with quote `null`.
+- `data_extraction` is performed asynchronously with the user-editable `LLM_SETTINGS["async_max_concurrency"]` semaphore for LLM requests.
+- `data_extraction` defaults to one Structured Outputs request per KB domain (`data_extraction_split_by_domain=True`) and caps each domain with `data_extraction_domain_max_tokens`.
+- The extraction response-format transport is configurable. `prompt_only` avoids provider-side `json_schema` incompatibilities while still validating every response against the KB-derived Pydantic model after generation.
+- Data extraction evidence defaults to cached normalized full text (`full_text_normalized.txt`); selected chunks are retained for audit and fallback.
 - If `{eligibility_criteria}` is in the prompt, the pipeline attempts to inject `knowledge-base/eligibility_criteria.txt`.
 - If the placeholder is absent, no criteria-file lookup is performed.
 - If the placeholder exists but the file is missing, execution continues with a warning and empty replacement.
@@ -108,6 +117,8 @@ Placeholder behavior (all stages):
   - `knowledge-base/title_abstract_pos-neg_examples.csv`
   - `knowledge-base/full_text_pos-neg_examples.csv`
   - `knowledge-base/data_extraction_pos-neg_examples.csv`
+- Data extraction also requires the schema CSV configured by `DATA_EXTRACTION_SCHEMA_FILE` in `config/user_orchestrator.py` (default: `knowledge-base/data_extraction_schema.csv`); this schema KB defines variable names, types, allowed enum values, prompt instructions, and exact Covidence column mappings.
+- The current protocol tags in `STUDY_TAGS_INCLUDE`/`STUDY_TAGS_IGNORE` are marked as user-editable. They define review-specific validation labels, while the core pipeline keeps topic retrieval cues in prompts and KB examples rather than hardcoded Python regex defaults.
 - Optional full_text draft generation utility:
   - `python -m pipeline.additions.generate_cleaned_hybrid_kb_draft`
   - writes `knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv`
@@ -127,7 +138,7 @@ Placeholder behavior (all stages):
   - accuracy, sensitivity, specificity, PPV, NPV
   - PABAK
   - Clopper-Pearson 95% confidence intervals
-- Data extraction validation compares extracted fields to consensus values and produces per-field concordance with confidence intervals.
+- Data extraction validation maps each LLM `{variable_name}_value` to the KB `covidence_column_name`, calculates per-variable concordance and accuracy, and writes `extraction_error_audit.csv` with the LLM quote.
 
 ## Resource and Emissions Tracking
 

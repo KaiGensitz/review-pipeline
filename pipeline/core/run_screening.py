@@ -12,7 +12,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from pipeline.core.pipeline import PaperScreeningPipeline, _load_stage_prompt_template
+from pipeline.core.pipeline import PaperScreeningPipeline
+from pipeline.core.prompt_context import load_stage_prompt_template
 from pipeline.selection.selector import load_labeled_examples
 from config.user_orchestrator import (
     PATH_SETTINGS,
@@ -459,7 +460,7 @@ def run_pipeline(
     base_prefix = f"{stage_prefix}{sample_tag}_sample_main"
     prompt_campaign_id = "unknown"
     try:
-        prompt_campaign_id = PaperScreeningPipeline._sha256_text(_load_stage_prompt_template(stage))[:12]
+        prompt_campaign_id = PaperScreeningPipeline._sha256_text(load_stage_prompt_template(stage))[:12]
     except Exception:
         prompt_campaign_id = "unknown"
 

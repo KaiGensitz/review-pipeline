@@ -119,6 +119,10 @@ Edit [config/user_orchestrator.py](config/user_orchestrator.py):
 		- `async_max_concurrency` (concurrent abstract calls)
 		- `async_max_retries` (transient API retries)
 		- `async_backoff_base_seconds`, `async_backoff_max_seconds`, `async_jitter_seconds` (rate-limit backoff)
+	- full-text preparse controls in `SCREENING_DEFAULTS`:
+		- `fulltext_preparse_before_screening=True` keeps the default preflight parse
+		- `fulltext_preparse_log_each_paper=True` prints one status line per paper
+		- environment variables `FULLTEXT_PREPARSE_BEFORE_SCREENING` and `FULLTEXT_PREPARSE_LOG_EACH_PAPER` may still override these values for one shell session
 
 Keep defaults unless you know why to change them.
 
@@ -179,6 +183,7 @@ Prepare knowledge-base files:
 - [knowledge-base/title_abstract_pos-neg_examples.csv](knowledge-base/title_abstract_pos-neg_examples.csv)
 - [knowledge-base/full_text_pos-neg_examples.csv](knowledge-base/full_text_pos-neg_examples.csv)
 - [knowledge-base/data_extraction_pos-neg_examples.csv](knowledge-base/data_extraction_pos-neg_examples.csv)
+- [knowledge-base/data_extraction_schema.csv](knowledge-base/data_extraction_schema.csv) for data-extraction fields and Covidence header mapping, unless `DATA_EXTRACTION_SCHEMA_FILE` in [config/user_orchestrator.py](config/user_orchestrator.py) points elsewhere
 - Optional full_text draft: [knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv](knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv)
 - Optional draft report: [knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json](knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json)
 - Optional shared criteria file: [knowledge-base/eligibility_criteria.txt](knowledge-base/eligibility_criteria.txt)
@@ -192,6 +197,14 @@ For `full_text`, this can point to the optional cleaned-hybrid draft file.
 Required columns in all knowledge-base files:
 - `label` (`POS`/`NEG`)
 - `text` (short evidence)
+
+Required columns in the configured extraction schema CSV:
+- `domain`
+- `variable_name`
+- `variable_type`
+- `allowed_options`
+- `instruction`
+- `covidence_column_name`
 
 Recommended: at least 10 POS and 10 NEG examples per file.
 

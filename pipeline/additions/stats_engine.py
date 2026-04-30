@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import re
 from numbers import Real
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -25,14 +26,20 @@ from statsmodels.stats.proportion import proportion_confint
 # human readable hint: proportion_confint supplies exact (Clopper-Pearson) binomial CIs (Seabold, S., & Perktold, J., 2010).
 
 from config.user_orchestrator import CURRENT_STAGE, STUDY_TAGS_IGNORE, STUDY_TAGS_INCLUDE
+from pipeline.core.extraction_schema import (
+    DynamicExtractionSchema,
+    ExtractionVariable,
+    MISSING_TEXT_VALUE,
+)
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 OUTPUT_DIR = ROOT / "output" / CURRENT_STAGE
 STAGE_PREFIX = f"{CURRENT_STAGE}_"
 INPUT_DIR = ROOT / "input"
 STAGE_OUTPUT_DIR = OUTPUT_DIR
-EXTRACTION_AI_PATH = OUTPUT_DIR / f"{CURRENT_STAGE}_extraction_results.jsonl"
-EXTRACTION_HUMAN_PATH = ROOT / "input" / "data_extraction_consensus.csv"
+EXTRACTION_AI_PATH = OUTPUT_DIR / f"{CURRENT_STAGE}_results.jsonl"
+EXTRACTION_HUMAN_PATH = ROOT / "input" / "data_extraction_schema.csv"
+LOGGER = logging.getLogger(__name__)
 
 EXCLUSION_TAGS = [t.lower() for t in STUDY_TAGS_INCLUDE]
 IGNORE_TAGS = {t.lower() for t in STUDY_TAGS_IGNORE}
@@ -322,24 +329,6 @@ def _load_human(stage: str, args) -> pd.DataFrame:
     human = pd.concat([df_yes[common_cols], df_no[common_cols]], ignore_index=True)
     human = human.drop_duplicates(subset=["covidence_id"], keep="first")
     return human
-
-
-def _normalize_text_value(val: Optional[object]) -> str:
-    """Normalize values to compare AI vs human extraction consistently."""
-
-    if val is None:
-        return ""
-    if isinstance(val, float) and math.isnan(val):
-        return ""
-
-    text = str(val).strip().lower()
-    prefixes = ["n=", "n =", "p=", "p =", "p<", "p <", "p-value", "p value"]
-    for pref in prefixes:
-        if text.startswith(pref):
-            text = text[len(pref):].strip()
-            break
-    text = text.replace("p <", "p<").replace("p-value", "pvalue").replace("p value", "pvalue")
-    return text
 
 
 def _parse_ai_decision(val) -> Tuple[Optional[int], str]:
@@ -760,11 +749,12 @@ def _load_ai_extraction_records() -> list[dict]:
     if EXTRACTION_AI_PATH.exists():
         ai_files = [EXTRACTION_AI_PATH]
     else:
-        ai_files = sorted(OUTPUT_DIR.glob("*/data_extraction_extraction_results.jsonl"))
+        ai_files = sorted(OUTPUT_DIR.glob("*/data_extraction_results.jsonl"))
 
     if not ai_files:
         raise FileNotFoundError(
-            "Missing AI extraction files. Expected per-paper files at output/data_extraction/<paper>/data_extraction_extraction_results.jsonl"
+            "Missing AI extraction files. Expected per-paper files at "
+            "output/data_extraction/<paper>/data_extraction_results.jsonl"
         )
 
     for path in ai_files:
@@ -780,128 +770,289 @@ def _load_ai_extraction_records() -> list[dict]:
     return records
 
 
-def validate_extraction(consensus_path: Optional[str] = None) -> None:
-    """Validate extraction outputs against the adjudicated consensus table."""
+def _value_from_extracted_data(extracted: Any, variable: ExtractionVariable) -> Any:
+    """human readable hint: locate the LLM value field generated from one KB variable."""
 
+    if not isinstance(extracted, dict):
+        return None
+    domain_payload = extracted.get(variable.domain)
+    if isinstance(domain_payload, dict):
+        return domain_payload.get(variable.value_key)
+    return None
+
+
+def _quote_from_extracted_data(extracted: Any, variable: ExtractionVariable) -> str:
+    """human readable hint: locate the LLM quote field generated for audit review."""
+
+    if not isinstance(extracted, dict):
+        return ""
+    domain_payload = extracted.get(variable.domain)
+    if not isinstance(domain_payload, dict):
+        return ""
+    quote = domain_payload.get(variable.quote_key)
+    return "" if quote is None else str(quote)
+
+
+def _normalization_key(value: Any, variable: ExtractionVariable) -> Any:
+    """human readable hint: coerce AI and Covidence values into comparable Python values by KB type."""
+
+    if _is_extraction_missing(value, variable):
+        return _missing_key(variable)
+
+    if variable.variable_type == "list":
+        return frozenset(_normalize_list_items(value))
+    if variable.variable_type == "boolean":
+        return _normalize_bool(value)
+    if variable.variable_type == "integer":
+        parsed = _normalize_number(value, integer=True)
+        return parsed if parsed is not None else _normalize_scalar(value)
+    if variable.variable_type == "float":
+        parsed = _normalize_number(value, integer=False)
+        return parsed if parsed is not None else _normalize_scalar(value)
+    return _normalize_scalar(value)
+
+
+def _missing_key(variable: ExtractionVariable) -> Any:
+    """human readable hint: use type-aware missing values so n/a, Not Available, [], and false align."""
+
+    if variable.variable_type == "list":
+        return frozenset()
+    if variable.variable_type == "boolean":
+        return False
+    return MISSING_TEXT_VALUE.casefold()
+
+
+def _is_extraction_missing(value: Any, variable: ExtractionVariable) -> bool:
+    """human readable hint: treat Covidence n/a and LLM missing conventions as the same absence signal."""
+
+    if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return True
+    if variable.variable_type == "list":
+        return len(_normalize_list_items(value)) == 0
+    text = str(value).strip().casefold()
+    return text in {"", "n/a", "na", "not available", "not applicable", "none", "null", "missing"}
+
+
+def _normalize_scalar(value: Any) -> str:
+    """human readable hint: compare scalar text robustly without changing the scientific meaning."""
+
+    text = "" if value is None else str(value)
+    text = re.sub(r"\s+", " ", text.strip())
+    return text.casefold()
+
+
+def _normalize_list_items(value: Any) -> list[str]:
+    """human readable hint: split Covidence comma-separated selections and LLM JSON arrays into comparable sets."""
+
+    if value is None:
+        return []
+    if isinstance(value, float) and math.isnan(value):
+        return []
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        text = str(value).strip()
+        if text.casefold() in {"", "n/a", "na", "not available", "not applicable", "none", "null"}:
+            return []
+        raw_items = re.split(r"[;,|\n]", text)
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        cleaned = re.sub(r"\s+", " ", str(item).strip()).casefold()
+        if not cleaned or cleaned in {"n/a", "na", "not available", "not applicable", "none", "null"}:
+            continue
+        if cleaned in seen:
+            continue
+        seen.add(cleaned)
+        normalized.append(cleaned)
+    return normalized
+
+
+def _normalize_bool(value: Any) -> bool:
+    """human readable hint: normalize yes/no style Covidence exports and JSON booleans."""
+
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().casefold()
+    return text in {"true", "1", "yes", "y", "present", "reported", "explicit"}
+
+
+def _normalize_number(value: Any, *, integer: bool) -> int | float | None:
+    """human readable hint: compare numeric Covidence and JSON values even when one side is text."""
+
+    try:
+        number = float(str(value).strip())
+    except Exception:
+        return None
+    if math.isnan(number):
+        return None
+    return int(number) if integer and number.is_integer() else number
+
+
+def validate_extraction(consensus_path: Optional[str] = None) -> None:
+    """Validate extraction outputs against Covidence gold-standard columns mapped by the KB."""
+
+    schema = DynamicExtractionSchema.from_kb()
     human_path = Path(consensus_path) if consensus_path else EXTRACTION_HUMAN_PATH
     if not human_path.exists():
-        raise FileNotFoundError(f"Missing human consensus file at {human_path}")
+        raise FileNotFoundError(f"Missing human Covidence gold-standard file at {human_path}")
 
-    ai_records = []
-    for payload in _load_ai_extraction_records():
-        pid = str(payload.get("paper_id", ""))
-        extracted = payload.get("extracted_data", {}) or {}
-        for field, value in extracted.items():
-            ai_records.append(
-                {
-                    "covidence_id": pid,
-                    "field": str(field),
-                    "ai_value": "" if value is None else str(value),
-                    "ai_norm": _normalize_text_value(value),
-                }
-            )
-    ai_df = pd.DataFrame(ai_records)
-
+    # human readable hint: load the Covidence export once and normalize the paper identifier for AI-human matching.
     human_wide = _clean_cols(pd.read_csv(human_path))
     human_wide["covidence_id"] = _normalize_id_column(human_wide)
-    value_cols = [c for c in human_wide.columns if c != "covidence_id"]
-    human_long = human_wide.melt(
-        id_vars=["covidence_id"],
-        value_vars=value_cols,
-        var_name="field",
-        value_name="human_value",
-    )
-    human_long["human_norm"] = human_long["human_value"].apply(_normalize_text_value)
+    missing_columns = [
+        variable.covidence_column_name
+        for variable in schema.variables
+        if variable.covidence_column_name not in human_wide.columns
+    ]
+    if missing_columns:
+        raise KeyError(
+            "Covidence export is missing KB-mapped column(s): " + ", ".join(sorted(set(missing_columns)))
+        )
 
-    merged = human_long.merge(ai_df, on=["covidence_id", "field"], how="left")
-    merged["ai_norm"] = merged["ai_norm"].fillna("")
-    merged["ai_value"] = merged["ai_value"].fillna("")
+    # human readable hint: index AI JSONL records by normalized paper ID and keep the LLM quote beside each value.
+    ai_by_id: dict[str, dict[str, Any]] = {}
+    for payload in _load_ai_extraction_records():
+        pid = _normalize_covidence_id_value(payload.get("paper_id", ""))
+        if not pid:
+            continue
+        ai_by_id[pid] = payload
 
-    eval_mask = merged["human_norm"] != ""
-    merged_eval = merged[eval_mask].copy()
-    merged_eval["match"] = merged_eval["ai_norm"] == merged_eval["human_norm"]
+    rows: list[dict[str, Any]] = []
+    audit_rows: list[dict[str, str]] = []
+    for _, human_row in human_wide.iterrows():
+        paper_id = _normalize_covidence_id_value(human_row.get("covidence_id", ""))
+        ai_payload = ai_by_id.get(paper_id, {})
+        extracted = ai_payload.get("extracted_data", {}) if isinstance(ai_payload, dict) else {}
 
-    per_field = (
-        merged_eval.groupby("field").apply(
-            lambda g: pd.Series(
+        for variable in schema.variables:
+            human_value = human_row.get(variable.covidence_column_name)
+            ai_value = _value_from_extracted_data(extracted, variable)
+            ai_quote = _quote_from_extracted_data(extracted, variable)
+            human_missing = _is_extraction_missing(human_value, variable)
+            ai_missing = _is_extraction_missing(ai_value, variable)
+            match = _normalization_key(human_value, variable) == _normalization_key(ai_value, variable)
+
+            rows.append(
                 {
-                    "matches": int(g["match"].sum()),
-                    "total": int(len(g)),
-                    "accuracy": (g["match"].sum() / len(g)) if len(g) else math.nan,
+                    "paper_id": paper_id,
+                    "variable": variable.variable_name,
+                    "covidence_column_name": variable.covidence_column_name,
+                    "human_present": not human_missing,
+                    "human_missing": human_missing,
+                    "ai_missing": ai_missing,
+                    "match": match,
+                    "human_value": "" if human_value is None else str(human_value),
+                    "ai_value": "" if ai_value is None else str(ai_value),
+                    "ai_quote": ai_quote,
                 }
             )
-        )
-    ).reset_index()
 
-    # human readable hint: compute exact binomial CI per field (Clopper-Pearson) for concordance (matches/total).
-    if per_field.empty:
-        per_field["ci_lower"] = []
-        per_field["ci_upper"] = []
-    else:
-        # Make pandas dtypes explicit for type checkers and then compute Clopper-Pearson CIs.
-        per_field = per_field.assign(
-            matches=per_field["matches"].astype(float),
-            total=per_field["total"].astype(float),
-        )
-        matches: list[float] = per_field["matches"].to_list()
-        totals: list[float] = per_field["total"].to_list()
-        ci_pairs = [_prop_ci(m, n) for m, n in zip(matches, totals)]
-        if ci_pairs:
-            per_field["ci_lower"], per_field["ci_upper"] = zip(*ci_pairs)
-        else:
-            per_field["ci_lower"] = []
-            per_field["ci_upper"] = []
+            if not match:
+                audit_rows.append(
+                    {
+                        "Paper_ID": paper_id,
+                        "Variable": variable.variable_name,
+                        "Human_Value": "" if human_value is None else str(human_value),
+                        "AI_Value": "" if ai_value is None else str(ai_value),
+                        "AI_Quote": ai_quote,
+                        "Error_Type": "",
+                        "Error_Effect": "",
+                    }
+                )
 
-    total_matches = int(merged_eval["match"].sum())
-    total_items = int(len(merged_eval))
-    overall_accuracy = (total_matches / total_items) if total_items else math.nan
-    overall_ci = _prop_ci(total_matches, total_items)
+    comparison = pd.DataFrame(rows)
+    if comparison.empty:
+        raise ValueError("No comparable extraction rows were produced from the KB and Covidence file.")
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    lines: list[str] = []
-    lines.append("Extraction accuracy report (AI vs adjudicated consensus)")
-    lines.append(f"Total items evaluated: {total_items}")
-    lines.append(
-        f"Overall concordance/accuracy: {overall_accuracy*100:.2f}% (95% CI {overall_ci[0]*100:.2f}-{overall_ci[1]*100:.2f}%)"
-        if not math.isnan(overall_accuracy)
-        else "Overall concordance/accuracy: n/a"
-    )
-    lines.append("")
-    lines.append("Per-field accuracy (Clopper-Pearson 95% CI):")
-    for _, row in per_field.iterrows():
-        acc = row["accuracy"]
-        if math.isnan(acc):
-            lines.append(f"- {row['field']}: n/a (n={row['total']}, matches={row['matches']})")
-        else:
-            lines.append(
-                f"- {row['field']}: {acc*100:.2f}% (95% CI {row['ci_lower']*100:.2f}-{row['ci_upper']*100:.2f}%)"
-                f" (n={row['total']}, matches={row['matches']})"
+    # human readable hint: concordance ignores human-missing cells; accuracy counts both exact present matches and correct absences.
+    metric_rows: list[dict[str, Any]] = []
+    for variable in schema.variables:
+        subset = comparison[comparison["variable"] == variable.variable_name]
+        present_subset = subset[subset["human_present"]]
+        concordance_n = int(len(present_subset))
+        concordance_matches = int(present_subset["match"].sum()) if concordance_n else 0
+        accuracy_n = int(len(subset))
+        accuracy_matches = int(subset["match"].sum()) if accuracy_n else 0
+        concordance = concordance_matches / concordance_n if concordance_n else math.nan
+        accuracy = accuracy_matches / accuracy_n if accuracy_n else math.nan
+
+        if (not math.isnan(concordance) and concordance < 0.80) or (
+            not math.isnan(accuracy) and accuracy < 0.90
+        ):
+            LOGGER.critical(
+                "Prompt Refinement Triggered: variable=%s concordance=%s accuracy=%s",
+                variable.variable_name,
+                "n/a" if math.isnan(concordance) else f"{concordance:.3f}",
+                "n/a" if math.isnan(accuracy) else f"{accuracy:.3f}",
             )
 
-    _stage_file("extraction_accuracy_report.txt").write_text("\n".join(lines), encoding="utf-8")
+        metric_rows.append(
+            {
+                "Variable": variable.variable_name,
+                "Covidence_Column": variable.covidence_column_name,
+                "Concordance_Matches": concordance_matches,
+                "Concordance_Total_Human_Present": concordance_n,
+                "Concordance": concordance,
+                "Accuracy_Matches": accuracy_matches,
+                "Accuracy_Total_All_Parsed": accuracy_n,
+                "Accuracy": accuracy,
+            }
+        )
 
-    with open(_stage_file("validation_stats_report.txt"), "a", encoding="utf-8") as rpt:
-        rpt.write("\n\n" + "\n".join(lines))
-
-    discrep = merged_eval[~merged_eval["match"]].copy()
-    discrep.rename(
-        columns={
-            "covidence_id": "PaperID",
-            "field": "Field_Name",
-            "ai_value": "AI_Value",
-            "human_value": "Human_Consensus_Value",
-        },
-        inplace=True,
+    per_variable = pd.DataFrame(metric_rows)
+    overall_present = comparison[comparison["human_present"]]
+    overall_concordance = (
+        float(overall_present["match"].sum()) / float(len(overall_present)) if len(overall_present) else math.nan
     )
-    # human readable hint: scaffold columns for manual error typing per Gartlehner et al. (missed/fabricated/misallocated/etc.).
-    discrep["Error_Type"] = "unspecified"
-    discrep["Error_Impact"] = "unspecified"
-    discrep_out_cols = ["PaperID", "Field_Name", "AI_Value", "Human_Consensus_Value", "Error_Type", "Error_Impact"]
-    discrep[discrep_out_cols].to_csv(_stage_file("extraction_discrepancies.csv"), index=False, encoding="utf-8")
+    overall_accuracy = float(comparison["match"].sum()) / float(len(comparison)) if len(comparison) else math.nan
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    metrics_path = _stage_file("extraction_accuracy_report.csv")
+    audit_path = OUTPUT_DIR / "extraction_error_audit.csv"
+    report_path = _stage_file("extraction_accuracy_report.txt")
+
+    per_variable.to_csv(metrics_path, index=False, encoding="utf-8")
+    pd.DataFrame(
+        audit_rows,
+        columns=["Paper_ID", "Variable", "Human_Value", "AI_Value", "AI_Quote", "Error_Type", "Error_Effect"],
+    ).to_csv(audit_path, index=False, encoding="utf-8")
+
+    lines = [
+        "Extraction validation report (AI vs Covidence gold standard)",
+        f"Schema KB: {schema.kb_path}",
+        f"Covidence file: {human_path}",
+        f"Variables parsed from KB: {len(schema.variables)}",
+        f"Total variable-paper comparisons: {len(comparison)}",
+        (
+            f"Overall concordance: {overall_concordance*100:.2f}%"
+            if not math.isnan(overall_concordance)
+            else "Overall concordance: n/a"
+        ),
+        (
+            f"Overall accuracy: {overall_accuracy*100:.2f}%"
+            if not math.isnan(overall_accuracy)
+            else "Overall accuracy: n/a"
+        ),
+        "",
+        "Per-variable thresholds: Concordance >= 0.80 and Accuracy >= 0.90.",
+    ]
+    for _, row in per_variable.iterrows():
+        concordance = row["Concordance"]
+        accuracy = row["Accuracy"]
+        lines.append(
+            f"- {row['Variable']} -> {row['Covidence_Column']}: "
+            f"concordance={'n/a' if math.isnan(concordance) else f'{concordance:.3f}'}, "
+            f"accuracy={'n/a' if math.isnan(accuracy) else f'{accuracy:.3f}'}"
+        )
+    report_path.write_text("\n".join(lines), encoding="utf-8")
 
     print("Validation complete (data extraction stage). Outputs:")
-    print(f"- {_stage_file('extraction_accuracy_report.txt').relative_to(ROOT)}")
-    print(f"- {_stage_file('extraction_discrepancies.csv').relative_to(ROOT)}")
+    print(f"- {report_path.relative_to(ROOT)}")
+    print(f"- {metrics_path.relative_to(ROOT)}")
+    print(f"- {audit_path.relative_to(ROOT)}")
 
 
 def _parse_args():
@@ -912,7 +1063,7 @@ def _parse_args():
     parser.add_argument("--irrelevant", help="Path to *_irrelevant_csv_* (title_abstract stage)")
     parser.add_argument("--included", help="Path to *_included_csv_* (full_text stage)")
     parser.add_argument("--excluded", help="Path to *_excluded_csv_* (full_text stage)")
-    parser.add_argument("--consensus", help="Path to data_extraction_consensus.csv (data_extraction stage)")
+    parser.add_argument("--consensus", help="Path to Covidence gold-standard CSV for data_extraction")
     return parser.parse_args()
 
 

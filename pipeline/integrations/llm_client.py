@@ -22,27 +22,47 @@ def _format_prompt(template: str, data: str) -> str:
 class OpenAIResponder:
 	"""Generate responses using the OpenAI API within a RAG workflow."""
 
-	def __init__(self, data: str, model: str, prompt_template: str, client: Any) -> None:
+	def __init__(
+		self,
+		data: str,
+		model: str,
+		prompt_template: str,
+		client: Any,
+		response_format: Any | None = None,
+		system_prompt: str | None = None,
+		max_tokens: int | None = None,
+	) -> None:
 		self.data = data
 		self.model = model
 		self.prompt_template = prompt_template
 		self.client = client
+		self.response_format = response_format
+		self.system_prompt = "You are a RAG system." if system_prompt is None else system_prompt
+		self.max_tokens = max_tokens
 		self.prompt = _format_prompt(prompt_template, data)
 
 	def _request_kwargs(self) -> dict[str, Any]:
 		"""human readable hint: build one consistent chat request payload for sync and async calls."""
 
+		messages: list[dict[str, str]] = []
+		if str(self.system_prompt or "").strip():
+			messages.append({"role": "system", "content": str(self.system_prompt)})
+		messages.append({"role": "user", "content": self.prompt})
+
 		request_kwargs: dict[str, Any] = {
 			"model": self.model,
-			"messages": [
-				{"role": "system", "content": "You are a RAG system."},
-				{"role": "user", "content": self.prompt},
-			],
-			"max_tokens": require_setting(LLM_SETTINGS, "max_tokens", "LLM_SETTINGS", int),
+			"messages": messages,
+			"max_tokens": int(self.max_tokens)
+			if self.max_tokens is not None
+			else require_setting(LLM_SETTINGS, "max_tokens", "LLM_SETTINGS", int),
 			"temperature": require_setting(LLM_SETTINGS, "temperature", "LLM_SETTINGS", float),
 			"top_p": float(LLM_SETTINGS.get("top_p", 1.0) or 1.0),
 			"stream": False,
 		}
+
+		# human readable hint: Structured Outputs constrains the model to the runtime KB/Pydantic schema.
+		if self.response_format is not None:
+			request_kwargs["response_format"] = self.response_format
 
 		seed_val = LLM_SETTINGS.get("seed")
 		if isinstance(seed_val, int):

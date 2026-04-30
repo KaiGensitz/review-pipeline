@@ -9,10 +9,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(REPO_ROOT / ".env")
 
 # ---------------------------------------------------------------------------
-# Edit these each run
+# USER-EDITABLE RUN SETTINGS
 # ---------------------------------------------------------------------------
 
-CURRENT_STAGE = "full_text"  # title_abstract | full_text | data_extraction
+CURRENT_STAGE = "data_extraction"  # user-editable: title_abstract | full_text | data_extraction
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")  # API key loaded from .env
 LLM_MODEL = "gpt-oss-120b"  # screening model name on your endpoint; working for sure: "gpt-oss-120b" (17.04.2026)
 EMBED_MODEL = "qwen3-embedding-0.6b"  # embedding model name on your endpoint; working for sure: "qwen3-embedding-0.6b" (17.04.2026)
@@ -20,10 +20,12 @@ CSV_DIR = REPO_ROOT / "input"  # where you drop Covidence exports
 QC_ENABLED = True  # False = skip QC sampling and go straight to full screening
 QC_SAMPLE_RATE = 0.1  # 0.0–1.0; 0.10 ~10% QC sample
 
-# Covidence study tags used for validation (case-insensitive)
+# USER-EDITABLE STUDY TAGS.
+# human readable hint: these tags encode the current protocol's exclusion reasons.
+# When the review topic changes, update these labels and the prompt/KB files together.
 STUDY_TAGS_INCLUDE = [
-    "no smartphone technology",   # Maps to Concept 1
-    "no artificial intelligence", # Maps to Concept 2
+    "no smartphone technology",   # Maps to Intervention
+    "no artificial intelligence", # Maps to Phenomenon
     "no physical activity",       # Maps to Outcome
     "not adult population",       # Maps to Population
     "not urban context",          # Maps to Context
@@ -33,7 +35,8 @@ STUDY_TAGS_INCLUDE = [
 	"No intervention"			  # no (realworld) intervention
 ]
 
-# Study tags to ignore (e.g., test/sample markers)
+# USER-EDITABLE TAGS TO IGNORE.
+# human readable hint: these labels are metadata/test markers, not scientific exclusion reasons.
 STUDY_TAGS_IGNORE = [
 	"title/abstract screening test sample",
 	"title/abstract screening test sample - validation",
@@ -90,6 +93,10 @@ PROMPT_FILES = {
 	"full_text": REPO_ROOT / "config" / "prompt_script_full_text.txt",
 	"data_extraction": REPO_ROOT / "config" / "prompt_script_data_extraction.txt",
 }
+
+# USER-EDITABLE DATA-EXTRACTION SCHEMA.
+# human readable hint: this CSV defines extraction variables, types, instructions, and Covidence headers.
+DATA_EXTRACTION_SCHEMA_FILE = REPO_ROOT / "knowledge-base" / "data_extraction_schema.csv"
 
 # Stage-specific knowledge-base (KB) files.
 # - KNOWLEDGE_BASE_FILES holds default KB paths per stage.
@@ -169,6 +176,12 @@ if not KNOWLEDGE_BASE_FILE.exists():
 		f"Expected file at: {KNOWLEDGE_BASE_FILE}."
 	)
 
+if CURRENT_STAGE == "data_extraction" and not DATA_EXTRACTION_SCHEMA_FILE.exists():
+	raise FileNotFoundError(
+		"Missing data-extraction schema CSV for CURRENT_STAGE='data_extraction'. "
+		f"Expected file at: {DATA_EXTRACTION_SCHEMA_FILE}."
+	)
+
 EMBEDDING_SETTINGS = {
 	"gpustack_embedding_model": EMBED_MODEL,  # embedding model; affects relevance ranking in all stages
 	"use_api_embeddings": True,  # True = use API embeddings; False would disable embedding-based selection
@@ -185,14 +198,19 @@ LLM_SETTINGS = {
 	"gpustack_base_url": "https://gpustack.unibe.ch/v1",  # LLM endpoint URL; must match your server
 	"prompt_path": str(PROMPT_FILE),  # stage-specific prompt; changes decision logic per stage
 	"context_window_total_tokens": 78000,  # model context window (input + output combined); set per model
-	"max_tokens": 2048,  # response length cap; too low can truncate JSON, too high costs more
+	"max_tokens": 10000,  # response length cap; too low can truncate JSON, too high costs more
+	"data_extraction_split_by_domain": True,  # True = one smaller structured call per extraction domain, then merge
+	"data_extraction_response_format_mode": "prompt_only",  # prompt_only avoids broken json_schema handling on some GPUSstack models
+	"data_extraction_domain_max_tokens": 3000,  # per-domain output cap; prevents runaway malformed JSON from consuming 10000 tokens
+	"data_extraction_evidence_mode": "full_text",  # full_text = use cached normalized full text; selected_chunks = use retrieval slice
+	"data_extraction_full_text_max_words": 0,  # 0 = no word cap; set a number only if full texts exceed model context
 	"temperature": 0.0,  # randomness; lower = more stable decisions, higher = more variable
 	"top_p": 1.0,  # keep at 1.0 with temperature=0.0 for stable decoding behavior
 	"seed": 42,  # reproducibility seed (set an integer number like 42 to stabilize provider-side sampling)
-	"async_max_concurrency": 18,  # balanced profile: higher throughput without aggressive endpoint saturation
-	"async_max_retries": 3,  # transient API retries (e.g., rate limit/timeouts)
-	"async_backoff_base_seconds": 0.5,  # initial retry delay for async backoff
-	"async_backoff_max_seconds": 8.0,  # maximum retry delay cap
+	"async_max_concurrency": 2,  # endpoint-safe default for full_text/data_extraction; raise only after stable QC runs
+	"async_max_retries": 1,  # one transient retry avoids 20+ minute stalls when the proxy is down
+	"async_backoff_base_seconds": 2.0,  # slower retry start reduces repeated pressure on a failing endpoint
+	"async_backoff_max_seconds": 20.0,  # maximum retry delay cap
 	"async_jitter_seconds": 0.2,  # random jitter added to backoff to reduce thundering herd
 	"async_heartbeat_seconds": 30,  # operator heartbeat interval in seconds for async progress logs
 	"async_enable_full_text": True,  # True = use async-concurrent LLM calls in full_text stage
@@ -208,6 +226,8 @@ SCREENING_DEFAULTS = {
 	"batch_size": 32,  # embedding batch size; higher = faster, more memory
 	"artifact_mode": "compact",  # "full" = legacy multi-file outputs; "compact" = merged machine artifacts + human-readable outputs
 	"compact_keep_legacy_selected_chunks": False,  # True keeps *_selected_chunks.jsonl sidecars in compact mode for interoperability
+	"fulltext_preparse_before_screening": True,  # True = preflight-parse full-text PDFs before screening; set False for fastest large runs
+	"fulltext_preparse_log_each_paper": True,  # True = print one preparse status line per paper
 	"sustainability_tracking": True,  # True = write resource logs; False = no tracking
 	"enable_time_savings": True,  # True = compute human-time savings when QC minutes exist; set False to skip
 }
@@ -270,6 +290,7 @@ PATH_SETTINGS = {
 	"csv_dir": str(CSV_DIR),  # input folder for stage CSVs (all stages)
 	"prompt_file": str(PROMPT_FILE),  # resolved prompt file path for CURRENT_STAGE
 	"knowledge_base_file": str(KNOWLEDGE_BASE_FILE),  # resolved stage KB file for CURRENT_STAGE
+	"data_extraction_schema_file": str(DATA_EXTRACTION_SCHEMA_FILE),  # schema KB used for extraction + validation
 	"knowledge_base_files": {  # per-stage KB mapping used as run defaults
 		stage_name: str(path_value)
 		for stage_name, path_value in EFFECTIVE_KNOWLEDGE_BASE_FILES.items()
@@ -370,6 +391,7 @@ class UserConfig:
 	stage_rules: dict
 	prompt_file: Path
 	knowledge_base_file: Path
+	data_extraction_schema_file: Path
 	knowledge_base_files: dict
 	embedding_settings: dict
 	llm_settings: dict
@@ -393,6 +415,8 @@ def load_user_config() -> UserConfig:
 		)
 	if not PROMPT_FILE.exists():
 		raise FileNotFoundError(f"Missing prompt script for CURRENT_STAGE='{CURRENT_STAGE}'. Expected file at: {PROMPT_FILE}.")
+	if CURRENT_STAGE == "data_extraction" and not DATA_EXTRACTION_SCHEMA_FILE.exists():
+		raise FileNotFoundError(f"Missing data-extraction schema CSV at: {DATA_EXTRACTION_SCHEMA_FILE}.")
 	if QC_SAMPLE_RATE < 0 or QC_SAMPLE_RATE > 1:
 		raise ValueError("QC_SAMPLE_RATE must be between 0.0 and 1.0 (e.g., 0.10 for ~10%).")
 	if not LLM_API_KEY:
@@ -409,6 +433,7 @@ def load_user_config() -> UserConfig:
 		stage_rules=STAGE_RULES,
 		prompt_file=PROMPT_FILE,
 		knowledge_base_file=KNOWLEDGE_BASE_FILE,
+		data_extraction_schema_file=DATA_EXTRACTION_SCHEMA_FILE,
 		knowledge_base_files=EFFECTIVE_KNOWLEDGE_BASE_FILES,
 		embedding_settings=EMBEDDING_SETTINGS,
 		llm_settings=LLM_SETTINGS,

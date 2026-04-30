@@ -10,21 +10,15 @@ import re
 
 
 DOMAIN_KEYWORDS = {
-    "smartphone",
-    "mobile",
-    "app",
-    "mhealth",
-    "physical",
-    "activity",
-    "exercise",
-    "walking",
-    "steps",
     "intervention",
-    "chatbot",
-    "machine",
-    "learning",
-    "reinforcement",
-    "ai",
+    "exposure",
+    "participants",
+    "sample",
+    "outcome",
+    "measure",
+    "method",
+    "analysis",
+    "follow-up",
 }
 
 NEGATIVE_SIGNAL_KEYWORDS = {
@@ -34,24 +28,14 @@ NEGATIVE_SIGNAL_KEYWORDS = {
     "abm",
     "children",
     "adolescent",
-    "no smartphone",
-    "wearable",
-    "desktop",
+    "non-empirical",
+    "commentary",
     "protocol",
 }
 
-POS_DELIVERY_KEYWORDS = {"smartphone", "mobile", "app", "mhealth"}
-POS_AI_KEYWORDS = {
-    "artificial intelligence",
-    "machine learning",
-    "reinforcement learning",
-    "deep learning",
-    "chatbot",
-    "llm",
-    "bandit",
-    "ai",
-}
-POS_PA_KEYWORDS = {"physical activity", "exercise", "walking", "steps", "mvpa", "sedentary"}
+POS_METHOD_KEYWORDS = {"participants", "sample", "baseline", "follow-up", "randomized", "cohort"}
+POS_INTERVENTION_KEYWORDS = {"intervention", "exposure", "program", "implementation", "delivery"}
+POS_OUTCOME_KEYWORDS = {"outcome", "measure", "effect", "result", "finding", "endpoint"}
 
 REFERENCE_PATTERN = re.compile(
     r"\b(references?|bibliography|copyright|all rights reserved|doi)\b",
@@ -215,9 +199,9 @@ def _quality_metrics(text: str) -> dict[str, float | int | bool]:
             signal_hits += 1
             exclusion_hits += 1
 
-    delivery_hits = sum(1 for keyword in POS_DELIVERY_KEYWORDS if keyword in lower)
-    ai_hits = sum(1 for keyword in POS_AI_KEYWORDS if keyword in lower)
-    pa_hits = sum(1 for keyword in POS_PA_KEYWORDS if keyword in lower)
+    method_hits = sum(1 for keyword in POS_METHOD_KEYWORDS if keyword in lower)
+    intervention_hits = sum(1 for keyword in POS_INTERVENTION_KEYWORDS if keyword in lower)
+    outcome_hits = sum(1 for keyword in POS_OUTCOME_KEYWORDS if keyword in lower)
 
     alpha_chars = sum(ch.isalpha() for ch in chars)
     avg_token_len = sum(len(token) for token in words) / max(word_count, 1)
@@ -231,9 +215,9 @@ def _quality_metrics(text: str) -> dict[str, float | int | bool]:
         "avg_token_len": avg_token_len,
         "signal_hits": signal_hits,
         "exclusion_hits": exclusion_hits,
-        "delivery_hits": delivery_hits,
-        "ai_hits": ai_hits,
-        "pa_hits": pa_hits,
+        "method_hits": method_hits,
+        "intervention_hits": intervention_hits,
+        "outcome_hits": outcome_hits,
         "reference_like": bool(REFERENCE_PATTERN.search(lower)),
         "low_value_like": bool(LOW_VALUE_PATTERN.search(lower)),
     }
@@ -321,9 +305,9 @@ def _build_chunk_candidates(
         avg_token_len = float(metrics.get("avg_token_len", 0.0) or 0.0)
         signal_hits = int(metrics.get("signal_hits", 0) or 0)
         exclusion_hits = int(metrics.get("exclusion_hits", 0) or 0)
-        delivery_hits = int(metrics.get("delivery_hits", 0) or 0)
-        ai_hits = int(metrics.get("ai_hits", 0) or 0)
-        pa_hits = int(metrics.get("pa_hits", 0) or 0)
+        method_hits = int(metrics.get("method_hits", 0) or 0)
+        intervention_hits = int(metrics.get("intervention_hits", 0) or 0)
+        outcome_hits = int(metrics.get("outcome_hits", 0) or 0)
         reference_like = bool(metrics.get("reference_like", False))
         low_value_like = bool(metrics.get("low_value_like", False))
 
@@ -356,9 +340,9 @@ def _build_chunk_candidates(
             continue
 
         if row.label == "POS":
-            positive_families = int(delivery_hits > 0) + int(ai_hits > 0) + int(pa_hits > 0)
+            positive_families = int(method_hits > 0) + int(intervention_hits > 0) + int(outcome_hits > 0)
             if positive_families < 2:
-                skipped["pos_missing_core_families"] += 1
+                skipped["pos_missing_generic_evidence_families"] += 1
                 continue
         else:
             if exclusion_hits <= 0:
@@ -428,12 +412,12 @@ def _to_hybrid_rows(candidates: list[ChunkCandidate]) -> list[ExampleRow]:
     for candidate in candidates:
         if candidate.label == "POS":
             reasoning = (
-                "Positive hybrid example from cleaned full-text chunk with explicit smartphone, AI, and physical activity evidence."
+                "Positive hybrid example from cleaned full-text chunk with topic-relevant method, intervention/exposure, or outcome evidence."
             )
         else:
             reasoning = (
                 "Negative hybrid example from cleaned full-text chunk preserving exclusion-relevant evidence "
-                "(for example review, simulation, non-adult target, or no participant-facing AI intervention)."
+                "(for example review, simulation, non-adult target, or weak participant-level evidence)."
             )
 
         source = f"{candidate.source_base} | hybrid_cleaned_chunk_draft"
