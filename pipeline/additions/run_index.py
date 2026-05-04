@@ -787,8 +787,18 @@ def _auto_generate_qc_mismatch_csv(stage: str, artifact: dict[str, object] | Non
     print(f"[qc] Explicit mismatch CSV written: {out_path} (rows={mismatch_count}).")
 
 
-def _qc_screened_already(stage: str) -> bool:
+def _qc_screened_already(stage: str, run_label: str = "qc_sample") -> bool:
     """Detect whether a QC sample for this stage was already screened."""
+
+    scoped = _latest_base_outputs(stage, run_label).get("eligibility")
+    if scoped and scoped.exists():
+        try:
+            return scoped.stat().st_size > 0
+        except Exception:
+            return False
+
+    if run_label != "qc_sample":
+        return False
 
     stage_root = Path(PATH_SETTINGS.get("output_root", Path("output"))) / stage
     patterns = [

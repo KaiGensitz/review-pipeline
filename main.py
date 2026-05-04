@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 import subprocess
@@ -12,8 +13,11 @@ from config.user_orchestrator import (
     QC_ENABLED,
     QC_SAMPLE_RATE,
     STAGE_RULES,
+    CITATION_SEARCHING_SCREENING,
+    CITATION_SEARCHING_STAGE_RULES,
 )
 from pipeline.core.run_screening import run_pipeline
+from pipeline.core.citation_io import CovidenceCitationParser
 from pipeline.additions.resource_usage import backfill_time_savings
 from pipeline.additions.retry_flow import (
     _archive_retry_csv,
@@ -407,7 +411,13 @@ def _run_validation() -> bool:
 
     _PROMPT_STATE["validation_ran"] = True
     return True
-def _run_qc_loop(stage: str, sample_rate: float, quiet: bool = False) -> bool:
+def _run_qc_loop(
+    stage: str,
+    sample_rate: float,
+    quiet: bool = False,
+    input_files: list[str] | None = None,
+    qc_run_label: str = "qc_sample",
+) -> bool:
     """Run QC-only screening, validation prompt, and decision loop.
 
     Returns True if the user approves validation and wants full screening.
@@ -422,10 +432,10 @@ def _run_qc_loop(stage: str, sample_rate: float, quiet: bool = False) -> bool:
     """
     force_new_qc = False
     while True:
-        if not force_new_qc and _qc_screened_already(stage):
+        if not force_new_qc and _qc_screened_already(stage, qc_run_label):
             print("[qc] Existing QC screening found; skipping re-screen of QC sample.")
             ran = True
-            qc_artifact = _artifact_from_latest_base_outputs(stage, "qc_sample")
+            qc_artifact = _artifact_from_latest_base_outputs(stage, qc_run_label)
             if qc_artifact:
                 _PROMPT_STATE["last_artifact"] = qc_artifact
                 _update_index_from_artifact(stage, qc_artifact, 0)
@@ -440,6 +450,8 @@ def _run_qc_loop(stage: str, sample_rate: float, quiet: bool = False) -> bool:
                 qc_enabled=True,
                 force_new_qc=force_new_qc,
                 quiet=quiet,
+                input_files=input_files,
+                run_label_override=qc_run_label,
             )
             _prompt_retry_if_needed(stage, _last_artifact_dict())
             _post_run_updates(stage, _last_artifact_dict(), 0)
@@ -464,12 +476,26 @@ def _run_qc_loop(stage: str, sample_rate: float, quiet: bool = False) -> bool:
 class MainWorkflow:
     """human readable hint: one-class orchestrator for terminal flow, retries, QC gating, and stage execution."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        stage: str | None = None,
+        input_files: list[str] | None = None,
+        run_scope: str | None = None,
+    ) -> None:
         """human readable hint: __init__ keeps the key runtime attributes visible in one place."""
 
-        self.stage = CURRENT_STAGE
+        self.stage = stage or CURRENT_STAGE
         self.csv_dir = Path(PATH_SETTINGS["csv_dir"])
         self.sample_rate = QC_SAMPLE_RATE
+        self.citation_searching_mode = bool(CITATION_SEARCHING_SCREENING)
+        self.input_files = input_files or []
+        self.run_scope = _sanitize_run_scope(run_scope) or (
+            "citation_searching" if self.citation_searching_mode else ""
+        )
+        self.qc_run_label = f"{self.run_scope}_qc_sample" if self.run_scope else "qc_sample"
+        self.remaining_run_label = (
+            f"{self.run_scope}_remaining_sample" if self.run_scope else "remaining_sample"
+        )
 
     def run(self) -> None:
         """Run the pipeline for the selected stage with safety checks."""
@@ -481,11 +507,23 @@ class MainWorkflow:
         stage = self.stage
         csv_dir = self.csv_dir
         sample_rate = self.sample_rate
+        input_files = self.input_files
 
         print(f"[main] Stage: {stage} | LLM: {LLM_MODEL} | Embedding: {EMBED_MODEL}")
+        if self.run_scope:
+            print(f"[main] Run scope: {self.run_scope}")
+        if self.citation_searching_mode:
+            print("[main] Citation-searching mode: ON (QC sampling disabled).")
+        if input_files:
+            print("[main] Explicit input file(s):")
+            for path in input_files:
+                print(f"  - {path}")
 
         if stage not in STAGE_RULES:
             print(f"[error] Unknown CURRENT_STAGE='{stage}'. Choose from {sorted(STAGE_RULES)}.")
+            return
+        if self.citation_searching_mode and stage not in CITATION_SEARCHING_STAGE_RULES:
+            print("[error] CITATION_SEARCHING_SCREENING=True has no file pattern for this stage.")
             return
 
         if not _ensure_csv_inputs(csv_dir):
@@ -513,7 +551,19 @@ class MainWorkflow:
             print("[qc] Study-tag settings: STUDY_TAGS_INCLUDE and STUDY_TAGS_IGNORE in config/user_orchestrator.py.")
             return
 
-        retry_csv = _latest_retry_csv(stage)
+        if self.citation_searching_mode and not input_files:
+            try:
+                input_files = _prepare_citation_searching_delta(csv_dir, stage)
+            except (FileNotFoundError, ValueError) as exc:
+                print(f"[citation][error] {exc}")
+                return
+            self.input_files = input_files
+            if input_files:
+                print("[main] Citation-searching novel-record input file(s):")
+                for path in input_files:
+                    print(f"  - {path}")
+
+        retry_csv = None if (self.run_scope or input_files) else _latest_retry_csv(stage)
         if retry_csv:
             pending_ids = _retry_csv_needed(retry_csv, stage)
             if not pending_ids:
@@ -549,16 +599,39 @@ class MainWorkflow:
                             _archive_retry_csv(retry_csv)
 
         rule = STAGE_RULES[stage]
-        for pattern in rule["screen_patterns"]:
-            if not _require_pattern(csv_dir, pattern, f"{stage} required CSV export", stage=stage):
+        if input_files:
+            missing_inputs: list[str] = []
+            for raw_path in input_files:
+                path = Path(raw_path)
+                exists = path.exists() if path.is_absolute() else (path.exists() or (csv_dir / path).exists())
+                if not exists:
+                    missing_inputs.append(raw_path)
+            if missing_inputs:
+                print("[error] Explicit input file(s) not found:")
+                for path in missing_inputs:
+                    print(f"  - {path}")
                 return
+        else:
+            active_patterns = _active_screen_patterns(stage, citation_searching=self.citation_searching_mode)
+            for pattern in active_patterns:
+                if not _require_pattern(csv_dir, pattern, f"{stage} required CSV export", stage=stage):
+                    return
+
+        qc_enabled_effective = bool(QC_ENABLED and not self.citation_searching_mode)
 
         if stage == "full_text":
             paper_dir = csv_dir / str(rule["pdf_dir"])
             first_prep_run = not paper_dir.exists()
 
             print("[main] Preparing per-paper folders for full_text (setup preflight)...")
-            _run_pipeline_guarded(stage=stage, split_only=True, quiet=True, mark_failure=False)
+            _run_pipeline_guarded(
+                stage=stage,
+                split_only=True,
+                quiet=True,
+                mark_failure=False,
+                input_files=input_files,
+                run_label_override=self.remaining_run_label,
+            )
 
             if not paper_dir.exists():
                 print(f"[setup] Expected per-paper folders at {paper_dir}. Rerun after generating CSV exports.")
@@ -586,21 +659,50 @@ class MainWorkflow:
             print("[setup] All per-paper folders contain PDFs. Proceeding to screening flow.")
 
         if stage == "title_abstract":
-            if QC_ENABLED:
-                if _run_qc_loop(stage, sample_rate, quiet=False):
-                    _run_pipeline_guarded(stage=stage, confirm_sampling=True, sample_rate=sample_rate, qc_only=False, qc_enabled=False)
+            if qc_enabled_effective:
+                if _run_qc_loop(
+                    stage,
+                    sample_rate,
+                    quiet=False,
+                    input_files=input_files,
+                    qc_run_label=self.qc_run_label,
+                ):
+                    _run_pipeline_guarded(
+                        stage=stage,
+                        confirm_sampling=True,
+                        sample_rate=sample_rate,
+                        qc_only=False,
+                        qc_enabled=False,
+                        input_files=input_files,
+                        run_label_override=self.remaining_run_label,
+                    )
                     _post_run_updates(stage, _last_artifact_dict(), 0)
                     _prompt_retry_if_needed(stage, _last_artifact_dict())
                 return
-            _run_pipeline_guarded(stage=stage, confirm_sampling=True, sample_rate=sample_rate, qc_only=False, qc_enabled=False)
+            _run_pipeline_guarded(
+                stage=stage,
+                confirm_sampling=True,
+                sample_rate=sample_rate,
+                qc_only=False,
+                qc_enabled=False,
+                input_files=input_files,
+                run_label_override=self.remaining_run_label,
+            )
             _post_run_updates(stage, _last_artifact_dict(), 0)
             _prompt_retry_if_needed(stage, _last_artifact_dict())
             return
 
-        if QC_ENABLED:
+        if qc_enabled_effective:
             if stage != "full_text":
                 print(f"[main] Preparing per-paper folders for {stage} (no screening in this step)...")
-                _run_pipeline_guarded(stage=stage, split_only=True, quiet=True, mark_failure=False)
+                _run_pipeline_guarded(
+                    stage=stage,
+                    split_only=True,
+                    quiet=True,
+                    mark_failure=False,
+                    input_files=input_files,
+                    run_label_override=self.remaining_run_label,
+                )
 
                 if stage == "data_extraction":
                     full_text_dir = csv_dir / "per_paper_full_text"
@@ -625,17 +727,115 @@ class MainWorkflow:
                     for name in missing:
                         print(f"  - {name}")
 
-            if _run_qc_loop(stage, sample_rate, quiet=False):
-                _run_pipeline_guarded(stage=stage, quiet=False, confirm_sampling=True, sample_rate=sample_rate, qc_only=False, qc_enabled=False)
+            if _run_qc_loop(
+                stage,
+                sample_rate,
+                quiet=False,
+                input_files=input_files,
+                qc_run_label=self.qc_run_label,
+            ):
+                _run_pipeline_guarded(
+                    stage=stage,
+                    quiet=False,
+                    confirm_sampling=True,
+                    sample_rate=sample_rate,
+                    qc_only=False,
+                    qc_enabled=False,
+                    input_files=input_files,
+                    run_label_override=self.remaining_run_label,
+                )
                 _post_run_updates(stage, _last_artifact_dict(), 0)
                 _prompt_retry_if_needed(stage, _last_artifact_dict())
             return
 
+        _run_pipeline_guarded(
+            stage=stage,
+            quiet=False,
+            confirm_sampling=True,
+            sample_rate=sample_rate,
+            qc_only=False,
+            qc_enabled=False,
+            input_files=input_files,
+            run_label_override=self.remaining_run_label,
+        )
+        _post_run_updates(stage, _last_artifact_dict(), 0)
+        _prompt_retry_if_needed(stage, _last_artifact_dict())
+        return
 
-def main() -> None:
+
+def _sanitize_run_scope(value: str | None) -> str:
+    """human readable hint: keep optional terminal run scope safe for output filenames."""
+
+    cleaned = "".join(ch if (ch.isalnum() or ch in {"-", "_"}) else "_" for ch in str(value or "").strip())
+    return cleaned.strip("_-")
+
+
+def _active_screen_patterns(stage: str, *, citation_searching: bool = False) -> list[str]:
+    """human readable hint: choose normal or citation-search CSV patterns from user config."""
+
+    if citation_searching:
+        configured = CITATION_SEARCHING_STAGE_RULES.get(stage, {})
+        patterns = configured.get("screen_patterns", [])
+        return [str(pattern) for pattern in patterns]
+    return [str(pattern) for pattern in STAGE_RULES.get(stage, {}).get("screen_patterns", [])]
+
+
+def _prepare_citation_searching_delta(csv_dir: Path, stage: str) -> list[str]:
+    """human readable hint: diff citation-search exports before LLM screening."""
+
+    parser = CovidenceCitationParser()
+    targets = parser.find_target_files(str(csv_dir), stage)
+    parser.ingest_and_diff(
+        current_export_path=targets["citation"],
+        previous_export_path=targets["baseline"],
+        stage=stage,
+    )
+    output_dir = csv_dir / "citation_searching_delta"
+    exported = parser.export_for_screening(str(output_dir))
+    print(
+        "[citation] Delta extraction complete: "
+        f"baseline={parser.audit.baseline_total_records} "
+        f"citation_export={parser.audit.citation_total_records} "
+        f"filtered_old={parser.audit.old_records_filtered_out} "
+        f"novel={parser.audit.novel_records_for_screening}"
+    )
+    print(f"[citation] Audit log: {exported['log']}")
+    return [exported["csv"]]
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """human readable hint: expose run-scoped input selection without changing user_orchestrator.py."""
+
+    parser = argparse.ArgumentParser(description="Run one review-pipeline stage.")
+    parser.add_argument(
+        "--stage",
+        choices=sorted(STAGE_RULES),
+        default=None,
+        help="Override CURRENT_STAGE for this terminal run.",
+    )
+    parser.add_argument(
+        "--input-file",
+        action="append",
+        default=[],
+        help="Exact CSV input file for this run. Repeat for multiple files. Relative paths resolve from input/.",
+    )
+    parser.add_argument(
+        "--run-scope",
+        default=None,
+        help="Optional output/QC namespace such as citation_searching to separate this run from normal screening.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
     """Compatibility entrypoint that runs the class-based main workflow."""
 
-    MainWorkflow().run()
+    args = _parse_args(argv)
+    MainWorkflow(
+        stage=args.stage,
+        input_files=list(args.input_file or []),
+        run_scope=args.run_scope,
+    ).run()
 
 
 if __name__ == "__main__":

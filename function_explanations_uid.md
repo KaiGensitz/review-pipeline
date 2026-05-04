@@ -51,6 +51,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` is the optional bridge between human prompt section wording and schema domains. Keep review-topic vocabulary here or in the prompt/schema CSV, not inside pipeline Python.
 - Human readable hint: `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS` controls aggregate extraction output labels, including the AI reviewer label, while `DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES` supplies optional fallback consensus-column aliases for variables.
 - Human readable hint: `PROMPT_SIGNAL_SECTION_ALIASES` defines which prompt section names are treated as primary/secondary retrieval signal lists when prompts contain include/exclude sections.
+- Human readable hint: `CITATION_SEARCHING_SCREENING` switches screening into the citation-search workflow, reads `CITATION_SEARCHING_STAGE_RULES`, runs delta extraction against the baseline export, skips QC sampling, and keeps outputs scoped separately.
 ### Script-level functions
 - Human readable hint: compatibility wrappers or helper functions used by the primary class.
 
@@ -79,7 +80,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - __init__ parameters: none
 
 #### MainWorkflow.__init__()
-- Human readable hint: stores the active stage, input folder, and QC sample rate.
+- Human readable hint: stores the active stage, input folder, QC sample rate, optional exact input files, and optional run scope for separated citation-search runs.
 
 #### MainWorkflow.run()
 - Human readable hint: readable stage decision tree; helper details now live in focused `pipeline/additions` modules.
@@ -109,7 +110,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: run QC screening, validation, and the user decision gate before remaining-paper processing.
 
 #### main()
-- Human readable hint: compatibility entrypoint that runs `MainWorkflow`.
+- Human readable hint: compatibility entrypoint that parses optional `--stage`, `--input-file`, and `--run-scope` arguments before running `MainWorkflow`.
 
 ## pipeline/additions/retry_flow.py
 
@@ -744,6 +745,30 @@ This appendix provides function-level explanations for scripts and classes in th
 
 #### extract_year_from_metadata(row)
 - Human readable hint: parse a publication year from configured year/date columns without assuming one export vendor.
+
+## pipeline/core/citation_io.py
+
+### Class CovidenceCitationParser
+- Human readable hint: citation-search ingestion bridge that converts an upstream deduplicated citation CSV into generic screening records using `CSV_METADATA_COLUMN_ALIASES`.
+- __init__ parameters: none
+
+#### CovidenceCitationParser.__init__()
+- Human readable hint: initialize parser state, source tracking, and missing-metadata counters.
+
+#### CovidenceCitationParser.ingest_covidence_csv(filepath)
+- Human readable hint: read a citation CSV, resolve metadata through user-configured aliases, standardize publication fields, and flag missing title/abstract/DOI values without failing the run.
+
+#### CovidenceCitationParser.find_target_files(input_dir, stage)
+- Human readable hint: locate the newest baseline database export and citation-search whole-stage export from strict stage-specific filename patterns.
+
+#### CovidenceCitationParser.ingest_and_diff(current_export_path, previous_export_path, stage)
+- Human readable hint: read current and baseline exports with Pandas, filter already-seen rows by configured paper ID aliases with DOI/title fallback, and standardize only novel records.
+
+#### CovidenceCitationParser.export_for_screening(output_dir)
+- Human readable hint: write a citation-search novel-record handoff CSV, a JSONL audit copy, and `citation_ingestion_log.txt`; default filenames match the citation-search stage patterns.
+
+#### CovidenceCitationParser._standardize_row(row, row_number, source_path)
+- Human readable hint: map one source row into generic citation metadata and ingestion flags.
 
 ## pipeline/core/screening_schema.py
 

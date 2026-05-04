@@ -133,11 +133,13 @@ Behavior notes:
 
 - `title_abstract`
   - input CSV: `*_screen_csv_*.csv`
+  - citation-search handoff: set `CITATION_SEARCHING_SCREENING=True` in [config/user_orchestrator.py](config/user_orchestrator.py) and place the whole-stage export as `citationSearching_title-abstract_*.csv`; citation-search mode diffs against `*_screen_csv_*.csv` and skips QC sampling
   - Knowledge-base default: [knowledge-base/title_abstract_pos-neg_examples.csv](knowledge-base/title_abstract_pos-neg_examples.csv)
   - Knowledge-base override: set `KNOWLEDGE_BASE_FILES["title_abstract"]` or `KB_FILE_OVERRIDES["title_abstract"]` in [config/user_orchestrator.py](config/user_orchestrator.py)
   - LLM input behavior: full `Title + Abstract` is passed directly to `{data}` (no chunking/top-k filtering in this stage)
 - `full_text`
   - input CSV: `*_select_csv_*.csv`
+  - citation-search input CSV: with `CITATION_SEARCHING_SCREENING=True`, place the whole-stage export as `citationSearching_full-text_*.csv`; citation-search mode diffs against `*_select_csv_*.csv` and skips QC sampling
   - Knowledge-base default: [knowledge-base/full_text_pos-neg_examples.csv](knowledge-base/full_text_pos-neg_examples.csv)
   - Knowledge-base override: set `KNOWLEDGE_BASE_FILES["full_text"]` or `KB_FILE_OVERRIDES["full_text"]` in [config/user_orchestrator.py](config/user_orchestrator.py)
   - Optional cleaned-hybrid draft: [knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv](knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv)
@@ -200,6 +202,7 @@ Dynamic behavior implemented in pipeline:
 - Data-extraction validation is dynamic: each KB `variable_name` maps to the exact Covidence header in `covidence_column_name`.
 - Data-extraction prompting is prompt-driven plus CSV-validated: users edit the prompt for review concepts/domains and edit `DATA_EXTRACTION_SCHEMA_FILE` for exact output variables, value types, missing-value rules, and Covidence headers.
 - Input metadata and aggregate-output administrative labels are config-driven through `CSV_METADATA_COLUMN_ALIASES` and `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, so a different export system should require config edits rather than pipeline edits.
+- Citation-search runs can be separated from normal screening by setting `CITATION_SEARCHING_SCREENING=True`; the pipeline then reads citation-search patterns from `CITATION_SEARCHING_STAGE_RULES`, generates a delta CSV under `input/citation_searching_delta/`, skips QC sampling, and writes scoped outputs under `citation_searching`.
 - No code edits are required for topic changes if prompt, knowledge base, and `user_orchestrator.py` are updated consistently.
 
 ## Quality Control and Retry Behavior

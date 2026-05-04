@@ -12,13 +12,14 @@ load_dotenv(REPO_ROOT / ".env")
 # USER-EDITABLE RUN SETTINGS
 # ---------------------------------------------------------------------------
 
-CURRENT_STAGE = "data_extraction"  # user-editable: title_abstract | full_text | data_extraction
+CURRENT_STAGE = "title_abstract"  # user-editable: title_abstract | full_text | data_extraction
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")  # API key loaded from .env
 LLM_MODEL = "gpt-oss-120b"  # screening model name on your endpoint; working for sure: "gpt-oss-120b" (17.04.2026)
 EMBED_MODEL = "qwen3-embedding-0.6b"  # embedding model name on your endpoint; working for sure: "qwen3-embedding-0.6b" (17.04.2026)
 CSV_DIR = REPO_ROOT / "input"  # where you drop Covidence exports
 QC_ENABLED = True  # False = skip QC sampling and go straight to full screening
 QC_SAMPLE_RATE = 0.1  # 0.0–1.0; 0.10 ~10% QC sample
+CITATION_SEARCHING_SCREENING = True  # True = use citation-search CSV patterns and skip QC sampling
 
 # USER-EDITABLE STUDY TAGS.
 # human readable hint: these tags encode the current protocol's exclusion reasons.
@@ -73,6 +74,21 @@ STAGE_RULES = {
 		"screen_patterns": ["*_included_csv_*.csv"],
 		"neg_patterns": ["*_excluded_csv_*.csv"],
 		"pdf_dir": "per_paper_data_extraction",
+	},
+}
+
+# USER-EDITABLE CITATION-SEARCH SCREENING SETTINGS.
+# human readable hint: citation-search screening is a separate no-QC workflow.
+# Set CITATION_SEARCHING_SCREENING=True and CURRENT_STAGE to the stage you want.
+CITATION_SEARCHING_STAGE_RULES = {
+	"title_abstract": {
+		"screen_patterns": ["citationSearching_title-abstract_*.csv"],
+	},
+	"full_text": {
+		"screen_patterns": ["citationSearching_full-text_*.csv"],
+	},
+	"data_extraction": {
+		"screen_patterns": ["citationSearching_data-extraction_*.csv"],
 	},
 }
 

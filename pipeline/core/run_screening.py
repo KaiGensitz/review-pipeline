@@ -119,7 +119,11 @@ def _stage_root(stage: str) -> Path:
     return DEFAULT_STAGE_ROOT / stage
 
 
-def _existing_qc_files(stage_root: Path, stage_prefix: str) -> tuple[Path | None, Path | None]:
+def _existing_qc_files(
+    stage_root: Path,
+    stage_prefix: str,
+    run_label: str = "qc_sample",
+) -> tuple[Path | None, Path | None]:
     """Reuse the latest QC sample if present so the list stays stable across runs.
 
     Args:
@@ -131,12 +135,13 @@ def _existing_qc_files(stage_root: Path, stage_prefix: str) -> tuple[Path | None
 
     Note: QC sample reuse ensures the same list is validated.
     """
-    matches = sorted(stage_root.glob(f"{stage_prefix}qc_sample_batch_*.csv"))
+    qc_tag = "qc_sample" if run_label == "qc_sample" else run_label
+    matches = sorted(stage_root.glob(f"{stage_prefix}{qc_tag}_batch_*.csv"))
     if not matches:
         return None, None
     chosen = max(matches, key=lambda p: p.stat().st_mtime)
-    date_tag = chosen.stem.replace(f"{stage_prefix}qc_sample_batch_", "")
-    readable = stage_root / f"{stage_prefix}qc_sample_batch_readable_{date_tag}.txt"
+    date_tag = chosen.stem.replace(f"{stage_prefix}{qc_tag}_batch_", "")
+    readable = stage_root / f"{stage_prefix}{qc_tag}_batch_readable_{date_tag}.txt"
     return chosen, readable
 
 
@@ -272,13 +277,22 @@ def _safe_bool(val, default=None):
     raise ValueError(f"Cannot convert {val!r} to bool")
 
 
-def _append_qc_records_to_remaining(stage_root: Path, stage_prefix: str, remaining_path: Path) -> None:
+def _append_qc_records_to_remaining(
+    stage_root: Path,
+    stage_prefix: str,
+    remaining_path: Path,
+    qc_run_label: str = "qc_sample",
+) -> None:
     """Append QC sample eligibility records to the remaining-sample output."""
-    patterns = [
-        f"{stage_prefix}qc_sample_main_eligibility_*.jsonl",  # current naming
-        f"{stage_prefix}qc_sample_eligibility_*.jsonl",       # fallback naming
-        f"{stage_prefix}eligibility_qc_sample_*.jsonl",       # legacy naming
-    ]
+    qc_tag = "qc_sample" if qc_run_label == "qc_sample" else qc_run_label
+    patterns = [f"{stage_prefix}{qc_tag}_main_eligibility_*.jsonl"]
+    if qc_run_label == "qc_sample":
+        patterns.extend(
+            [
+                f"{stage_prefix}qc_sample_eligibility_*.jsonl",       # fallback naming
+                f"{stage_prefix}eligibility_qc_sample_*.jsonl",       # legacy naming
+            ]
+        )
     qc_files: list[Path] = []
     for pattern in patterns:
         qc_files.extend(
@@ -378,6 +392,7 @@ def run_pipeline(
     stage: str = CURRENT_STAGE,
     split_only: bool = False,
     csv_dir: str | None = None,
+    input_files: list[str | Path] | None = None,
     kb_file: str | None = None,
     eligibility_output: Path | None = None,
     chunks_output: Path | None = None,
@@ -408,6 +423,8 @@ def run_pipeline(
         stage: Stage name (title_abstract/full_text/data_extraction).
         split_only: If True, only prepare folders and exit.
         csv_dir: Override input/ folder path.
+        input_files: Optional exact CSV file paths for this run. Relative
+            paths are resolved from csv_dir and bypass stage glob patterns.
         kb_file: Override KB file path for this run.
         eligibility_output: Override eligibility JSONL output path.
         chunks_output: Override selected-chunks JSONL output path.
@@ -477,13 +494,16 @@ def run_pipeline(
         else Path(stage_root / f"{base_prefix}_resource_usage_{campaign_suffix}.log"),
         stage,
     )
-    existing_qc_path, existing_qc_readable = _existing_qc_files(stage_root, stage_prefix) if not force_new_qc else (None, None)
-    qc_suffix = date_label if not existing_qc_path else existing_qc_path.stem.replace(f"{stage_prefix}qc_sample_batch_", "")
+    existing_qc_path, existing_qc_readable = (
+        _existing_qc_files(stage_root, stage_prefix, run_label=run_label) if not force_new_qc else (None, None)
+    )
+    qc_tag = "qc_sample" if run_label == "qc_sample" else run_label
+    qc_suffix = date_label if not existing_qc_path else existing_qc_path.stem.replace(f"{stage_prefix}{qc_tag}_batch_", "")
     qc_sample_path = existing_qc_path or _stage_prefixed(
-        stage_root / f"{stage_prefix}qc_sample_batch_{qc_suffix}.csv", stage
+        stage_root / f"{stage_prefix}{qc_tag}_batch_{qc_suffix}.csv", stage
     )
     qc_sample_readable_path = existing_qc_readable or _stage_prefixed(
-        stage_root / f"{stage_prefix}qc_sample_batch_readable_{qc_suffix}.txt", stage
+        stage_root / f"{stage_prefix}{qc_tag}_batch_readable_{qc_suffix}.txt", stage
     )
     overflow_log_path = _stage_prefixed(
         Path(PATH_SETTINGS.get("overflow_log", stage_root / f"{stage_prefix}overflow_log_{timestamp_label}.txt")), stage
@@ -510,7 +530,7 @@ def run_pipeline(
 
     examples = load_labeled_examples(kb_file)
     neg_patterns = STAGE_RULES.get(stage, {}).get("neg_patterns", [])
-    if neg_patterns:
+    if neg_patterns and not input_files:
         neg_examples = _load_negative_examples_from_csvs(csv_dir_path, neg_patterns)
         existing_neg_texts = {
             " ".join(str(item.get("text", "")).lower().split())
@@ -584,6 +604,7 @@ def run_pipeline(
         summary_to_console=False,
         artifact_mode=artifact_mode,
         use_advanced_pdf_parser=use_advanced_pdf_parser,
+        input_files=input_files,
         examples=cast(list[dict], examples),
     )
     stage_csvs = [str(p) for p in pipeline._stage_csv_files()]
@@ -601,7 +622,8 @@ def run_pipeline(
     elig_path = eligibility_output.resolve()
     if qc_sample_ids and confirm_sampling and not qc_only:
         # human readable hint: QC records are appended once into the remaining file to avoid re-screening the sample.
-        _append_qc_records_to_remaining(stage_root, stage_prefix, elig_path)
+        qc_run_label = run_label.replace("remaining_sample", "qc_sample", 1)
+        _append_qc_records_to_remaining(stage_root, stage_prefix, elig_path, qc_run_label=qc_run_label)
     chunks_path = chunks_output.resolve()
     text_path = text_output.resolve()
     resource_log_resolved = resource_log_path.resolve()

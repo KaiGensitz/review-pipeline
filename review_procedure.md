@@ -124,6 +124,7 @@ Use this section when you need to know exactly when parsing, embeddings, LLM cal
 ## Stage 1: Title Abstract
 
 1. Import screen CSV to `input/` (`*_screen_csv_*.csv`).
+	- For citation-search records, set `CITATION_SEARCHING_SCREENING=True` and place the whole-stage export as `citationSearching_title-abstract_*.csv`. The parser diffs it against `*_screen_csv_*.csv`, writes novel records to `input/citation_searching_delta/`, and skips QC sampling.
 2. Prepare `knowledge-base/title_abstract_pos-neg_examples.csv` (or configure an override in `KB_FILE_OVERRIDES["title_abstract"]`).
 3. Run `main.py` to create and screen QC sample.
 4. Humans review the same QC sample.
@@ -133,6 +134,7 @@ Use this section when you need to know exactly when parsing, embeddings, LLM cal
 ## Stage 2: Full Text
 
 1. Export select CSV to `input/` (`*_select_csv_*.csv`).
+	- For citation-search full-text screening, set `CITATION_SEARCHING_SCREENING=True` and place the whole-stage export as `citationSearching_full-text_*.csv`. The parser diffs it against `*_select_csv_*.csv`, writes novel records to `input/citation_searching_delta/`, and skips QC sampling.
 2. Prepare `knowledge-base/full_text_pos-neg_examples.csv` (or configure an override in `KB_FILE_OVERRIDES["full_text"]`).
 	- Optional override target: `knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv`.
 	- If using the draft, confirm `knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json` exists.
@@ -166,6 +168,8 @@ Use this section when you need to know exactly when parsing, embeddings, LLM cal
 
 - Windows main run: `.venv\Scripts\python main.py`
 - macOS/Linux main run: `python main.py`
+- Citation-search title/abstract run: set `CURRENT_STAGE="title_abstract"` and `CITATION_SEARCHING_SCREENING=True`, then run `.venv\Scripts\python main.py`
+- Citation-search full-text run: set `CURRENT_STAGE="full_text"` and `CITATION_SEARCHING_SCREENING=True`, then run `.venv\Scripts\python main.py`
 - Manual validation (optional): `python -m pipeline.additions.stats_engine`
 - Manual direct data extraction (optional): `python -m pipeline.core.run_extraction`
 - Manual reproducibility trace (optional): `python -m pipeline.additions.input_trace --paper-id <ID> --stage <stage>`

@@ -212,6 +212,7 @@ PUBLISHER_BOILERPLATE_WEAK_PATTERNS = [
 ALWAYS_INCLUDED_CHUNK_KINDS = frozenset({"title"})
 REFERENCE_HEAVY_PATTERN = re.compile(r"\b(references|bibliography|acknowledg(?:e)?ments?)\b", re.IGNORECASE)
 INLINE_CITATION_PATTERN = re.compile(r"\[[0-9,\s\-]+\]|\([12][0-9]{3}\)")
+MISSING_ABSTRACT_MARKERS = {"", "na", "n/a", "not available", "none", "null", "nan"}
 METHOD_EVIDENCE_PATTERN = re.compile(
     r"\b(methods?|methodology|materials?\s+and\s+methods?|study\s+design|participants?|recruit(?:ed|ment)?|intervention|procedure|protocol|randomi[sz]ed|outcome\s+measure|baseline|follow[- ]?up)\b",
     re.IGNORECASE,
@@ -301,6 +302,7 @@ class PaperScreeningPipeline:
         summary_to_console: bool = True,
         artifact_mode: str | None = None,
         use_advanced_pdf_parser: bool | None = None,
+        input_files: list[str | Path] | None = None,
     ) -> None:
         """
         Initialize the screening/extraction pipeline with configuration.
@@ -309,6 +311,7 @@ class PaperScreeningPipeline:
         """
 
         self.csv_dir = Path(csv_dir)
+        self.input_files = [Path(path) for path in (input_files or [])]
         self.knowledge_base_path = Path(knowledge_base_path)
         self.eligibility_output_path = Path(eligibility_output_path)
         self.chunks_output_path = Path(chunks_output_path)
@@ -1741,7 +1744,13 @@ class PaperScreeningPipeline:
         failure_type: str | None = None
         failure_reason: str | None = None
 
-        if not use_api:
+        missing_abstract_reason = self._missing_title_abstract_reason(paper)
+        if missing_abstract_reason and self._insufficient_context_reason_key:
+            llm_decision = json.dumps(
+                self._deterministic_insufficient_context_decision(paper, missing_abstract_reason),
+                ensure_ascii=False,
+            )
+        elif not use_api:
             llm_decision = "LLM disabled: use_api=False; no API call made."
         else:
             llm_decision = None
@@ -1786,7 +1795,7 @@ class PaperScreeningPipeline:
                     failure_type = None
                     failure_reason = None
                     break
-                except ValidationError as exc:
+                except (ValidationError, ValueError) as exc:
                     llm_decision_incomplete = True
                     failure_type = "llm_validation_error"
                     failure_reason = f"Schema validation failed: {exc}"
@@ -1843,7 +1852,11 @@ class PaperScreeningPipeline:
                 "selection_trace": {
                     "fallback_triggered": False,
                     "effective_top_k": self.top_k,
-                    "notes": "title_abstract uses full input block by design",
+                    "notes": (
+                        f"deterministic insufficient_context: {missing_abstract_reason}"
+                        if missing_abstract_reason
+                        else "title_abstract uses full input block by design"
+                    ),
                 },
             },
             "metadata": output_metadata,
@@ -1861,6 +1874,39 @@ class PaperScreeningPipeline:
         }
 
         return record, token_stats, None
+
+    def _missing_title_abstract_reason(self, paper: PaperRecord) -> str:
+        """human readable hint: detect records that cannot support title/abstract screening."""
+
+        metadata = paper.metadata or {}
+        flag = str(metadata.get("citation_ingestion_missing_abstract") or "").strip().casefold()
+        if flag in {"true", "1", "yes"}:
+            return "abstract_missing_in_citation_ingestion"
+        abstract_text = str(paper.abstract or "").strip()
+        if abstract_text.casefold() in MISSING_ABSTRACT_MARKERS:
+            return "abstract_missing_or_placeholder"
+        return ""
+
+    def _deterministic_insufficient_context_decision(self, paper: PaperRecord, reason: str) -> dict[str, Any]:
+        """human readable hint: exclude title/abstract records with no usable abstract without calling the LLM."""
+
+        reason_key = self._insufficient_context_reason_key or "insufficient_context"
+        payload: dict[str, Any] = {
+            "step_by_step_deliberation": (
+                "The record has no usable abstract text for title/abstract screening."
+            ),
+            "confidence_score": 1.0,
+            "justification": (
+                "The abstract is missing or encoded as a missing-value placeholder; "
+                "title/abstract screening therefore has insufficient context."
+            ),
+            "exclusion_reason_category": reason_key,
+            "is_eligible": False,
+        }
+        for key in self._active_exclusion_flag_keys:
+            payload[key] = key == reason_key
+        payload["deterministic_screening_reason"] = reason
+        return payload
 
     async def _process_paper_async(self, paper: PaperRecord) -> tuple[dict, dict, dict | None]:
         """human readable hint: shared async paper processor used by both async and sync execution paths."""
@@ -4730,6 +4776,17 @@ class PaperScreeningPipeline:
 
         if select_only in self._stage_csv_cache:
             return list(self._stage_csv_cache[select_only])
+
+        if self.input_files:
+            resolved: list[Path] = []
+            for configured_path in self.input_files:
+                path = configured_path
+                if not path.is_absolute():
+                    path = path if path.exists() else self.csv_dir / path
+                if path.exists() and path.is_file():
+                    resolved.append(path)
+            self._stage_csv_cache[select_only] = resolved
+            return list(resolved)
 
         if select_only:
             files = sorted(self.csv_dir.glob("*_select_csv_*.csv"))

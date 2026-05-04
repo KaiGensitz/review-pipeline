@@ -58,6 +58,7 @@ Cross-reference: for an operator-facing 1-X runtime sequence (including exactly 
 ## Pipeline Behavior by Stage
 
 - `title_abstract`: full `Title + Abstract` is injected directly into prompt `{data}` (no chunking/top-k filtering), eligibility JSONL outputs.
+- Citation-search CSV ingestion is isolated in `pipeline/core/citation_io.py`; it uses `CSV_METADATA_COLUMN_ALIASES` to locate IDs/DOIs/titles, diffs whole-stage citation exports against baseline database exports, and writes novel-record CSV/JSONL/log audit files without hardcoding export headers in pipeline code. When `CITATION_SEARCHING_SCREENING=True`, `main.py` runs this delta extraction first, skips QC sampling, and keeps outputs separate from normal stage glob runs with the `citation_searching` scope.
 - `full_text`: per-paper folder/PDF workflow, page-line chunking with relevance selection (`top_k`/threshold), eligibility JSONL outputs, and compact/full per-paper artifact persistence.
 - `data_extraction`: human-readable extraction prompt plus the configured extraction schema CSV, prompt-derived guidance, KB-derived dynamic schema validation, per-paper extraction JSONL/CSV outputs, evidence JSON. The default mode sends one request per configured schema-domain batch.
 - External CSV metadata headers and extraction aggregate administrative columns are resolved through user-editable aliases in `config/user_orchestrator.py`, keeping `pipeline/` Python generic across review topics and export systems.
