@@ -15,7 +15,7 @@ def _parse_args() -> argparse.Namespace:
     """human readable hint: keep the older command name while routing to the generic validator."""
 
     parser = argparse.ArgumentParser(description="Validate dynamic data-extraction outputs.")
-    parser.add_argument("--consensus", help="Path to Covidence gold-standard CSV")
+    parser.add_argument("--consensus", help="Path to human gold-standard CSV")
     return parser.parse_args()
 
 

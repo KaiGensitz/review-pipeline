@@ -31,6 +31,7 @@ from pipeline.core.extraction_schema import (
     ExtractionVariable,
     MISSING_TEXT_VALUE,
 )
+from pipeline.core.metadata_aliases import metadata_aliases
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 OUTPUT_DIR = ROOT / "output" / CURRENT_STAGE
@@ -105,7 +106,7 @@ def _clean_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _normalize_covidence_id_value(value: object) -> str:
+def _normalize_paper_id_value(value: object) -> str:
     """human readable hint: normalize ID formatting so '#250', '250', and '250.0' map to the same key."""
 
     text = "" if value is None else str(value).strip()
@@ -121,11 +122,11 @@ def _normalize_covidence_id_value(value: object) -> str:
 def _normalize_id_column(df: pd.DataFrame) -> pd.Series:
     """Find the best ID column and return it as strings."""
 
-    candidates = ["Covidence #", "Covidence#", "paper_id", "id", "ID"]
+    candidates = metadata_aliases("paper_id")
     for col in candidates:
         if col in df.columns:
-            return df[col].apply(_normalize_covidence_id_value)
-    raise KeyError("Could not find an ID column in Covidence export")
+            return df[col].apply(_normalize_paper_id_value)
+    raise KeyError("Could not find an ID column in human export")
 
 
 def _normalize_tag_text(value: str) -> str:
@@ -135,7 +136,7 @@ def _normalize_tag_text(value: str) -> str:
 
 
 def _extract_tags(value: Optional[object]) -> list[str]:
-    """human readable hint: map explicit Covidence tags to the curated include list; ignores notes."""
+    """human readable hint: map explicit human-export tags to the curated include list; ignores notes."""
 
     if not isinstance(value, str):
         return []
@@ -193,7 +194,7 @@ def _load_qc_human_file(path: Path) -> pd.DataFrame:
     """Load a human QC-only file with decisions for the QC sample."""
 
     df = _clean_cols(pd.read_csv(path))
-    df["covidence_id"] = _normalize_id_column(df)
+    df["paper_id"] = _normalize_id_column(df)
 
     decision_col = None
     for cand in [
@@ -268,12 +269,12 @@ def _load_human(stage: str, args) -> pd.DataFrame:
         df_exc["human_note"] = df_exc[note_col].apply(_extract_ft_reason) if note_col else "Unspecified Reason"
         df_exc["human_tag"] = df_exc[tag_col].apply(lambda v: " | ".join(_extract_tags(v)) if isinstance(v, str) else "") if tag_col else ""
 
-        df_inc["covidence_id"] = _normalize_id_column(df_inc)
-        df_exc["covidence_id"] = _normalize_id_column(df_exc)
+        df_inc["paper_id"] = _normalize_id_column(df_inc)
+        df_exc["paper_id"] = _normalize_id_column(df_exc)
 
         common_cols = list(set(df_inc.columns) & set(df_exc.columns))
         human = pd.concat([df_inc[common_cols], df_exc[common_cols]], ignore_index=True)
-        human = human.drop_duplicates(subset=["covidence_id"], keep="first")
+        human = human.drop_duplicates(subset=["paper_id"], keep="first")
         return human
 
     select_path = _auto_or_require(
@@ -322,12 +323,12 @@ def _load_human(stage: str, args) -> pd.DataFrame:
     )
     df_no["human_tag"] = df_no[tag_col_no].apply(lambda v: " | ".join(_extract_tags(v)) if isinstance(v, str) else "") if tag_col_no else ""
 
-    df_yes["covidence_id"] = _normalize_id_column(df_yes)
-    df_no["covidence_id"] = _normalize_id_column(df_no)
+    df_yes["paper_id"] = _normalize_id_column(df_yes)
+    df_no["paper_id"] = _normalize_id_column(df_no)
 
     common_cols = list(set(df_yes.columns) & set(df_no.columns))
     human = pd.concat([df_yes[common_cols], df_no[common_cols]], ignore_index=True)
-    human = human.drop_duplicates(subset=["covidence_id"], keep="first")
+    human = human.drop_duplicates(subset=["paper_id"], keep="first")
     return human
 
 
@@ -404,7 +405,7 @@ def _load_ai() -> tuple[pd.DataFrame, Path]:
                     if not line.strip() or '"meta":' in line:
                         continue
                     payload = json.loads(line)
-                    paper_id = _normalize_covidence_id_value(payload.get("paper_id", ""))
+                    paper_id = _normalize_paper_id_value(payload.get("paper_id", ""))
                     if not paper_id:
                         continue
                     decision_raw = payload.get("llm_decision")
@@ -435,22 +436,20 @@ def _merge(ai: pd.DataFrame, human: pd.DataFrame) -> pd.DataFrame:
 
     human = human.copy()
     ai = ai.copy()
-    ai.rename(columns={"paper_id": "covidence_id"}, inplace=True)
-
-    if "covidence_id" not in ai.columns:
-        ai["covidence_id"] = pd.Series(dtype="string")
+    if "paper_id" not in ai.columns:
+        ai["paper_id"] = pd.Series(dtype="string")
     if "ai_decision" not in ai.columns:
         ai["ai_decision"] = pd.Series(dtype="float64")
     if "ai_reason" not in ai.columns:
         ai["ai_reason"] = pd.Series(dtype="string")
 
-    merged = human.merge(ai, on="covidence_id", how="inner", suffixes=("_human", "_ai"))
-    if merged["covidence_id"].duplicated().any():
-        dupes = merged[merged["covidence_id"].duplicated()]["covidence_id"].unique().tolist()
+    merged = human.merge(ai, on="paper_id", how="inner", suffixes=("_human", "_ai"))
+    if merged["paper_id"].duplicated().any():
+        dupes = merged[merged["paper_id"].duplicated()]["paper_id"].unique().tolist()
         raise ValueError(f"Duplicate IDs after merge: {dupes}")
 
     merged["ai_decision"] = merged["ai_decision"].fillna(-1).astype(int)
-    merged = merged.sort_values("covidence_id").reset_index(drop=True)
+    merged = merged.sort_values("paper_id").reset_index(drop=True)
     return merged
 
 
@@ -539,7 +538,7 @@ def _write_alignment(df: pd.DataFrame, suffix: str | None = None) -> None:
         return _extract_tags(val)
 
     out = df.copy()
-    out.rename(columns={"covidence_id": "ID"}, inplace=True)
+    out.rename(columns={"paper_id": "ID"}, inplace=True)
     out["decision_match"] = out["ai_decision"] == out["human_decision"]
     # human readable hint: normalize ai_reason to empty string for included and for any None/"None"/"{}"
     out["ai_reason"] = out["ai_reason"].replace(["None", "{}"], "")
@@ -551,8 +550,8 @@ def _write_alignment(df: pd.DataFrame, suffix: str | None = None) -> None:
     out["reason_match"] = [True if not a and not h else bool(a and h and (a[0] in h)) for a, h in zip(ai_tags, human_tags_series)]
 
     metadata_cols: list[str] = []
-    for variants in [("Title", "title"), ("Abstract", "abstract"), ("Authors", "authors"), ("Year", "year")]:
-        for candidate in variants:
+    for alias_key in ("title", "abstract", "authors", "publication_year"):
+        for candidate in metadata_aliases(alias_key):
             if candidate in out.columns:
                 metadata_cols.append(candidate)
                 break
@@ -581,7 +580,7 @@ def _write_report(stats: dict, tp: int, tn: int, fp: int, fn: int, stage: str, s
     lines: list[str] = []
     lines.append(f"Validation report (AI vs Human) - stage: {stage}")
     lines.append(
-        "This study compares the AI screening decisions against human ground truth from Covidence exports. "
+        "This study compares the AI screening decisions against human ground truth from configured CSV exports. "
         "Metrics emphasize agreement and error balance, with prevalence-adjusted bias-adjusted kappa (PABAK) "
         "to reduce skew from class imbalance (Byrt et al., 1993)."
     )
@@ -701,7 +700,7 @@ def _load_qc_sample_ids(suffix: str | None) -> set[str] | None:
         return None
 
     normalized = {
-        _normalize_covidence_id_value(val)
+        _normalize_paper_id_value(val)
         for val in df["paper_id"].dropna().tolist()
     }
     normalized.discard("")
@@ -718,7 +717,7 @@ def validate_screening(stage: str, args) -> None:
     suffix = _extract_timestamp_suffix(ai_path)
     qc_ids = _load_qc_sample_ids(suffix)
     if qc_ids:
-        filtered = merged[merged["covidence_id"].isin(qc_ids)].copy()
+        filtered = merged[merged["paper_id"].isin(qc_ids)].copy()
         if filtered.empty:
             print(
                 "[qc] QC-ID filtering produced zero overlap (likely ID-format mismatch across files). "
@@ -794,7 +793,7 @@ def _quote_from_extracted_data(extracted: Any, variable: ExtractionVariable) -> 
 
 
 def _normalization_key(value: Any, variable: ExtractionVariable) -> Any:
-    """human readable hint: coerce AI and Covidence values into comparable Python values by KB type."""
+    """human readable hint: coerce AI and human-export values into comparable Python values by KB type."""
 
     if _is_extraction_missing(value, variable):
         return _missing_key(variable)
@@ -823,7 +822,7 @@ def _missing_key(variable: ExtractionVariable) -> Any:
 
 
 def _is_extraction_missing(value: Any, variable: ExtractionVariable) -> bool:
-    """human readable hint: treat Covidence n/a and LLM missing conventions as the same absence signal."""
+    """human readable hint: treat human n/a and LLM missing conventions as the same absence signal."""
 
     if value is None:
         return True
@@ -844,7 +843,7 @@ def _normalize_scalar(value: Any) -> str:
 
 
 def _normalize_list_items(value: Any) -> list[str]:
-    """human readable hint: split Covidence comma-separated selections and LLM JSON arrays into comparable sets."""
+    """human readable hint: split human-export comma-separated selections and LLM JSON arrays into comparable sets."""
 
     if value is None:
         return []
@@ -871,7 +870,7 @@ def _normalize_list_items(value: Any) -> list[str]:
 
 
 def _normalize_bool(value: Any) -> bool:
-    """human readable hint: normalize yes/no style Covidence exports and JSON booleans."""
+    """human readable hint: normalize yes/no style human exports and JSON booleans."""
 
     if isinstance(value, bool):
         return value
@@ -880,7 +879,7 @@ def _normalize_bool(value: Any) -> bool:
 
 
 def _normalize_number(value: Any, *, integer: bool) -> int | float | None:
-    """human readable hint: compare numeric Covidence and JSON values even when one side is text."""
+    """human readable hint: compare numeric human-export and JSON values even when one side is text."""
 
     try:
         number = float(str(value).strip())
@@ -892,16 +891,16 @@ def _normalize_number(value: Any, *, integer: bool) -> int | float | None:
 
 
 def validate_extraction(consensus_path: Optional[str] = None) -> None:
-    """Validate extraction outputs against Covidence gold-standard columns mapped by the KB."""
+    """Validate extraction outputs against human gold-standard columns mapped by the KB."""
 
     schema = DynamicExtractionSchema.from_kb()
     human_path = Path(consensus_path) if consensus_path else EXTRACTION_HUMAN_PATH
     if not human_path.exists():
-        raise FileNotFoundError(f"Missing human Covidence gold-standard file at {human_path}")
+        raise FileNotFoundError(f"Missing human gold-standard file at {human_path}")
 
-    # human readable hint: load the Covidence export once and normalize the paper identifier for AI-human matching.
+    # human readable hint: load the human export once and normalize the paper identifier for AI-human matching.
     human_wide = _clean_cols(pd.read_csv(human_path))
-    human_wide["covidence_id"] = _normalize_id_column(human_wide)
+    human_wide["paper_id"] = _normalize_id_column(human_wide)
     missing_columns = [
         variable.covidence_column_name
         for variable in schema.variables
@@ -909,13 +908,13 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
     ]
     if missing_columns:
         raise KeyError(
-            "Covidence export is missing KB-mapped column(s): " + ", ".join(sorted(set(missing_columns)))
+            "Human export is missing KB-mapped column(s): " + ", ".join(sorted(set(missing_columns)))
         )
 
     # human readable hint: index AI JSONL records by normalized paper ID and keep the LLM quote beside each value.
     ai_by_id: dict[str, dict[str, Any]] = {}
     for payload in _load_ai_extraction_records():
-        pid = _normalize_covidence_id_value(payload.get("paper_id", ""))
+        pid = _normalize_paper_id_value(payload.get("paper_id", ""))
         if not pid:
             continue
         ai_by_id[pid] = payload
@@ -923,7 +922,7 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
     rows: list[dict[str, Any]] = []
     audit_rows: list[dict[str, str]] = []
     for _, human_row in human_wide.iterrows():
-        paper_id = _normalize_covidence_id_value(human_row.get("covidence_id", ""))
+        paper_id = _normalize_paper_id_value(human_row.get("paper_id", ""))
         ai_payload = ai_by_id.get(paper_id, {})
         extracted = ai_payload.get("extracted_data", {}) if isinstance(ai_payload, dict) else {}
 
@@ -965,7 +964,7 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
 
     comparison = pd.DataFrame(rows)
     if comparison.empty:
-        raise ValueError("No comparable extraction rows were produced from the KB and Covidence file.")
+        raise ValueError("No comparable extraction rows were produced from the KB and human file.")
 
     # human readable hint: concordance ignores human-missing cells; accuracy counts both exact present matches and correct absences.
     metric_rows: list[dict[str, Any]] = []
@@ -992,7 +991,7 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
         metric_rows.append(
             {
                 "Variable": variable.variable_name,
-                "Covidence_Column": variable.covidence_column_name,
+                "Consensus_Column": variable.covidence_column_name,
                 "Concordance_Matches": concordance_matches,
                 "Concordance_Total_Human_Present": concordance_n,
                 "Concordance": concordance,
@@ -1021,9 +1020,9 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
     ).to_csv(audit_path, index=False, encoding="utf-8")
 
     lines = [
-        "Extraction validation report (AI vs Covidence gold standard)",
+        "Extraction validation report (AI vs human gold standard)",
         f"Schema KB: {schema.kb_path}",
-        f"Covidence file: {human_path}",
+        f"Human file: {human_path}",
         f"Variables parsed from KB: {len(schema.variables)}",
         f"Total variable-paper comparisons: {len(comparison)}",
         (
@@ -1043,7 +1042,7 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
         concordance = row["Concordance"]
         accuracy = row["Accuracy"]
         lines.append(
-            f"- {row['Variable']} -> {row['Covidence_Column']}: "
+            f"- {row['Variable']} -> {row['Consensus_Column']}: "
             f"concordance={'n/a' if math.isnan(concordance) else f'{concordance:.3f}'}, "
             f"accuracy={'n/a' if math.isnan(accuracy) else f'{accuracy:.3f}'}"
         )
@@ -1058,12 +1057,12 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
 def _parse_args():
     """Parse CLI arguments for validation."""
 
-    parser = argparse.ArgumentParser(description="Validate AI screening against Covidence exports.")
+    parser = argparse.ArgumentParser(description="Validate AI screening against configured human exports.")
     parser.add_argument("--select", help="Path to *_select_csv_* (title_abstract stage)")
     parser.add_argument("--irrelevant", help="Path to *_irrelevant_csv_* (title_abstract stage)")
     parser.add_argument("--included", help="Path to *_included_csv_* (full_text stage)")
     parser.add_argument("--excluded", help="Path to *_excluded_csv_* (full_text stage)")
-    parser.add_argument("--consensus", help="Path to Covidence gold-standard CSV for data_extraction")
+    parser.add_argument("--consensus", help="Path to human gold-standard CSV for data_extraction")
     return parser.parse_args()
 
 
@@ -1094,3 +1093,5 @@ def run_validation() -> None:
 
 if __name__ == "__main__":
     run_validation()
+
+

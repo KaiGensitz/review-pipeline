@@ -106,6 +106,11 @@ Edit [config/user_orchestrator.py](config/user_orchestrator.py):
 - KB selection controls:
 	- `KNOWLEDGE_BASE_FILES` for per-stage default KB paths
 	- `KB_FILE_OVERRIDES` for one-run stage-specific swaps (absolute or repo-relative paths)
+- CSV/export mapping controls:
+	- `CSV_METADATA_COLUMN_ALIASES` for paper ID, title, abstract, authors, year, and other external export headers
+	- `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS` for aggregate extraction output labels and the AI reviewer label
+	- `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` only when prompt sections need extra help matching schema domains
+	- `PROMPT_SIGNAL_SECTION_ALIASES` only when prompt include/exclude section names differ from the configured defaults
 - per-paper artifact controls in `SCREENING_DEFAULTS`:
 	- `artifact_mode`: `compact` (default) or `full`
 	- `compact_keep_legacy_selected_chunks`: keep/remove legacy per-paper `*_selected_chunks.jsonl` in compact mode
@@ -182,7 +187,7 @@ Prepare knowledge-base files:
 
 - [knowledge-base/title_abstract_pos-neg_examples.csv](knowledge-base/title_abstract_pos-neg_examples.csv)
 - [knowledge-base/full_text_pos-neg_examples.csv](knowledge-base/full_text_pos-neg_examples.csv)
-- [knowledge-base/data_extraction_pos-neg_examples.csv](knowledge-base/data_extraction_pos-neg_examples.csv)
+- [knowledge-base/data_extraction_pos-neg_examples.csv](knowledge-base/data_extraction_pos-neg_examples.csv), mainly needed when `data_extraction_evidence_mode="selected_chunks"`
 - [knowledge-base/data_extraction_schema.csv](knowledge-base/data_extraction_schema.csv) for data-extraction fields and Covidence header mapping, unless `DATA_EXTRACTION_SCHEMA_FILE` in [config/user_orchestrator.py](config/user_orchestrator.py) points elsewhere
 - Optional full_text draft: [knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv](knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv)
 - Optional draft report: [knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json](knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json)
@@ -206,7 +211,18 @@ Required columns in the configured extraction schema CSV:
 - `instruction`
 - `covidence_column_name`
 
+Data-extraction prompt/schema relationship:
+- `config/prompt_script_data_extraction.txt` is the human-readable review framework.
+- `DATA_EXTRACTION_SCHEMA_FILE` is the exact machine contract for output keys, value types, missing values, and Covidence headers.
+- `CSV_METADATA_COLUMN_ALIASES` and `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS` keep export-specific administrative labels in config rather than in pipeline code.
+- `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` is optional; schema text is used first for prompt-domain matching.
+- The pipeline combines both at runtime, so the prompt should not contain technical insertion markers.
+
 Recommended: at least 10 POS and 10 NEG examples per file.
+
+Data-extraction evidence mode:
+- `full_text` (default): uses `full_text_normalized.txt` directly. Pros: better recall and quote coverage. Cons: higher token use. `data_extraction_pos-neg_examples.csv` is optional/fallback.
+- `selected_chunks`: uses retrieval-selected chunks. Pros: lower token use and faster. Cons: can miss evidence. `data_extraction_pos-neg_examples.csv` should be curated carefully because it guides retrieval.
 
 ## PDF Preparation by Stage
 
@@ -254,7 +270,7 @@ python -m pipeline.additions.input_trace --paper-id <ID> --stage <stage> --show-
 - For PDF stages, PDFs are placed in the generated per-paper folders.
 
 ## Throughput Tips
-- Balanced profile defaults are now preconfigured in [config/user_orchestrator.py](config/user_orchestrator.py): `top_k=10`, `chunk_size=20`, `async_max_concurrency=18`.
+- Balanced endpoint-safe defaults are now preconfigured in [config/user_orchestrator.py](config/user_orchestrator.py): `top_k=10`, `chunk_size=20`, `async_max_concurrency=2`.
 - Keep `top_k` modest (e.g., 6–10) and `chunk_size` moderately sized (e.g., 20-25) for `full_text`/`data_extraction` to cut embedding/LLM load (`title_abstract` now uses full Title+Abstract directly).
 - For large `title_abstract` runs, tune async throughput with `LLM_SETTINGS["async_max_concurrency"]` and retry/backoff parameters in [config/user_orchestrator.py](config/user_orchestrator.py).
 - Use QC-only first, then full run; each run writes new timestamped outputs—no need to merge manually.

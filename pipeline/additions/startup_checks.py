@@ -29,10 +29,10 @@ def active_prompt_and_kb(stage: str) -> tuple[str, str]:
 
 
 def ensure_csv_inputs(csv_dir: Path) -> bool:
-    """human readable hint: confirm that the input folder exists and contains Covidence CSV exports."""
+    """human readable hint: confirm that the input folder exists and contains exported CSV files."""
 
     if not csv_dir.exists():
-        print(f"[setup] Create the folder at {csv_dir} and drop your Covidence/CSV exports there.")
+        print(f"[setup] Create the folder at {csv_dir} and drop your exported CSV files there.")
         return False
     csvs = sorted(csv_dir.glob("*.csv"))
     if not csvs:

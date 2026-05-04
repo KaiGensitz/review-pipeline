@@ -22,6 +22,7 @@ from config.user_orchestrator import (
     STAGE_RULES,
     require_setting,
 )
+from pipeline.core.metadata_aliases import read_metadata_value
 
 
 DEFAULT_STAGE_ROOT = Path(PATH_SETTINGS.get("output_root", REPO_ROOT / "output"))
@@ -183,7 +184,7 @@ def _load_negative_examples_from_csvs(csv_dir: Path, patterns: list[str]) -> lis
     """Load extra negative examples from CSVs to enrich the knowledge base.
 
     Args:
-        csv_dir: Directory containing Covidence exports.
+        csv_dir: Directory containing exported screening CSV files.
         patterns: List of glob patterns for negative-example CSVs.
 
     Returns:
@@ -209,8 +210,8 @@ def _load_negative_examples_from_csvs(csv_dir: Path, patterns: list[str]) -> lis
         with open(csv_file, "r", encoding="utf-8") as handle:
             reader = csv.DictReader(handle)
             for row in reader:
-                abstract = _extract_text(row, ["Abstract", "abstract"])
-                title = _extract_text(row, ["Title", "title"])
+                abstract = read_metadata_value(row, "abstract")
+                title = read_metadata_value(row, "title")
                 text = abstract or title
                 if not text:
                     continue
@@ -542,7 +543,7 @@ def run_pipeline(
             with open(qc_sample_path, "r", encoding="utf-8") as handle:
                 reader = csv.DictReader(handle)
                 for row in reader:
-                    pid = row.get("paper_id") or row.get("Covidence #") or row.get("Covidence#")
+                    pid = read_metadata_value(row, "paper_id")
                     if pid:
                         qc_sample_ids.add(str(pid))
         except Exception:

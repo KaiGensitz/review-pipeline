@@ -11,6 +11,7 @@ from pathlib import Path
 
 from config.user_orchestrator import PATH_SETTINGS, STAGE_RULES
 from pipeline.additions.run_index import _latest_base_outputs
+from pipeline.core.metadata_aliases import metadata_aliases, read_metadata_value
 
 def _parse_is_eligible(decision: object, stage: str) -> bool | None:
     """Best-effort extraction of is_eligible from an LLM decision payload (stage-aware)."""
@@ -132,7 +133,7 @@ def _write_retry_csv(source_csv: Path, target_dir: Path, paper_ids: set[str], st
         print(f"[retry] source CSV missing: {source_csv}")
         return None
 
-    id_keys = ["paper_id", "Covidence #", "Covidence#", "Ref", "Study", "ID", "id"]
+    id_keys = metadata_aliases("paper_id")
     rows_written = 0
     written_ids: set[str] = set()
     try:
@@ -223,6 +224,19 @@ def _require_base_outputs(stage: str, run_label: str) -> dict[str, Path | None]:
     """Ensure base outputs exist before running a retry; avoid orphan retry files."""
 
     base = _latest_base_outputs(stage, run_label)
+    if stage == "data_extraction":
+        # human readable hint: data extraction writes per-paper extraction files
+        # and resource logs, not a screening-style eligibility JSONL. A retry
+        # can therefore be launched from the source CSV once the failed run has
+        # produced any base extraction artifact.
+        if not (base.get("resource") or base.get("emissions")):
+            print(
+                f"[retry] Cannot run retry: missing base data-extraction output for stage '{stage}' "
+                f"(run_label='{run_label}'). Run the sample once before retrying failed papers."
+            )
+            return {}
+        return base
+
     if not base.get("eligibility"):
         print(
             f"[retry] Cannot run retry: missing base eligibility output for stage '{stage}' (run_label='{run_label}'). "
@@ -268,6 +282,8 @@ def _first_available_run_label(stage: str, preferred: str | None) -> str | None:
         if not label:
             continue
         base = _latest_base_outputs(stage, label)
+        if stage == "data_extraction" and (base.get("resource") or base.get("emissions")):
+            return label
         elig = base.get("eligibility")
         emissions = base.get("emissions")
         if elig and emissions:
@@ -524,7 +540,7 @@ def _retry_csv_needed(retry_csv: Path, stage: str) -> set[str]:
         with retry_csv.open("r", encoding="utf-8") as handle:
             reader = csv.DictReader(handle)
             for row in reader:
-                pid = str(row.get("paper_id") or row.get("Covidence #") or row.get("Covidence#") or "").strip()
+                pid = read_metadata_value(row, "paper_id")
                 if not pid:
                     continue
                 decision = latest.get(pid)

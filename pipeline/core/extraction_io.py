@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from config.user_orchestrator import LLM_SETTINGS
+from pipeline.core.metadata_aliases import read_metadata_value
 from pipeline.integrations.embedding_utils import normalize_extracted_text
 from pipeline.selection.pdf_parser import extract_markdown_from_pdf_with_level
 
@@ -117,7 +118,7 @@ def format_evidence(paper: PaperItem) -> str:
     """human readable hint: convert selected chunks or full text into the compact evidence block sent to the LLM."""
 
     parts = [f"Paper ID: {paper.paper_id}"]
-    title = str(paper.metadata.get("Title") or paper.metadata.get("title") or "").strip()
+    title = read_metadata_value(paper.metadata, "title")
     if title:
         parts.append(f"Title: {title}")
     evidence_mode = str(LLM_SETTINGS.get("data_extraction_evidence_mode", "full_text") or "full_text").strip().lower()

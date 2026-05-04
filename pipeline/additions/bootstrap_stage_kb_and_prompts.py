@@ -598,23 +598,30 @@ def _render_prompt_data_extraction(include_terms: list[str], exclude_terms: list
 	return f"""DATA EXTRACTION PROMPT (Suggested Bootstrap Version)
 
 # ROLE
-You are an expert reviewer extracting variables defined by the external extraction schema CSV.
+You are an expert systematic reviewer extracting data from full-text evidence. The human prompt defines the review concepts; DATA_EXTRACTION_SCHEMA_FILE defines the exact machine-readable output keys.
 
 # TERM HINTS FROM LOCAL EXAMPLE PDFS
 - Frequent extraction-positive terms: {include_text}
 - Frequent extraction-negative terms: {exclude_text}
 
-# KB-DRIVEN RESPONSE SCHEMA
-{{extraction_schema_instructions}}
+# INSTRUCTIONS
+1) Use only the provided PDF evidence.
+2) Extract a value and a verbatim quote for every variable requested by the runtime schema.
+3) If evidence is absent, use the missing-value conventions inserted from DATA_EXTRACTION_SCHEMA_FILE.
 
-# TASK
-Extract only what is explicitly present in the text evidence.
-If a value is not explicit, use the missing-value conventions from the KB-driven schema block.
-Return one valid JSON object matching the schema exactly.
+# STEPS
+Fields to extract (Conceptual Framework):
+    1) Replace this line with the first review domain from your protocol.
+    2) Add one numbered line per conceptual domain that should guide extraction.
+    3) Keep the exact output variables in DATA_EXTRACTION_SCHEMA_FILE, not in this scaffold.
+
+# END GOAL (CONCEPTUAL RESPONSE GUIDE, NOT THE MACHINE SCHEMA)
+Use this section to describe your review framework in plain language. The pipeline automatically inserts the exact schema CSV contract before the evidence section at runtime.
 
 # OUTPUT RULES
 - Output JSON only.
 - Do not add Markdown fences.
+- Follow the runtime schema exactly.
 
 # DATA
 {{data}}

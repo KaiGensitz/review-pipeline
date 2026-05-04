@@ -7,7 +7,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, get_args
+from typing import Any, Literal, cast, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 
@@ -23,6 +23,12 @@ REQUIRED_KB_COLUMNS = {
     "allowed_options",
     "instruction",
     "covidence_column_name",
+}
+PROMPT_MARKER_REPLACEMENTS = {
+    "{extraction_domain_overview}": "domain_overview",
+    "{extraction_schema_instructions}": "schema_instructions",
+    "[[PIPELINE_INSERT_ACTIVE_EXTRACTION_DOMAIN_OVERVIEW_FROM_SCHEMA_CSV]]": "domain_overview",
+    "[[PIPELINE_INSERT_ACTIVE_EXTRACTION_VARIABLES_AND_RESPONSE_SHAPE_FROM_SCHEMA_CSV]]": "schema_instructions",
 }
 
 
@@ -77,6 +83,7 @@ class DynamicExtractionSchema:
     response_shape: dict[str, Any]
     model: type[BaseModel]
     instructions_text: str
+    domain_overview_text: str
 
     @classmethod
     def from_kb(cls, kb_path: str | Path | None = None) -> "DynamicExtractionSchema":
@@ -90,12 +97,14 @@ class DynamicExtractionSchema:
         response_shape = build_response_shape(variables)
         model = build_pydantic_model(variables)
         instructions_text = format_instruction_block(variables, response_shape)
+        domain_overview_text = format_domain_overview(variables)
         return cls(
             kb_path=path,
             variables=variables,
             response_shape=response_shape,
             model=model,
             instructions_text=instructions_text,
+            domain_overview_text=domain_overview_text,
         )
 
     @classmethod
@@ -105,22 +114,38 @@ class DynamicExtractionSchema:
         return cls.from_kb()
 
     def inject_into_prompt(self, prompt_template: str) -> str:
-        """human readable hint: place KB-generated field instructions inside the LLM prompt at runtime."""
+        """human readable hint: combine the human prompt framework with the CSV machine schema at runtime."""
 
-        placeholder = "{extraction_schema_instructions}"
-        if placeholder in prompt_template:
-            return prompt_template.replace(placeholder, self.instructions_text)
+        prompt = prompt_template or ""
+        original_prompt = prompt
+        # human readable hint: Full-schema snapshots already contain the full
+        # conceptual framework in the user prompt, so repeating it wastes tokens
+        # and makes the prompt hard to audit. One-domain runtime calls get only
+        # the matching # STEPS guidance after broad conceptual sections are
+        # removed.
+        is_domain_scoped = len(self.domains) == 1
+        guidance_text = format_prompt_domain_guidance(original_prompt, self.variables) if is_domain_scoped else ""
+        generated_block = format_generated_prompt_block(guidance_text, self.domain_overview_text, self.instructions_text)
 
-        context_match = re.search(r"(?im)^#\s*CONTEXT\b", prompt_template or "")
+        for placeholder, replacement_kind in PROMPT_MARKER_REPLACEMENTS.items():
+            replacement = self.domain_overview_text if replacement_kind == "domain_overview" else self.instructions_text
+            prompt = prompt.replace(placeholder, replacement)
+        if any(placeholder in original_prompt for placeholder in PROMPT_MARKER_REPLACEMENTS):
+            return prompt
+
+        if is_domain_scoped:
+            prompt = remove_prompt_conceptual_schema_sections(prompt)
+
+        context_match = re.search(r"(?im)^#\s*CONTEXT\b", prompt)
         if context_match:
             return (
-                prompt_template[: context_match.start()].rstrip()
+                prompt[: context_match.start()].rstrip()
                 + "\n\n"
-                + self.instructions_text
+                + generated_block
                 + "\n\n"
-                + prompt_template[context_match.start() :].lstrip()
+                + prompt[context_match.start() :].lstrip()
             )
-        return (prompt_template or "").rstrip() + "\n\n" + self.instructions_text
+        return prompt.rstrip() + "\n\n" + generated_block
 
     @property
     def domains(self) -> tuple[str, ...]:
@@ -148,6 +173,7 @@ class DynamicExtractionSchema:
             response_shape=response_shape,
             model=build_pydantic_model(selected),
             instructions_text=format_instruction_block(selected, response_shape),
+            domain_overview_text=format_domain_overview(selected),
         )
 
     def validate_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -173,6 +199,170 @@ class DynamicExtractionSchema:
                 "strict": True,
             },
         }
+
+
+def format_generated_prompt_block(domain_guidance: str, domain_overview: str, schema_instructions: str) -> str:
+    """human readable hint: show the prompt-derived research guidance next to the CSV-derived machine contract."""
+
+    parts = [
+        "# PIPELINE-GENERATED EXTRACTION CONTRACT",
+        "The human prompt defines what scientific concepts to look for. The schema CSV defines the exact JSON keys, value types, missing-value rules, and human consensus/export column mapping used by the machine.",
+    ]
+    if domain_guidance.strip():
+        parts.append(domain_guidance)
+    parts.extend([domain_overview, schema_instructions])
+    return "\n\n".join(part for part in parts if part.strip())
+
+
+def format_prompt_domain_guidance(prompt_template: str, variables: tuple[ExtractionVariable, ...]) -> str:
+    """human readable hint: select the human prompt guidance that matches the active CSV domain(s)."""
+
+    domains = tuple(dict.fromkeys(variable.domain for variable in variables))
+    selected_blocks = prompt_guidance_blocks_for_domains(prompt_template, variables)
+    lines = [
+        "# PROMPT-DERIVED DOMAIN GUIDANCE",
+        "Use this scientist-written guidance for the active schema domain(s): " + ", ".join(domains) + ".",
+    ]
+    if selected_blocks:
+        lines.extend(["", *selected_blocks])
+    else:
+        lines.extend(
+            [
+                "",
+                "No matching conceptual prompt block was found for these domains. Use the KB-driven extraction schema below as the exact contract.",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def prompt_guidance_blocks_for_domains(
+    prompt_template: str,
+    variables: tuple[ExtractionVariable, ...],
+) -> list[str]:
+    """human readable hint: map prompt sections to active CSV domains using schema text and user-configured aliases."""
+
+    domains = tuple(dict.fromkeys(variable.domain for variable in variables))
+    blocks = extract_prompt_guidance_blocks(prompt_template)
+    selected: list[str] = []
+    seen: set[str] = set()
+    for block in blocks:
+        if not _prompt_block_matches_domains(block, domains, variables):
+            continue
+        normalized = _normalize_prompt_text(block)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        selected.append(block)
+    return selected
+
+
+def extract_prompt_guidance_blocks(prompt_template: str) -> list[str]:
+    """human readable hint: parse the prompt's conceptual STEPS into reusable domain guidance."""
+
+    blocks: list[str] = []
+    for heading, _start, _content_start, end, text in _iter_prompt_sections(prompt_template):
+        heading_key = _normalize_prompt_text(heading)
+        if heading_key.startswith("steps"):
+            blocks.extend(_split_numbered_prompt_blocks(text))
+    return [block for block in blocks if block.strip()]
+
+
+def remove_prompt_conceptual_schema_sections(prompt_template: str) -> str:
+    """human readable hint: for one-domain calls, remove broad conceptual blocks after extracting the relevant guidance."""
+
+    removals: list[tuple[int, int]] = []
+    for heading, start, _content_start, end, _text in _iter_prompt_sections(prompt_template):
+        heading_key = _normalize_prompt_text(heading)
+        if heading_key.startswith("steps") or heading_key.startswith("end goal"):
+            removals.append((start, end))
+
+    prompt = prompt_template
+    for start, end in reversed(removals):
+        prompt = prompt[:start].rstrip() + "\n\n" + prompt[end:].lstrip()
+    return prompt.strip() + "\n"
+
+
+def _iter_prompt_sections(prompt_template: str) -> list[tuple[str, int, int, int, str]]:
+    """human readable hint: split Markdown-like prompt headings without requiring a strict document parser."""
+
+    prompt = prompt_template or ""
+    matches = list(re.finditer(r"(?m)^#\s+(.+?)\s*$", prompt))
+    sections: list[tuple[str, int, int, int, str]] = []
+    for idx, match in enumerate(matches):
+        heading = match.group(1).strip()
+        start = match.start()
+        content_start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(prompt)
+        sections.append((heading, start, content_start, end, prompt[content_start:end].strip()))
+    return sections
+
+
+def _split_numbered_prompt_blocks(section_text: str) -> list[str]:
+    """human readable hint: keep each numbered framework item as a separate candidate domain guide."""
+
+    text = section_text.strip()
+    starts = list(re.finditer(r"(?m)^\s*\d+\)\s+", text))
+    if not starts:
+        return [text] if text else []
+
+    blocks: list[str] = []
+    for idx, start_match in enumerate(starts):
+        end = starts[idx + 1].start() if idx + 1 < len(starts) else len(text)
+        block = text[start_match.start() : end].strip()
+        if block:
+            blocks.append(block)
+    return blocks
+
+
+def _prompt_block_matches_domains(
+    block: str,
+    domains: tuple[str, ...],
+    variables: tuple[ExtractionVariable, ...],
+) -> bool:
+    """human readable hint: decide whether a prompt block belongs to one active CSV domain."""
+
+    searchable = _normalize_prompt_text(block)
+    domain_aliases = _aliases_for_domains(domains, variables)
+    return any(alias in searchable for alias in domain_aliases)
+
+
+def _aliases_for_domains(domains: tuple[str, ...], variables: tuple[ExtractionVariable, ...]) -> set[str]:
+    """human readable hint: combine config aliases with schema text; pipeline code stays review-topic generic."""
+
+    aliases: set[str] = set()
+    configured_aliases = _configured_domain_prompt_aliases()
+    for domain in domains:
+        aliases.add(_normalize_prompt_text(domain))
+        for alias in configured_aliases.get(domain, ()):
+            aliases.add(_normalize_prompt_text(alias))
+    for variable in variables:
+        aliases.add(_normalize_prompt_text(variable.variable_name))
+        aliases.add(_normalize_prompt_text(variable.covidence_column_name))
+        aliases.add(_normalize_prompt_text(variable.instruction))
+    return {alias for alias in aliases if alias}
+
+
+def _normalize_prompt_text(value: str) -> str:
+    """human readable hint: compare prompt labels in a forgiving way while leaving original text unchanged."""
+
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+
+def _configured_domain_prompt_aliases() -> dict[str, tuple[str, ...]]:
+    """human readable hint: load optional current-study domain aliases from user_orchestrator.py, not pipeline code."""
+
+    try:
+        from config.user_orchestrator import DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES
+
+        if isinstance(DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES, dict):
+            return {
+                str(domain): tuple(str(alias) for alias in aliases)
+                for domain, aliases in DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES.items()
+                if isinstance(aliases, (list, tuple))
+            }
+    except Exception:
+        pass
+    return {}
 
 
 def load_extraction_variables(kb_path: Path) -> list[ExtractionVariable]:
@@ -246,17 +436,19 @@ def build_pydantic_model(variables: tuple[ExtractionVariable, ...]) -> type[Base
 
     root_fields: dict[str, tuple[Any, Any]] = {}
     for domain, fields in domain_fields.items():
+        # cast to appease static type checkers: field defs are (annotation, Field)
         domain_model = create_model(
             _model_name(f"Extraction_{domain}"),
             __config__=ConfigDict(extra="forbid", populate_by_name=True),
-            **fields,
+            **cast(Any, fields),
         )
         root_fields[domain] = (domain_model, Field(..., alias=domain))
 
+    # cast root_fields similarly for typing compatibility
     return create_model(
         "DynamicExtractionOutput",
         __config__=ConfigDict(extra="forbid", populate_by_name=True),
-        **root_fields,
+        **cast(Any, root_fields),
     )
 
 
@@ -271,6 +463,28 @@ def build_response_shape(variables: tuple[ExtractionVariable, ...]) -> dict[str,
     return shape
 
 
+def format_domain_overview(variables: tuple[ExtractionVariable, ...]) -> str:
+    """human readable hint: summarize the active KB domains so the prompt visibly follows the schema CSV."""
+
+    grouped: dict[str, list[str]] = {}
+    for variable in variables:
+        grouped.setdefault(variable.domain, []).append(variable.variable_name)
+
+    lines = [
+        "# DOMAIN-GUIDED EXTRACTION PLAN",
+        "Work through the active KB domains one at a time. The domains and variables below come from data_extraction_schema.csv.",
+    ]
+    for domain, names in grouped.items():
+        lines.append(f"- {domain}: {', '.join(names)}")
+    lines.extend(
+        [
+            "",
+            "Within each domain, first search the manuscript text and tables for directly stated evidence, then fill the exact JSON keys listed in the KB-driven schema.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def format_instruction_block(variables: tuple[ExtractionVariable, ...], response_shape: dict[str, Any]) -> str:
     """human readable hint: turn KB rows into reviewer-readable extraction instructions for the prompt."""
 
@@ -278,17 +492,22 @@ def format_instruction_block(variables: tuple[ExtractionVariable, ...], response
         "# KB-DRIVEN EXTRACTION SCHEMA",
         "For every variable below, return two fields: <variable_name>_value and <variable_name>_quote.",
         f'If evidence is absent, return "{MISSING_TEXT_VALUE}" for string/enum/integer/float values, false for booleans, [] for lists, and null for the quote.',
+        "Use the shortest exact quote that proves the value, usually one sentence, table row, or table label plus value. Do not copy long paragraphs.",
         "",
         "Variables and instructions:",
     ]
+    last_domain = ""
     for variable in variables:
+        if variable.domain != last_domain:
+            lines.append(f"\nDomain: {variable.domain}")
+            last_domain = variable.domain
         allowed = ""
         if variable.variable_type == "enum":
             allowed_values = _enum_options_with_missing(variable)
             allowed = f" Allowed values: {', '.join(allowed_values)}."
         lines.append(
             f"- [{variable.domain}] {variable.variable_name}: {variable.instruction}"
-            f" Covidence column: {variable.covidence_column_name}.{allowed}"
+            f" Consensus/export column: {variable.covidence_column_name}.{allowed}"
         )
 
     lines.extend(
@@ -437,7 +656,7 @@ def _annotation_for_variable(variable: ExtractionVariable) -> Any:
     """human readable hint: map KB type names to Python/Pydantic field types."""
 
     if variable.variable_type == "enum":
-        return Literal.__getitem__(tuple(_enum_options_with_missing(variable)))
+        return cast(Any, Literal)[tuple(_enum_options_with_missing(variable))]
     if variable.variable_type == "boolean":
         return bool
     if variable.variable_type == "list":
@@ -508,7 +727,7 @@ def _coerce_bool(value: Any) -> bool:
 
 
 def _coerce_list(value: Any) -> list[str]:
-    """human readable hint: accept JSON arrays and comma/semicolon Covidence-style multi-select exports."""
+    """human readable hint: accept JSON arrays and comma/semicolon human-export multi-select values."""
 
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]

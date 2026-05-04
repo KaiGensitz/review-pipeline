@@ -46,7 +46,11 @@ This appendix provides function-level explanations for scripts and classes in th
 ### Class UserConfig
 - Human readable hint: Static snapshot of user-facing settings for the current run. Note: this bundles all inputs so other scripts can read a single object.
 - Human readable hint: The top block marked `USER-EDITABLE` is the protocol boundary: change `CURRENT_STAGE`, prompts/KBs, `STUDY_TAGS_INCLUDE`, `STUDY_TAGS_IGNORE`, and `DATA_EXTRACTION_SCHEMA_FILE` there when the review topic changes.
-- Human readable hint: `DATA_EXTRACTION_SCHEMA_FILE` points to the CSV that defines extraction variables and exact Covidence header mappings.
+- Human readable hint: `DATA_EXTRACTION_SCHEMA_FILE` points to the CSV that defines extraction variables and exact human consensus/export header mappings.
+- Human readable hint: `CSV_METADATA_COLUMN_ALIASES` is where external export headers are mapped to generic internal metadata such as `paper_id`, `title`, `authors`, and `publication_year`; these export-header facts do not live in `pipeline/` code.
+- Human readable hint: `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` is the optional bridge between human prompt section wording and schema domains. Keep review-topic vocabulary here or in the prompt/schema CSV, not inside pipeline Python.
+- Human readable hint: `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS` controls aggregate extraction output labels, including the AI reviewer label, while `DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES` supplies optional fallback consensus-column aliases for variables.
+- Human readable hint: `PROMPT_SIGNAL_SECTION_ALIASES` defines which prompt section names are treated as primary/secondary retrieval signal lists when prompts contain include/exclude sections.
 ### Script-level functions
 - Human readable hint: compatibility wrappers or helper functions used by the primary class.
 
@@ -64,6 +68,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: Current endpoint-safe default profile uses `top_k=10`, `chunk_size=20`, and `async_max_concurrency=2` so full-text/data-extraction runs do not overload the LLM proxy during QC.
 - Human readable hint: Data extraction defaults to `data_extraction_response_format_mode="prompt_only"` because this GPUSstack model returned malformed JSON when sent strict `json_schema` response_format payloads.
 - Human readable hint: Data extraction defaults to `data_extraction_evidence_mode="full_text"` so extraction prompts use cached normalized full text rather than only the screening-selected chunks.
+- Human readable hint: With `data_extraction_evidence_mode="full_text"`, `knowledge-base/data_extraction_pos-neg_examples.csv` has low direct impact; it becomes important only when extraction uses `selected_chunks`.
 - Human readable hint: Total model context budget is configured in `LLM_SETTINGS["context_window_total_tokens"]` and combined with `max_tokens` to derive prompt budget at runtime.
 
 ## main.py
@@ -200,11 +205,11 @@ This appendix provides function-level explanations for scripts and classes in th
 #### _load_folder_metadata(folder)
 - Human readable hint: No docstring in source; placeholder retained intentionally for exhaustive traceability.
 
-#### _extract_covidence_id(row)
-- Human readable hint: No docstring in source; placeholder retained intentionally for exhaustive traceability.
+#### _extract_paper_id(row)
+- Human readable hint: read the paper ID through user-configured metadata aliases.
 
 #### _find_paper_folder(stage, paper_id, csv_root)
-- Human readable hint: locate the per-paper folder by matching Covidence/paper ID in metadata.
+- Human readable hint: locate the per-paper folder by matching configured paper IDs in metadata.
 
 #### _load_selected_chunks(folder, stage, paper_id)
 - Human readable hint: load selected chunks from stage JSONL and fall back to compact per-paper artifact files.
@@ -357,7 +362,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: No docstring in source; placeholder retained intentionally for exhaustive traceability.
 
 #### _extract_tags(value)
-- Human readable hint: map explicit Covidence tags to the curated include list; ignores notes.
+- Human readable hint: map explicit human-export tags to the curated include list; ignores notes.
 
 #### _extract_ft_reason(notes_val)
 - Human readable hint: Extract the full-text exclusion reason from Notes/Tags.
@@ -420,10 +425,10 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: read the KB-generated `{variable_name}_quote` field for audit review.
 
 #### _normalization_key(value, variable)
-- Human readable hint: coerce AI and Covidence values into comparable typed values using the KB variable type.
+- Human readable hint: coerce AI and human-export values into comparable typed values using the KB variable type.
 
 #### validate_extraction(consensus_path)
-- Human readable hint: validate extraction outputs against a Covidence gold-standard CSV by mapping each KB `variable_name` to its exact `covidence_column_name`.
+- Human readable hint: validate extraction outputs against a human gold-standard CSV by mapping each KB `variable_name` to its exact `covidence_column_name`.
 - Concordance is exact matches among human-present values divided by human-present values, excluding `Not Available` and `n/a`.
 - Accuracy is exact matches plus correctly identified missing values divided by all variable-paper comparisons parsed from the KB.
 - Variables below concordance `<0.80` or accuracy `<0.90` log a critical `Prompt Refinement Triggered` warning.
@@ -512,7 +517,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: stable fingerprint to verify whether two input texts are exactly identical.
 
 #### PaperScreeningPipeline._persist_prompt_template_snapshot()
-- Human readable hint: persist one prompt snapshot per campaign hash and reuse identical existing snapshots to avoid duplicate files.
+- Human readable hint: persist one prompt snapshot per campaign hash and reuse identical existing snapshots to avoid duplicate files; domain-wise data extraction snapshots keep the user-authored prompt while exact schema-injected runtime prompts live in input traces.
 
 #### PaperScreeningPipeline.run()
 - Human readable hint: Main pipeline: prep folders (if needed), QC sample, then screen papers. Split-only prep skips prompt snapshot persistence.
@@ -634,10 +639,10 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: Return stage-appropriate CSV files.
 
 #### PaperScreeningPipeline._load_included_ids(csv_path)
-- Human readable hint: Read included IDs from a Covidence CSV.
+- Human readable hint: Read included IDs from the configured included-paper CSV.
 
-#### PaperScreeningPipeline._extract_covidence_id(row)
-- Human readable hint: Extract the best available Covidence/paper ID.
+#### PaperScreeningPipeline._extract_paper_id(row)
+- Human readable hint: Extract the best available paper ID from user-configured CSV headers.
 
 #### PaperScreeningPipeline._extract_year(row)
 - Human readable hint: Try to find a publication year from many possible columns.
@@ -722,6 +727,23 @@ This appendix provides function-level explanations for scripts and classes in th
 #### load_stage_prompt_template(stage)
 - Human readable hint: load the active stage prompt and replace `{eligibility_criteria}` only when the prompt requests it.
 
+## pipeline/core/metadata_aliases.py
+
+### Script-level functions
+- Human readable hint: central metadata-header adapter that lets the generic pipeline read different CSV exports without hardcoding administrative column names.
+
+#### metadata_aliases(key)
+- Human readable hint: return the configured external header names for one generic metadata key, plus conservative generic fallbacks.
+
+#### read_metadata_value(row, key, default)
+- Human readable hint: read one metadata value from a row using `CSV_METADATA_COLUMN_ALIASES`, so paper IDs, titles, authors, and years stay configurable in `user_orchestrator.py`.
+
+#### normalize_metadata_row(row, default_id)
+- Human readable hint: copy raw CSV metadata into generic internal keys while preserving original columns for auditability.
+
+#### extract_year_from_metadata(row)
+- Human readable hint: parse a publication year from configured year/date columns without assuming one export vendor.
+
 ## pipeline/core/screening_schema.py
 
 ### Class ScreeningDecisionBaseModel
@@ -756,7 +778,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: derive monitoring/action deprioritization cues from prompt terms and POS/NEG KB examples.
 
 #### normalize_schema_key(value)
-- Human readable hint: normalize Covidence tag labels and prompt JSON fields into comparable snake_case keys.
+- Human readable hint: normalize user tag labels and prompt JSON fields into comparable snake_case keys.
 
 #### build_study_tag_field_keys(tags)
 - Human readable hint: convert user-editable study tags into dynamic screening schema exclusion candidates.
@@ -787,13 +809,31 @@ This appendix provides function-level explanations for scripts and classes in th
 #### run_extraction()
 - Human readable hint: direct async runner for prepared `input/per_paper_data_extraction/` folders.
 
+## pipeline/additions/export_extraction_tables.py
+
+### Script-level functions
+- Human readable hint: export aggregated data-extraction tables for validation and quote audit.
+
+#### export_tables(output_dir, consensus_path, input_paper_dir)
+- Human readable hint: write one AI-vs-human comparison CSV and one quote-audit CSV.
+
+### Class ExtractionAggregateWriter
+- Human readable hint: create the two run-level extraction CSVs at run start and append each completed paper immediately.
+- Human readable hint: fill the configured reviewer column with the configured AI label from `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS` so AI rows can be distinguished from human reviewer rows.
+
+#### build_consensus_comparison_rows(records, schema, headers, input_paper_dir)
+- Human readable hint: map nested KB extraction values into the same column layout as the human consensus CSV.
+
+#### build_quote_audit_rows(records, schema, variable_to_header, input_paper_dir)
+- Human readable hint: keep extracted values and supporting quotes in a long table for reviewer checking.
+
 ## pipeline/core/extraction_schema.py
 
 ### Class ExtractionVariable
-- Human readable hint: one row from `knowledge-base/data_extraction_schema.csv`, including the Covidence column used for validation.
+- Human readable hint: one row from `knowledge-base/data_extraction_schema.csv`, including the human consensus/export column used for validation.
 
 ### Class DynamicExtractionSchema
-- Human readable hint: KB-derived runtime Pydantic model, prompt instruction block, default missing-data payload, and OpenAI Structured Outputs schema.
+- Human readable hint: combines two sources at runtime: the prompt provides the human-readable research framework, while the schema CSV provides the exact machine contract, default missing-data payload, and optional OpenAI Structured Outputs schema.
 
 #### DynamicExtractionSchema.from_kb(kb_path)
 - Human readable hint: read the configured extraction schema CSV, validate required columns, and build the grouped extraction model.
@@ -802,7 +842,8 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: compatibility shim; extraction schemas now come from the CSV KB, not from prompt JSON.
 
 #### DynamicExtractionSchema.inject_into_prompt(prompt_template)
-- Human readable hint: inject KB-generated variable instructions and response shape into the active extraction prompt.
+- Human readable hint: keeps full-schema prompt snapshots close to the user prompt, while one-domain runtime calls copy only matching `# STEPS` guidance and the KB-generated field contract before `# CONTEXT`.
+- Human readable hint: legacy insertion placeholders are still tolerated for old prompt files, but future user prompts should be plain, readable review frameworks without technical markers.
 
 #### DynamicExtractionSchema.domains
 - Human readable hint: list KB domains in CSV order so extraction can split one paper into smaller schema requests.
@@ -828,11 +869,23 @@ This appendix provides function-level explanations for scripts and classes in th
 #### load_extraction_variables(kb_path)
 - Human readable hint: parse required KB columns: `domain`, `variable_name`, `variable_type`, `allowed_options`, `instruction`, and `covidence_column_name`.
 
+#### format_domain_overview(variables)
+- Human readable hint: create the prompt-visible domain list from the active schema CSV so users can see the extraction plan.
+
+#### format_prompt_domain_guidance(prompt_template, variables)
+- Human readable hint: select only the conceptual prompt guidance relevant to the active CSV domain(s), using schema text plus optional `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` from `user_orchestrator.py`.
+
+#### extract_prompt_guidance_blocks(prompt_template)
+- Human readable hint: split the human prompt's `# STEPS` into reusable domain guidance; the conceptual response guide is left as user-facing explanation, not copied into runtime domain prompts.
+
+#### remove_prompt_conceptual_schema_sections(prompt_template)
+- Human readable hint: remove broad conceptual blocks for one-domain extraction calls after the relevant guidance has been extracted, keeping domain prompts shorter and less confusing.
+
 #### build_pydantic_model(variables)
 - Human readable hint: create one nested domain model where every variable has `{variable_name}_value` and `{variable_name}_quote`.
 
 #### format_instruction_block(variables, response_shape)
-- Human readable hint: turn KB rows into LLM instructions and include the Covidence mapping for audit traceability.
+- Human readable hint: turn KB rows into LLM instructions and include the consensus/export mapping for audit traceability.
 
 #### parse_and_validate(raw_text, schema)
 - Human readable hint: parse raw LLM output, validate dynamically, and return fallback data on failure.
@@ -890,7 +943,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: Read a text field from a CSV row using a list of possible column names. Args: row: A CSV row as a dict. keys: Candidate column names to search for. Returns: The first non-empty matching value, or empty string. Note: handles minor column-name variations in exports.
 
 #### _load_negative_examples_from_csvs(csv_dir, patterns)
-- Human readable hint: Load extra negative examples from CSVs to enrich the knowledge base. Args: csv_dir: Directory containing Covidence exports. patterns: List of glob patterns for negative-example CSVs. Returns: List of NEG example dicts with label/text. Note: these negatives improve evidence filtering precision.
+- Human readable hint: Load extra negative examples from CSVs to enrich the knowledge base. Args: csv_dir: Directory containing exported screening CSV files. patterns: List of glob patterns for negative-example CSVs. Returns: List of NEG example dicts with label/text. Note: these negatives improve evidence filtering precision.
 
 #### _safe_int(val, default)
 - Human readable hint: safely coerce config values to int and fail fast on invalid values.

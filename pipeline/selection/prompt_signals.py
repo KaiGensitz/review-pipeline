@@ -112,7 +112,7 @@ def normalize_schema_key(value: str) -> str:
 
 
 def build_study_tag_field_keys(tags: Iterable[str]) -> tuple[str, ...]:
-    """human readable hint: convert user-editable Covidence tags into JSON field-key candidates."""
+    """human readable hint: convert user-editable study tags into JSON field-key candidates."""
 
     keys = {
         normalize_schema_key(tag)
@@ -390,11 +390,12 @@ def _build_section_rescue_keywords(prompt_terms: Iterable[str]) -> tuple[str, ..
 def build_prompt_signal_config(prompt_template: str) -> dict[str, Any]:
     """human readable hint: derive topic-sensitive retrieval signals from the active prompt."""
 
+    section_aliases = _configured_prompt_signal_section_aliases()
     intervention_include = _extract_prompt_include_terms(
         prompt_template,
-        {"intervention / exposure", "intervention/exposure", "intervention", "exposure"},
+        section_aliases["primary"],
     )
-    outcome_include = _extract_prompt_include_terms(prompt_template, {"outcome", "outcomes"})
+    outcome_include = _extract_prompt_include_terms(prompt_template, section_aliases["secondary"])
 
     intervention_seed_terms = intervention_include
     primary_seed_terms = intervention_include if intervention_include else list(DEFAULT_PRIMARY_TOPIC_SIGNAL_TERMS)
@@ -437,13 +438,9 @@ def build_monitoring_signal_config(
 ) -> dict[str, Any]:
     """human readable hint: build monitoring/action cues from prompt and user KB examples."""
 
-    intervention_section_aliases = {
-        "intervention / exposure",
-        "intervention/exposure",
-        "intervention",
-        "exposure",
-    }
-    outcome_section_aliases = {"outcome", "outcomes"}
+    section_aliases = _configured_prompt_signal_section_aliases()
+    intervention_section_aliases = section_aliases["primary"]
+    outcome_section_aliases = section_aliases["secondary"]
 
     prompt_intervention_terms = _extract_prompt_include_terms(
         prompt_template,
@@ -560,3 +557,20 @@ def build_monitoring_signal_config(
         "kb_pos_count": kb_pos_count,
         "kb_neg_count": kb_neg_count,
     }
+
+
+def _configured_prompt_signal_section_aliases() -> dict[str, set[str]]:
+    """human readable hint: prompt section names are user-configured so pipeline code is not topic-specific."""
+
+    defaults = {"primary": set(), "secondary": set()}
+    try:
+        from config.user_orchestrator import PROMPT_SIGNAL_SECTION_ALIASES
+
+        if isinstance(PROMPT_SIGNAL_SECTION_ALIASES, dict):
+            for key in defaults:
+                values = PROMPT_SIGNAL_SECTION_ALIASES.get(key, [])
+                if isinstance(values, (list, tuple, set)):
+                    defaults[key] = {str(value) for value in values if str(value).strip()}
+    except Exception:
+        pass
+    return defaults

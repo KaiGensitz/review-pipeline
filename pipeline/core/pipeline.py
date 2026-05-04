@@ -62,6 +62,12 @@ from pipeline.core.screening_schema import (
     FullTextScreeningDecisionModel,
     TitleAbstractScreeningDecisionModel,
 )
+from pipeline.core.metadata_aliases import (
+    extract_year_from_metadata,
+    metadata_aliases,
+    normalize_metadata_row,
+    read_metadata_value,
+)
 from config.user_orchestrator import (
     CURRENT_STAGE,
     EMBEDDING_SETTINGS,
@@ -73,6 +79,7 @@ from config.user_orchestrator import (
     require_setting,
 )
 from pipeline.additions.resource_usage import ResourceUsageEngine
+from pipeline.additions.export_extraction_tables import ExtractionAggregateWriter
 from pipeline.selection.chunking import chunk_fulltext_sentences, chunk_paper_sentences
 from pipeline.selection.prompt_signals import (
     CORE_SCREENING_SCHEMA_FIELDS,
@@ -225,22 +232,22 @@ class PaperRecord:
 
 
 CANONICAL_FIELDS = [
-    "Title",
-    "Authors",
-    "Abstract",
-    "Published Year",
-    "Published Month",
-    "Journal",
-    "Volume",
-    "Issue",
-    "Pages",
-    "Accession Number",
-    "DOI",
-    "Ref",
-    "Covidence #",
-    "Study",
-    "Notes",
-    "Tags",
+    "title",
+    "authors",
+    "abstract",
+    "publication_year",
+    "publication_month",
+    "journal",
+    "volume",
+    "issue",
+    "pages",
+    "accession_number",
+    "doi",
+    "reference",
+    "paper_id",
+    "study_id",
+    "notes",
+    "tags",
 ]
 
 
@@ -401,12 +408,18 @@ class PaperScreeningPipeline:
         self._qc_sample_ids: set[str] = set()
         self._stage_csv_cache: dict[bool, list[Path]] = {}
         self._extraction_schema: DynamicExtractionSchema | None = None
+        self._extraction_aggregate_writer: ExtractionAggregateWriter | None = None
         self._base_prompt_template = load_stage_prompt_template(self.stage)
         self.prompt_template = self._base_prompt_template
         if self.stage == "data_extraction":
             # human readable hint: data extraction fields, JSON schema, and prompt instructions come from the CSV KB.
             self._extraction_schema = DynamicExtractionSchema.from_kb()
-            self.prompt_template = self._extraction_schema.inject_into_prompt(self._base_prompt_template)
+            # human readable hint: when extraction runs domain-by-domain, the
+            # saved prompt-template snapshot should stay close to the
+            # scientist-edited prompt. Exact domain-specific runtime prompts
+            # are assembled later and can be audited with input traces.
+            if not bool(LLM_SETTINGS.get("data_extraction_split_by_domain", True)):
+                self.prompt_template = self._extraction_schema.inject_into_prompt(self._base_prompt_template)
         topic_signal_config = build_prompt_signal_config(self.prompt_template)
         self._topic_signal_source = str(topic_signal_config.get("source") or "default_signals")
         self._intervention_signal_pattern = topic_signal_config["intervention_pattern"]
@@ -747,6 +760,9 @@ class PaperScreeningPipeline:
 
         # For non-QC runs, start tracking only after we confirmed there are papers to process.
         _start_tracking_if_needed()
+
+        if self.stage == "data_extraction":
+            self._start_data_extraction_aggregate_writer()
 
         if self._fulltext_preparse_enabled and self.stage == "full_text" and planned_papers:
             self._preparse_full_text_pdfs(planned_papers)
@@ -1168,14 +1184,9 @@ class PaperScreeningPipeline:
                 row = self._metadata_snapshot_for_folder(folder)
                 if not row:
                     continue
-                title = row.get("Title") or row.get("title", "")
-                abstract = row.get("Abstract") or row.get("abstract", "")
-                paper_id = (
-                    row.get("Covidence #")
-                    or row.get("Covidence#")
-                    or row.get("paper_id")
-                    or folder.name
-                )
+                title = read_metadata_value(row, "title")
+                abstract = read_metadata_value(row, "abstract")
+                paper_id = read_metadata_value(row, "paper_id", folder.name)
                 metadata = dict(row)
                 metadata["folder_path"] = str(folder)
                 yield PaperRecord(paper_id=str(paper_id), title=title, abstract=abstract, metadata=metadata)
@@ -1492,55 +1503,11 @@ class PaperScreeningPipeline:
     def _normalize_row(self, row: dict, default_id: str = "") -> dict:
         """Normalize a raw CSV row into standard fields."""
 
-        normalized = {k.strip(): (v or "") for k, v in row.items()}
-
-        def fetch(names: list[str]) -> str:
-            for name in names:
-                value = self._match_row_value(normalized, name)
-                if value:
-                    return value
-            return ""
-
-        def ensure(key: str, aliases: list[str]) -> str:
-            if normalized.get(key):
-                return str(normalized[key])
-            val = fetch(aliases)
-            normalized[key] = val or ""
-            return normalized[key]
-
-        cov_id = fetch(["Covidence #", "Covidence#", "covidence id", "covidence_id", "covidence number"])
-        paper_id = cov_id or fetch(["paper_id", "id", "ID", "Ref", "Study"]) or default_id
-
-        normalized["Covidence #"] = normalized.get("Covidence #") or cov_id
-        normalized["Covidence#"] = normalized.get("Covidence#") or cov_id
-        normalized["paper_id"] = normalized.get("paper_id") or paper_id
-
-        title = ensure("Title", ["title", "Title"])
-        normalized["title"] = normalized.get("title") or title
-
-        authors = ensure("Authors", ["Authors", "authors", "author", "Author"])
-        normalized["authors"] = normalized.get("authors") or authors
-
-        abstract = ensure("Abstract", ["abstract", "Abstract"])
-        normalized["abstract"] = normalized.get("abstract") or abstract
-
-        year_val = self._extract_year(normalized)
-        normalized["year"] = normalized.get("year") or year_val
-        normalized["Year"] = normalized.get("Year") or year_val
-        normalized["Published Year"] = normalized.get("Published Year") or year_val
-
-        ensure("Published Month", ["Published Month", "month", "Month", "Published month"])
-        ensure("Journal", ["Journal", "journal", "Source", "Source Title", "Publication Title"])
-        ensure("Volume", ["Volume", "volume"])
-        ensure("Issue", ["Issue", "issue"])
-        ensure("Pages", ["Pages", "pages", "Page", "page", "Page range", "Page Range"])
-        ensure("Accession Number", ["Accession Number", "AccessionNumber", "Accession", "WOS Accession Number"])
-        ensure("DOI", ["DOI", "doi", "Doi"])
-        ensure("Ref", ["Ref", "Reference", "reference"])
-        ensure("Study", ["Study", "study"])
-        ensure("Notes", ["Notes", "notes"])
-        ensure("Tags", ["Tags", "tags", "Keywords", "keywords", "label", "labels"])
-
+        normalized = normalize_metadata_row(row, default_id=default_id)
+        year_val = extract_year_from_metadata(normalized)
+        if year_val:
+            normalized["publication_year"] = normalized.get("publication_year") or year_val
+            normalized["year"] = normalized.get("year") or year_val
         return normalized
 
     def _canonicalize_row(self, row: dict) -> dict:
@@ -1548,31 +1515,8 @@ class PaperScreeningPipeline:
 
         normalized = self._normalize_row(row, default_id="")
 
-        def pick(*keys: str) -> str:
-            for key in keys:
-                val = normalized.get(key)
-                if val:
-                    return str(val)
-            return ""
-
-        canonical = {
-            "Title": pick("Title", "title"),
-            "Authors": pick("Authors", "authors", "author", "Author"),
-            "Abstract": pick("Abstract", "abstract"),
-            "Published Year": self._extract_year(normalized),
-            "Published Month": pick("Published Month", "month", "Month"),
-            "Journal": pick("Journal", "journal", "Source", "Source Title", "Publication Title"),
-            "Volume": pick("Volume", "volume"),
-            "Issue": pick("Issue", "issue"),
-            "Pages": pick("Pages", "pages", "Page", "page", "Page range", "Page Range"),
-            "Accession Number": pick("Accession Number", "AccessionNumber", "Accession", "WOS Accession Number"),
-            "DOI": pick("DOI", "doi", "Doi"),
-            "Ref": pick("Ref", "Reference", "reference"),
-            "Covidence #": pick("Covidence #", "Covidence#", "paper_id", "covidence id"),
-            "Study": pick("Study", "study"),
-            "Notes": pick("Notes", "notes"),
-            "Tags": pick("Tags", "tags", "Keywords", "keywords", "label", "labels"),
-        }
+        canonical = {key: read_metadata_value(normalized, key) for key in CANONICAL_FIELDS}
+        canonical["publication_year"] = canonical.get("publication_year") or self._extract_year(normalized)
         return canonical
 
     def _iter_file_rows(self, csv_file: Path) -> Generator[PaperRecord, None, None]:
@@ -2575,10 +2519,11 @@ class PaperScreeningPipeline:
         """Remove author fields from screening outputs."""
 
         cleaned = dict(metadata or {})
-        cleaned.pop("Authors", None)
-        cleaned.pop("authors", None)
-        cleaned.pop("Author", None)
-        cleaned.pop("author", None)
+        # human readable hint: Author column names differ between exports; the
+        # user-editable alias list tells the pipeline which metadata keys should
+        # be hidden from reviewer-facing screening outputs.
+        for alias in metadata_aliases("authors"):
+            cleaned.pop(alias, None)
         return cleaned
 
     @staticmethod
@@ -2586,7 +2531,7 @@ class PaperScreeningPipeline:
         """Get author string for redaction matching."""
 
         metadata = paper.metadata or {}
-        return str(metadata.get("Authors") or metadata.get("authors") or "").strip()
+        return read_metadata_value(metadata, "authors")
 
     @staticmethod
     def _strip_author_mentions(text: str, authors: str) -> str:
@@ -2623,8 +2568,8 @@ class PaperScreeningPipeline:
         """Write a simple per-paper summary for manual review text files."""
 
         meta = record.get("metadata", {}) or {}
-        title = meta.get("Title") or meta.get("title") or ""
-        abstract = meta.get("Abstract") or meta.get("abstract") or ""
+        title = read_metadata_value(meta, "title")
+        abstract = read_metadata_value(meta, "abstract")
         decision = record.get("llm_decision", "") or ""
 
         writer.write(f"Paper ID: {record.get('paper_id', '')}\n")
@@ -4562,7 +4507,7 @@ class PaperScreeningPipeline:
                     "meta": "stage_artifact",
                     "schema_version": 1,
                     "stage": "full_text",
-                    "paper_id": str(canonical.get("Covidence #") or folder_name),
+                    "paper_id": str(canonical.get("paper_id") or folder_name),
                     "metadata": canonical,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
@@ -4581,8 +4526,8 @@ class PaperScreeningPipeline:
                         pass
 
             if not any(folder_path.glob("*.pdf")):
-                cov_id = str(canonical.get("Covidence #") or "").strip()
-                source_pdf = self._find_source_pdf_for_covidence_id(cov_id)
+                paper_id = str(canonical.get("paper_id") or "").strip()
+                source_pdf = self._find_source_pdf_for_paper_id(paper_id)
                 if source_pdf and source_pdf.exists():
                     target_pdf = folder_path / source_pdf.name
                     try:
@@ -4590,13 +4535,13 @@ class PaperScreeningPipeline:
                             shutil.copy2(source_pdf, target_pdf)
                     except Exception as exc:  # pylint: disable=broad-except
                         self._log_error(
-                            cov_id or folder_name,
+                            paper_id or folder_name,
                             f"failed to copy source PDF into retry folder: {exc}",
                             error_type="retry_pdf_copy_failed",
                         )
                 elif self.pdf_root and self.pdf_root.exists():
                     self._log_error(
-                        cov_id or folder_name,
+                        paper_id or folder_name,
                         f"no source PDF found in pdf_root={self.pdf_root} for retry folder materialization",
                         error_type="retry_pdf_source_missing",
                     )
@@ -4605,13 +4550,13 @@ class PaperScreeningPipeline:
 
         self._paper_folders = folders
 
-    def _find_source_pdf_for_covidence_id(self, covidence_id: str) -> Path | None:
-        """Locate source PDF in pdf_root using Covidence ID for retry materialization."""
+    def _find_source_pdf_for_paper_id(self, paper_id: str) -> Path | None:
+        """Locate source PDF in pdf_root using the configured paper ID for retry materialization."""
 
         if not self.pdf_root or not self.pdf_root.exists():
             return None
 
-        cid = str(covidence_id or "").strip().lstrip("#")
+        cid = str(paper_id or "").strip().lstrip("#")
         if not cid:
             return None
 
@@ -4690,8 +4635,8 @@ class PaperScreeningPipeline:
             if not row:
                 continue
 
-            cov_id = self._extract_covidence_id(row)
-            if cov_id not in included_ids:
+            paper_id = self._extract_paper_id(row)
+            if paper_id not in included_ids:
                 continue
 
             dest = target_dir / folder.name
@@ -4732,7 +4677,7 @@ class PaperScreeningPipeline:
                         "meta": "stage_artifact",
                         "schema_version": 1,
                         "stage": "data_extraction",
-                        "paper_id": str(row.get("Covidence #") or row.get("paper_id") or folder.name),
+                        "paper_id": str(read_metadata_value(row, "paper_id", folder.name)),
                         "metadata": row,
                         "updated_at": datetime.now(timezone.utc).isoformat(),
                     }
@@ -4753,7 +4698,7 @@ class PaperScreeningPipeline:
                 copied.append(dest)
             except Exception as exc:  # pylint: disable=broad-except
                 self._log_error(
-                    str(cov_id),
+                    str(paper_id),
                     f"data_extraction folder copy failed: {exc}",
                     error_type="data_extraction_copy_failed",
                 )
@@ -4810,62 +4755,26 @@ class PaperScreeningPipeline:
         return list(resolved)
 
     def _load_included_ids(self, csv_path: Path) -> set[str]:
-        """Read included IDs from a Covidence CSV."""
+        """Read included IDs from the configured included-paper CSV."""
 
         ids: set[str] = set()
         with open(csv_path, "r", encoding="utf-8") as handle:
             reader = csv.DictReader(handle)
             for row in reader:
-                cid = self._extract_covidence_id(row)
-                if cid:
-                    ids.add(cid)
+                paper_id = self._extract_paper_id(row)
+                if paper_id:
+                    ids.add(paper_id)
         return ids
 
-    def _extract_covidence_id(self, row: dict) -> str:
-        """Extract the best available Covidence/paper ID."""
+    def _extract_paper_id(self, row: dict) -> str:
+        """Extract the best available paper ID from user-configured CSV headers."""
 
-        return str(
-            row.get("Covidence #")
-            or row.get("Covidence#")
-            or row.get("paper_id")
-            or row.get("id")
-            or row.get("ID")
-            or ""
-        ).strip()
+        return read_metadata_value(row, "paper_id")
 
     def _extract_year(self, row: dict) -> str:
         """Try to find a publication year from many possible columns."""
 
-        candidates = [
-            "year",
-            "Year",
-            "year of publication",
-            "Year of publication",
-            "Year of Publication",
-            "Publication Year",
-            "publication year",
-            "Published Year",
-            "PublicationYear",
-            "PublishedYear",
-            "PubYear",
-            "PY",
-            "date",
-            "Date",
-            "publication date",
-            "Publication date",
-            "Publication Date",
-            "Date Published",
-            "Published",
-        ]
-        raw = ""
-        for candidate in candidates:
-            raw = self._match_row_value(row, candidate)
-            if raw:
-                break
-        if not raw:
-            return ""
-        match = re.search(r"(19|20)\d{2}", raw)
-        return match.group(0) if match else str(raw).strip()
+        return extract_year_from_metadata(row)
 
     @staticmethod
     def _match_row_value(row: dict, key: str) -> str:
@@ -4891,14 +4800,14 @@ class PaperScreeningPipeline:
         def norm(val: str) -> str:
             return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in (val or "")).strip("_")
 
-        cov_id = row.get("Covidence #") or row.get("Covidence#") or row.get("paper_id") or "unknown"
-        authors = row.get("authors") or row.get("Authors") or ""
+        paper_id = read_metadata_value(row, "paper_id", "unknown")
+        authors = read_metadata_value(row, "authors")
         first_author = authors.split(",")[0].strip()
         first_author = first_author.split(" ")[0] if first_author else ""
         year = self._extract_year(row)
-        title = row.get("title") or row.get("Title") or ""
+        title = read_metadata_value(row, "title")
 
-        parts = [norm(str(cov_id)), norm(str(first_author)), norm(str(year)), norm(str(title))[:TITLE_TRUNC]]
+        parts = [norm(str(paper_id)), norm(str(first_author)), norm(str(year)), norm(str(title))[:TITLE_TRUNC]]
         name = "_".join([p for p in parts if p])
         while "__" in name:
             name = name.replace("__", "_")
@@ -5099,8 +5008,8 @@ class PaperScreeningPipeline:
             return None
 
         pdf_path = pdfs[0]
-        cov_id = str(paper.metadata.get("Covidence #") or paper.paper_id).strip().lstrip("#") or "paper"
-        target = folder_path / f"{cov_id}.pdf"
+        paper_id = str(read_metadata_value(paper.metadata, "paper_id", paper.paper_id)).strip().lstrip("#") or "paper"
+        target = folder_path / f"{paper_id}.pdf"
         rename_error: Exception | None = None
 
         if pdf_path != target:
@@ -5653,10 +5562,10 @@ class PaperScreeningPipeline:
 
         info = metadata or {}
         fields = {
-            "title": str(info.get("Title") or ""),
-            "journal": str(info.get("Journal") or ""),
-            "tags": str(info.get("Tags") or ""),
-            "notes": str(info.get("Notes") or ""),
+            "title": read_metadata_value(info, "title"),
+            "journal": read_metadata_value(info, "journal"),
+            "tags": read_metadata_value(info, "tags"),
+            "notes": read_metadata_value(info, "notes"),
         }
 
         strong_rules = {
@@ -6259,6 +6168,41 @@ class PaperScreeningPipeline:
         stale_csv_path = output_dir / f"{self.stage}_extraction_results.csv"
         if stale_csv_path.exists():
             stale_csv_path.unlink()
+
+        if self._extraction_aggregate_writer is not None:
+            # human readable hint: update run-level comparison and quote-audit CSVs as soon as this paper finishes.
+            try:
+                self._extraction_aggregate_writer.append_record(extraction_payload)
+            except Exception as exc:  # pylint: disable=broad-except
+                self._log_error(
+                    paper.paper_id,
+                    f"data extraction aggregate table append failed: {exc}",
+                    error_type="data_extraction_aggregate_append_failed",
+                )
+
+    def _start_data_extraction_aggregate_writer(self) -> None:
+        """human readable hint: create live aggregate extraction CSVs before the first paper is screened."""
+
+        try:
+            self._extraction_aggregate_writer = ExtractionAggregateWriter(
+                output_dir=self.stage_output_dir,
+                consensus_path=self.csv_dir / "data_extraction_schema.csv",
+                input_paper_dir=self.csv_dir / "per_paper_data_extraction",
+                reset=bool(self.qc_only),
+            )
+            if not self.quiet:
+                print(
+                    "[extraction] Aggregate tables ready: "
+                    f"{self._extraction_aggregate_writer.comparison_path.name}, "
+                    f"{self._extraction_aggregate_writer.quote_path.name}"
+                )
+        except Exception as exc:  # pylint: disable=broad-except
+            self._extraction_aggregate_writer = None
+            self._log_error(
+                "run",
+                f"data extraction aggregate table initialization failed: {exc}",
+                error_type="data_extraction_aggregate_init_failed",
+            )
 
     def _build_extraction_payload(self, paper: PaperRecord, llm_decision: str | None) -> dict | None:
         """Parse the LLM output into structured extraction data."""

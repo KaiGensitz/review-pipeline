@@ -17,6 +17,8 @@ from datetime import datetime
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from pipeline.core.metadata_aliases import read_metadata_value
+
 
 def _normalize_text(value: str) -> str:
     """human readable hint: normalize text for robust filename/title comparison."""
@@ -108,10 +110,10 @@ def _load_targets(target_root: Path, overwrite: bool) -> list[FolderTarget]:
         if not metadata:
             continue
 
-        title = str(metadata.get("Title") or metadata.get("title") or "").strip()
-        authors = str(metadata.get("Authors") or metadata.get("authors") or "").strip()
-        year = str(metadata.get("Published Year") or metadata.get("year") or "").strip()
-        paper_id = str(metadata.get("Covidence #") or metadata.get("paper_id") or folder.name).strip()
+        title = read_metadata_value(metadata, "title")
+        authors = read_metadata_value(metadata, "authors")
+        year = read_metadata_value(metadata, "publication_year")
+        paper_id = read_metadata_value(metadata, "paper_id", folder.name)
 
         title_norm = _normalize_text(title)
         title_tokens = {tok for tok in title_norm.split(" ") if len(tok) >= 3}

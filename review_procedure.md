@@ -37,6 +37,7 @@ This document defines the execution order for screening and extraction runs.
 - `LLM_SETTINGS["context_window_total_tokens"]` and `LLM_SETTINGS["max_tokens"]` set consistently for the active model (`max_tokens < context_window_total_tokens`).
 - Stage KB file exists with `label` (`POS`/`NEG`) and `text` columns.
 - For `data_extraction`, `DATA_EXTRACTION_SCHEMA_FILE` in `config/user_orchestrator.py` points to an existing schema CSV with Covidence column mappings.
+- If your input/export headers differ, update `CSV_METADATA_COLUMN_ALIASES`, `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, and optional extraction header fallbacks in `config/user_orchestrator.py` before running.
 - Optional for `full_text`: cleaned-hybrid draft generated and selected via `KB_FILE_OVERRIDES["full_text"]` when you want the draft instead of the default full-text KB.
 
 ## Stage 0: Bootstrap KB and Prompt Suggestions
@@ -147,12 +148,17 @@ Use this section when you need to know exactly when parsing, embeddings, LLM cal
 ## Stage 3: Data Extraction
 
 1. Export included CSV to `input/` (`*_included_csv_*.csv`).
-2. Prepare `knowledge-base/data_extraction_pos-neg_examples.csv` (or configure an override in `KB_FILE_OVERRIDES["data_extraction"]`).
+2. Confirm the evidence mode in `LLM_SETTINGS["data_extraction_evidence_mode"]`.
+	- `full_text` (default): pass cached normalized full text to each domain-wise extraction call. Pros: best recall and quote coverage. Cons: high token use. `data_extraction_pos-neg_examples.csv` is mostly optional/fallback infrastructure.
+	- `selected_chunks`: pass retrieval-selected evidence chunks only. Pros: much cheaper and faster. Cons: can miss fields if retrieval misses evidence. `data_extraction_pos-neg_examples.csv` becomes important and should contain curated POS/NEG extraction snippets.
 3. Prepare the schema CSV referenced by `DATA_EXTRACTION_SCHEMA_FILE`; each row maps a dynamic LLM variable to an exact Covidence `covidence_column_name`.
-4. Ensure `input/per_paper_full_text/` exists from prior stage.
-5. Run `main.py` to build `input/per_paper_data_extraction/`.
-6. Run QC-only extraction, then human QC extraction, then validation. Extraction fields are read from the schema KB, not from hardcoded prompt JSON.
-7. If validation is acceptable, continue to remaining papers.
+4. Confirm `CSV_METADATA_COLUMN_ALIASES` can read the included CSV's paper ID/title/year columns and `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS` matches the aggregate comparison/audit headers you want.
+5. Edit `config/prompt_script_data_extraction.txt` as the human-readable conceptual framework. Do not add technical schema placeholders; the pipeline inserts the active CSV contract automatically before `# CONTEXT`.
+6. If a prompt section does not map cleanly to a schema domain, add bridge terms in `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES`.
+7. Ensure `input/per_paper_full_text/` exists from prior stage.
+8. Run `main.py` to build `input/per_paper_data_extraction/`.
+9. Run QC-only extraction, then human QC extraction, then validation. Extraction fields are read from the schema KB, not from hardcoded prompt JSON.
+10. If validation is acceptable, continue to remaining papers.
 
 ## Terminal Commands and Decision Tree
 

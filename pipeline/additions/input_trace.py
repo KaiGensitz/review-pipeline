@@ -20,6 +20,7 @@ from typing import Optional
 
 from config.user_orchestrator import CURRENT_STAGE, LLM_SETTINGS, PATH_SETTINGS, PROMPT_FILES
 from pipeline.integrations.embedding_utils import normalize_extracted_text
+from pipeline.core.metadata_aliases import read_metadata_value
 
 ELIGIBILITY_CRITERIA_PLACEHOLDER = "{eligibility_criteria}"
 DEFAULT_OUTPUT_ROOT = Path(PATH_SETTINGS.get("output_root", "output"))
@@ -399,19 +400,14 @@ def _load_folder_metadata(folder: Path) -> dict:
     return {}
 
 
-def _extract_covidence_id(row: dict) -> str:
-    return str(
-        row.get("Covidence #")
-        or row.get("Covidence#")
-        or row.get("paper_id")
-        or row.get("id")
-        or row.get("ID")
-        or ""
-    ).strip().lstrip("#")
+def _extract_paper_id(row: dict) -> str:
+    """human readable hint: read the paper ID through user-configured metadata aliases."""
+
+    return read_metadata_value(row, "paper_id").lstrip("#")
 
 
 def _find_paper_folder(stage: str, paper_id: str, csv_root: Path) -> Path:
-    """human readable hint: locate the per-paper folder by matching Covidence/paper ID in metadata."""
+    """human readable hint: locate the per-paper folder by matching configured paper IDs in metadata."""
 
     bases: list[Path] = []
     if stage == "full_text":
@@ -428,8 +424,8 @@ def _find_paper_folder(stage: str, paper_id: str, csv_root: Path) -> Path:
             if not folder.is_dir():
                 continue
             metadata = _load_folder_metadata(folder)
-            cov_id = _extract_covidence_id(metadata)
-            if cov_id and cov_id == paper_id.lstrip("#"):
+            folder_paper_id = _extract_paper_id(metadata)
+            if folder_paper_id and folder_paper_id == paper_id.lstrip("#"):
                 return folder
 
     raise FileNotFoundError(f"Could not find folder for paper_id='{paper_id}' in per-paper inputs.")
@@ -494,8 +490,8 @@ def _folder_stage_context(
     if isinstance(metadata, dict):
         merged_metadata.update(metadata)
 
-    title = str(merged_metadata.get("Title") or merged_metadata.get("title") or "")
-    authors = str(merged_metadata.get("Authors") or merged_metadata.get("authors") or "")
+    title = read_metadata_value(merged_metadata, "title")
+    authors = read_metadata_value(merged_metadata, "authors")
 
     chunks = None
     if eligibility_file is not None:
@@ -718,7 +714,7 @@ def _diagnose_mismatch(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Reconstruct and verify per-paper model input text by hash.")
     parser.add_argument("--stage", default=CURRENT_STAGE, help="Pipeline stage (title_abstract | full_text | data_extraction)")
-    parser.add_argument("--paper-id", help="Paper ID (Covidence or paper_id)")
+    parser.add_argument("--paper-id", help="Paper ID from the configured metadata aliases")
     parser.add_argument("--input-hash", help="Stored llm_input_sha256 to search for")
     parser.add_argument("--eligibility-file", help="Optional explicit eligibility JSONL path")
     parser.add_argument("--show-full-prompt", action="store_true", help="Also output merged prompt (template + evidence)")

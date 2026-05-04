@@ -98,6 +98,74 @@ PROMPT_FILES = {
 # human readable hint: this CSV defines extraction variables, types, instructions, and Covidence headers.
 DATA_EXTRACTION_SCHEMA_FILE = REPO_ROOT / "knowledge-base" / "data_extraction_schema.csv"
 
+# USER-EDITABLE CSV METADATA COLUMN ALIASES.
+# human readable hint: external CSV exports use study-specific/admin-specific column names.
+# The pipeline uses generic internal keys; edit these aliases when your export headers differ.
+CSV_METADATA_COLUMN_ALIASES = {
+	"paper_id": ["paper_id", "Covidence #", "Covidence#", "covidence id", "covidence_id", "covidence number", "Ref", "Study", "ID", "id"],
+	"title": ["title", "Title"],
+	"abstract": ["abstract", "Abstract"],
+	"authors": ["authors", "Authors", "author", "Author"],
+	"publication_year": ["publication_year", "year", "Year", "Published Year", "Year of Publication", "Publication Year", "publication year", "PublicationYear", "PublishedYear", "PubYear", "PY", "date"],
+	"publication_month": ["publication_month", "month", "Month", "Published Month", "Published month"],
+	"journal": ["journal", "Journal", "Source", "Source Title", "Publication Title"],
+	"volume": ["volume", "Volume"],
+	"issue": ["issue", "Issue"],
+	"pages": ["pages", "Pages", "Page", "page", "Page range", "Page Range"],
+	"accession_number": ["accession_number", "Accession Number", "AccessionNumber", "Accession", "WOS Accession Number"],
+	"doi": ["doi", "DOI", "Doi"],
+	"reference": ["reference", "Reference", "Ref"],
+	"study_id": ["study_id", "Study ID", "Study"],
+	"notes": ["notes", "Notes"],
+	"tags": ["tags", "Tags", "Keywords", "keywords", "label", "labels"],
+	"reviewer_name": ["Reviewer Name", "reviewer_name", "reviewer"],
+}
+
+# USER-EDITABLE DATA-EXTRACTION PROMPT ALIASES.
+# human readable hint: optional bridge terms that connect prompt sections to schema domains.
+# Keep these current-study terms here, not in pipeline/ Python files.
+DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES = {
+	"study_details": ["study metadata", "study characteristics", "first author", "author_year", "year", "country", "study design", "duration", "funding"],
+	"population": ["study metadata", "population", "sample size", "age", "gender", "ethnicity", "health status", "demographics", "baseline table"],
+	"context": ["urban context", "urban", "setting", "built environment", "location", "real-world", "metropolitan"],
+	"outcomes": ["outcomes", "physical activity", "primary pa outcome", "pa outcome", "mvpa", "step count"],
+	"concepts": ["rq1", "rq2", "rq3", "rq4", "ai & tech", "ai and technology", "architecture", "smartphone", "sensing", "psychosocial", "behavior change", "inclusivity", "ethics", "sustainability"],
+	"synthesis": ["synthesis", "findings", "implications", "limitations", "notes"],
+}
+
+# USER-EDITABLE DATA-EXTRACTION EXPORT SETTINGS.
+# human readable hint: these describe the human consensus/export table layout and AI reviewer label.
+DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS = {
+	"comparison_default_headers": ["Covidence #", "Title"],
+	"quote_audit_headers": ["Covidence #", "Title", "Domain", "Variable", "Consensus_Column", "AI_Value", "AI_Quote"],
+	"paper_id_column": "Covidence #",
+	"title_column": "Title",
+	"reviewer_name_column": "Reviewer Name",
+	"reviewer_name_value": "AI",
+	"study_id_column": "Study ID",
+	"authors_column": "authors",
+	"publication_year_column": "publication_year",
+}
+
+# USER-EDITABLE FALLBACK HEADER ALIASES FOR EXTRACTION VARIABLES.
+# human readable hint: exact covidence_column_name in the schema CSV is tried first; these aliases are optional fallbacks.
+DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES = {
+	"population.mean_age": ["Age", "Mean age", "Mean age Overall", "Mean age (years) ± SD Overall"],
+	"population.sample_size": ["Sample_size", "Sample size", "Sample size Overall"],
+	"population.gender_overall": ["Gender", "Gender Overall"],
+	"population.ethnicity_overall": ["Ethnicity", "Ethnicity Overall"],
+	"population.health_status": ["Health_status", "Health status", "Health status Overall"],
+	"population.country_overall": ["country", "Country", "Country Overall"],
+	"outcomes.reported": ["outcomes_reported"],
+}
+
+# USER-EDITABLE PROMPT SIGNAL SECTION ALIASES.
+# human readable hint: used only when prompt sections contain "- Include:" / "- Exclude:" lists for retrieval signals.
+PROMPT_SIGNAL_SECTION_ALIASES = {
+	"primary": ["intervention / exposure", "intervention/exposure", "intervention", "exposure"],
+	"secondary": ["outcome", "outcomes"],
+}
+
 # Stage-specific knowledge-base (KB) files.
 # - KNOWLEDGE_BASE_FILES holds default KB paths per stage.
 # - KB_FILE_OVERRIDES optionally swaps a stage KB for a single run.
@@ -201,7 +269,7 @@ LLM_SETTINGS = {
 	"max_tokens": 10000,  # response length cap; too low can truncate JSON, too high costs more
 	"data_extraction_split_by_domain": True,  # True = one smaller structured call per extraction domain, then merge
 	"data_extraction_response_format_mode": "prompt_only",  # prompt_only avoids broken json_schema handling on some GPUSstack models
-	"data_extraction_domain_max_tokens": 3000,  # per-domain output cap; prevents runaway malformed JSON from consuming 10000 tokens
+	"data_extraction_domain_max_tokens": 5000,  # per-domain output cap; quote-heavy domains need room to finish valid JSON
 	"data_extraction_evidence_mode": "full_text",  # full_text = use cached normalized full text; selected_chunks = use retrieval slice
 	"data_extraction_full_text_max_words": 0,  # 0 = no word cap; set a number only if full texts exceed model context
 	"temperature": 0.0,  # randomness; lower = more stable decisions, higher = more variable

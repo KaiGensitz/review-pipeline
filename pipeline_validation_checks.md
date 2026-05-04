@@ -45,7 +45,13 @@ This document lists implementation-level checks to verify run readiness and outp
 - Full-text retrieval now applies adaptive fallback (`top_k` expansion and threshold relaxation) when primary evidence is too weak.
 - Full-text retrieval now applies a final raw-chunk non-title rescue when adaptive selection still yields title-only evidence.
 - Topic keyword signals used by full-text ranking are now derived from the active prompt (`Intervention / Exposure` + `Outcome` include lists), not fixed to one review theme.
+- Prompt section names used for retrieval signals come from `PROMPT_SIGNAL_SECTION_ALIASES` in `config/user_orchestrator.py`; edit that block if a future prompt uses different include/exclude section labels.
 - Data-extraction schemas are derived from `DATA_EXTRACTION_SCHEMA_FILE` in `config/user_orchestrator.py` (default `knowledge-base/data_extraction_schema.csv`), including Covidence column mappings, not from review-topic-specific Python classes.
+- Data-extraction prompts should be human-readable conceptual frameworks. Do not add technical insertion markers; domain-wise runtime prompts automatically insert matching `# STEPS` guidance plus the exact schema CSV contract before `# CONTEXT`.
+- Domain-specific prompt matching uses schema text plus optional `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` from `config/user_orchestrator.py`; review-topic words should stay there, in prompts, or in schema CSVs.
+- Input export/admin headers should be checked in `CSV_METADATA_COLUMN_ALIASES` and `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, not in pipeline Python.
+- For domain-wise data extraction, verify the runtime prompt contains only the relevant conceptual guidance for the active domain plus the exact `{variable_name}_value` / `{variable_name}_quote` keys from `DATA_EXTRACTION_SCHEMA_FILE`.
+- With `data_extraction_split_by_domain=True`, the saved prompt-template snapshot is intentionally close to the user-authored prompt; inspect input traces when you need the exact schema-injected prompt sent for one paper/domain.
 - Data extraction is split by KB domain by default; if errors occur, inspect `data_extraction_domain_validation_failed` entries to identify the failing domain rather than rerunning the whole paper blindly.
 - For GPUSstack `gpt-oss-120b`, keep `LLM_SETTINGS["data_extraction_response_format_mode"]="prompt_only"` unless a small live test proves that `json_schema` is enforced correctly.
 - Data extraction should use `LLM_SETTINGS["data_extraction_evidence_mode"]="full_text"` when the objective is extraction from the complete normalized PDF rather than a small retrieval slice.
@@ -158,9 +164,10 @@ Validation command:
 
 Required inputs:
 - `input/*_included_csv_*.csv`
-- `knowledge-base/data_extraction_pos-neg_examples.csv` (or stage-specific override configured in `config/user_orchestrator.py`)
+- `knowledge-base/data_extraction_pos-neg_examples.csv` only matters for retrieval-based extraction (`data_extraction_evidence_mode="selected_chunks"`); in default `full_text` mode it is optional/fallback infrastructure
 - extraction schema/mapping KB: `DATA_EXTRACTION_SCHEMA_FILE` in `config/user_orchestrator.py`
 - Covidence gold-standard CSV: `input/data_extraction_schema.csv` (or explicit `--consensus`)
+- external metadata/admin header mapping: `CSV_METADATA_COLUMN_ALIASES`, `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, and optional `DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES` in `config/user_orchestrator.py`
 
 Expected outputs:
 - per-paper in `output/data_extraction/<paper_folder>/`:
@@ -168,12 +175,19 @@ Expected outputs:
   - `data_extraction_evidence.json`
 - run-level:
   - `output/data_extraction/data_extraction_<sample>_sample_<main|retry_#>_resource_usage_<timestamp>.log`
+  - live aggregate files, created at data-extraction run start and appended paper-by-paper:
+    - `data_extraction_all_papers_for_consensus_comparison.csv`
+    - `data_extraction_all_papers_quote_audit.csv`
+  - `python -m pipeline.additions.export_extraction_tables` can rebuild the two aggregate files from per-paper JSONL outputs.
 
 Validation command:
 - `python -m pipeline.additions.stats_engine --consensus <Covidence_gold_standard.csv>`
 - The validator reads the configured schema CSV, maps each LLM `{variable_name}_value` to the exact `covidence_column_name`, and compares with type-aware coercion.
 - Concordance excludes human `Not Available`/`n/a`; accuracy includes correctly identified missing values.
 - If a model returns malformed JSON for one domain, the merged payload keeps fallback missing values for that domain and logs the domain-specific validation error.
+- Evidence mode check:
+  - `full_text`: best recall and quote coverage; high token use; POS/NEG extraction KB has low impact.
+  - `selected_chunks`: lower cost and faster; depends on retrieval quality; POS/NEG extraction KB has high impact and should be curated.
 
 Validation exports for repository upload:
 - `data_extraction_extraction_accuracy_report.txt`

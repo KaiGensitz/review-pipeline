@@ -23,6 +23,7 @@ from pipeline.core.extraction_io import (
 )
 from pipeline.core.extraction_schema import DynamicExtractionSchema, parse_and_validate
 from pipeline.core.prompt_context import load_stage_prompt_template
+from pipeline.additions.export_extraction_tables import ExtractionAggregateWriter
 
 
 TOKENS_PER_WORD = 1.3
@@ -181,6 +182,12 @@ async def run_extraction() -> None:
     csv_dir = Path(PATH_SETTINGS.get("csv_dir") or Path.cwd() / "input")
     output_root = Path(PATH_SETTINGS.get("output_root", Path.cwd() / "output")) / STAGE
     output_root.mkdir(parents=True, exist_ok=True)
+    aggregate_writer = ExtractionAggregateWriter(
+        output_dir=output_root,
+        consensus_path=csv_dir / "data_extraction_schema.csv",
+        input_paper_dir=csv_dir / "per_paper_data_extraction",
+        reset=True,
+    )
 
     context_window = require_setting(LLM_SETTINGS, "context_window_total_tokens", "LLM_SETTINGS", int)
     max_tokens = require_setting(LLM_SETTINGS, "max_tokens", "LLM_SETTINGS", int)
@@ -223,6 +230,7 @@ async def run_extraction() -> None:
         payload = await coro
         folder_name = str(payload.get("folder_name") or payload.get("paper_id") or "paper")
         write_outputs(payload, output_root, folder_name)
+        aggregate_writer.append_record(payload)
 
     print(f"[extraction] Completed {len(papers)} papers. Outputs in {output_root}.")
 

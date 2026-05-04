@@ -153,8 +153,13 @@ Behavior notes:
   - Knowledge-base override: set `KNOWLEDGE_BASE_FILES["data_extraction"]` or `KB_FILE_OVERRIDES["data_extraction"]` in [config/user_orchestrator.py](config/user_orchestrator.py)
   - PDFs reused in `input/per_paper_data_extraction/`
   - extraction schema and Covidence validation mapping are read from `DATA_EXTRACTION_SCHEMA_FILE` in [config/user_orchestrator.py](config/user_orchestrator.py)
+  - CSV/admin headers are read through `CSV_METADATA_COLUMN_ALIASES` and `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS` in [config/user_orchestrator.py](config/user_orchestrator.py); pipeline Python stays topic- and export-vendor-generic
+  - prompt-to-domain matching uses schema text plus optional `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` in [config/user_orchestrator.py](config/user_orchestrator.py)
   - extraction is split by KB `domain` by default, so each LLM call receives a smaller schema and the validated domain outputs are merged
+  - [config/prompt_script_data_extraction.txt](config/prompt_script_data_extraction.txt) is the human-readable conceptual framework. It should not contain technical insertion markers; the pipeline automatically inserts the active schema CSV contract before `# CONTEXT` at runtime.
+  - with domain-wise extraction enabled, prompt-template snapshots stay close to the user-authored prompt; use input traces to inspect the exact schema-injected runtime prompt
   - direct async command remains available: `python -m pipeline.core.run_extraction`
+  - `data_extraction_pos-neg_examples.csv` mainly matters when `LLM_SETTINGS["data_extraction_evidence_mode"]="selected_chunks"`; with the default `full_text` mode, the LLM receives cached normalized full text, so extraction quality is driven mostly by `data_extraction_schema.csv` and `prompt_script_data_extraction.txt`
 
 Eligibility criteria can be centrally stored in [knowledge-base/eligibility_criteria.txt](knowledge-base/eligibility_criteria.txt).
 - The file is injected only when a stage prompt contains `{eligibility_criteria}`.
@@ -174,12 +179,16 @@ Use this block when you switch to a different review topic.
 2. Update study tags in [config/user_orchestrator.py](config/user_orchestrator.py).
   - Edit the `USER-EDITABLE STUDY TAGS` block so each `STUDY_TAGS_INCLUDE` entry represents one exclusion category you expect in QC validation.
   - Tags are normalized to snake_case internally, so `No intervention` maps to `no_intervention`.
-3. Update the stage knowledge base.
+3. Update CSV/export aliases in [config/user_orchestrator.py](config/user_orchestrator.py).
+  - Edit `CSV_METADATA_COLUMN_ALIASES` when your input export uses different paper ID, title, author, year, reviewer, or study ID headers.
+  - Edit `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS` if the aggregate extraction CSVs need different administrative column labels.
+  - Edit `PROMPT_SIGNAL_SECTION_ALIASES` and `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` only when your prompt section names need explicit help mapping to retrieval signals or extraction domains.
+4. Update the stage knowledge base.
   - Replace POS/NEG examples with topic-matched examples in [knowledge-base](knowledge-base).
   - For data extraction, set `DATA_EXTRACTION_SCHEMA_FILE` if the schema CSV is renamed or moved.
-4. Run QC first, then confirm alignment.
+5. Run QC first, then confirm alignment.
   - Start with QC sampling and verify AI vs human output before full screening.
-5. Verify startup and diagnostics.
+6. Verify startup and diagnostics.
   - Startup now prints dynamic schema summary lines (`[schema] ...`) with active exclusion keys and source counts.
   - In diagnostics, check `selection_trace.schema_exclusion_tag_count` and `selection_trace.schema_exclusion_tags_preview`.
 
@@ -189,6 +198,8 @@ Dynamic behavior implemented in pipeline:
 - Prompt-derived retrieval/schema signal helpers live in `pipeline/selection/prompt_signals.py`, keeping the main pipeline class focused on orchestration.
 - `main.py` keeps the interactive stage flow; retry bookkeeping, output indexing, and startup checks live in focused `pipeline/additions` modules.
 - Data-extraction validation is dynamic: each KB `variable_name` maps to the exact Covidence header in `covidence_column_name`.
+- Data-extraction prompting is prompt-driven plus CSV-validated: users edit the prompt for review concepts/domains and edit `DATA_EXTRACTION_SCHEMA_FILE` for exact output variables, value types, missing-value rules, and Covidence headers.
+- Input metadata and aggregate-output administrative labels are config-driven through `CSV_METADATA_COLUMN_ALIASES` and `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, so a different export system should require config edits rather than pipeline edits.
 - No code edits are required for topic changes if prompt, knowledge base, and `user_orchestrator.py` are updated consistently.
 
 ## Quality Control and Retry Behavior
@@ -256,6 +267,12 @@ Data extraction additionally writes per-paper:
 - `data_extraction_results.jsonl` and `data_extraction_results.csv`
 - `data_extraction_evidence.json`
 
+Data extraction run-level exports for review and audit:
+- The files are created at the start of a data-extraction run and appended as each QC or remaining paper finishes.
+- `python -m pipeline.additions.export_extraction_tables` can still rebuild them from per-paper JSONL files.
+- `data_extraction_all_papers_for_consensus_comparison.csv`: one AI row per paper in the same header layout as `input/data_extraction_schema.csv`
+- `data_extraction_all_papers_quote_audit.csv`: long audit table with value plus supporting quote for every variable
+
 Data-extraction validation additionally writes run-level exports:
 - `data_extraction_extraction_accuracy_report.txt`
 - `data_extraction_extraction_accuracy_report.csv`
@@ -268,6 +285,16 @@ Data-extraction schema and validation mapping:
 - `LLM_SETTINGS["data_extraction_split_by_domain"]` defaults to `True`; `data_extraction_domain_max_tokens` caps each domain response to prevent runaway malformed JSON.
 - `LLM_SETTINGS["data_extraction_response_format_mode"]` defaults to `prompt_only` for GPUSstack compatibility; use `json_schema` only with a backend proven to enforce OpenAI Structured Outputs.
 - `LLM_SETTINGS["data_extraction_evidence_mode"]` defaults to `full_text`, so extraction uses cached `full_text_normalized.txt` instead of only the selected screening chunks.
+
+Data-extraction evidence modes:
+- `full_text` mode, current default:
+  - Pros: highest recall; does not depend on retrieval quality; best for final extraction and quote audit.
+  - Cons: high token use because full text is repeated across domain-wise calls; slower and more expensive.
+  - POS/NEG KB impact: low. `data_extraction_schema.csv` and the extraction prompt drive quality.
+- `selected_chunks` mode:
+  - Pros: much lower token use; faster; `data_extraction_pos-neg_examples.csv` can improve chunk retrieval.
+  - Cons: lower recall if important evidence is not selected; riskier for final extraction unless chunk selection is well validated.
+  - POS/NEG KB impact: high. Curate concise POS/NEG snippets when using this mode.
 
 ## High-Priority Failure Checks
 
