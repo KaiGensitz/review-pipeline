@@ -267,7 +267,8 @@ LLM_SETTINGS = {
 	"prompt_path": str(PROMPT_FILE),  # stage-specific prompt; changes decision logic per stage
 	"context_window_total_tokens": 78000,  # model context window (input + output combined); set per model
 	"max_tokens": 10000,  # response length cap; too low can truncate JSON, too high costs more
-	"data_extraction_split_by_domain": False,  # False = one full-text call per paper; True = safer but repeats full text for each domain
+	"data_extraction_split_by_domain": True,  # True = validate smaller schema batches; False = one fragile full-schema response
+	"data_extraction_domain_groups": [["study_details", "population"], ["outcomes", "context"], ["concepts"], ["synthesis"]],  # optional schema-domain batches; missing domains are appended automatically
 	"data_extraction_response_format_mode": "prompt_only",  # prompt_only avoids broken json_schema handling on some GPUSstack models
 	"data_extraction_domain_max_tokens": 5000,  # per-domain output cap; quote-heavy domains need room to finish valid JSON
 	"data_extraction_evidence_mode": "full_text",  # full_text = use cached normalized full text; selected_chunks = use retrieval slice

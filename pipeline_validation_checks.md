@@ -50,9 +50,9 @@ This document lists implementation-level checks to verify run readiness and outp
 - Data-extraction prompts should be human-readable conceptual frameworks. Do not add technical insertion markers; runtime prompts automatically insert the exact schema CSV contract before `# CONTEXT`.
 - Domain-specific prompt matching uses schema text plus optional `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` from `config/user_orchestrator.py`; review-topic words should stay there, in prompts, or in schema CSVs.
 - Input export/admin headers should be checked in `CSV_METADATA_COLUMN_ALIASES` and `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, not in pipeline Python.
-- With default single-call data extraction, verify the runtime prompt keeps the conceptual `# STEPS` checklist and includes the complete `{variable_name}_value` / `{variable_name}_quote` contract from `DATA_EXTRACTION_SCHEMA_FILE`.
-- If `data_extraction_split_by_domain=True`, verify each runtime prompt contains only the relevant conceptual guidance for the active domain plus that domain's exact schema keys.
-- If domain-wise extraction errors occur, inspect `data_extraction_domain_validation_failed` entries to identify the failing domain rather than rerunning the whole paper blindly.
+- With default grouped data extraction, verify each runtime prompt contains only the relevant conceptual guidance for the active domain batch plus that batch's exact `{variable_name}_value` / `{variable_name}_quote` keys from `DATA_EXTRACTION_SCHEMA_FILE`.
+- Verify `LLM_SETTINGS["data_extraction_domain_groups"]` contains only domain names present in the active schema CSV; missing schema domains are appended as singleton batches automatically.
+- If grouped/domain-wise extraction errors occur, inspect `data_extraction_domain_validation_failed` entries to identify the failing domain batch rather than rerunning the whole paper blindly.
 - For GPUSstack `gpt-oss-120b`, keep `LLM_SETTINGS["data_extraction_response_format_mode"]="prompt_only"` unless a small live test proves that `json_schema` is enforced correctly.
 - Data extraction should use `LLM_SETTINGS["data_extraction_evidence_mode"]="full_text"` when the objective is extraction from the complete normalized PDF rather than a small retrieval slice.
 - Full-text retrieval now uses hybrid PDF extraction quality controls (pdfplumber + PyPDF fallback, repeated header/footer cleanup).

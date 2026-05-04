@@ -21,7 +21,7 @@ from pipeline.core.extraction_io import (
     serialize_result,
     write_outputs,
 )
-from pipeline.core.extraction_schema import DynamicExtractionSchema, parse_and_validate
+from pipeline.core.extraction_schema import DynamicExtractionSchema, domain_groups_for_schema, parse_and_validate
 from pipeline.core.prompt_context import load_stage_prompt_template
 from pipeline.additions.export_extraction_tables import ExtractionAggregateWriter
 
@@ -112,9 +112,11 @@ async def _process_paper(
                 LLM_SETTINGS.get("data_extraction_response_format_mode", "prompt_only") or "prompt_only"
             ).strip().lower()
 
-            # human readable hint: smaller domain-level schemas avoid long malformed JSON from one large extraction call.
-            for domain in schema.domains:
-                domain_schema = schema.for_domain(domain)
+            # human readable hint: configured domain groups avoid one large malformed JSON while reducing repeated full-text calls.
+            domain_groups = domain_groups_for_schema(schema, LLM_SETTINGS.get("data_extraction_domain_groups"))
+            for domains in domain_groups:
+                group_label = "+".join(domains)
+                domain_schema = schema.for_domains(domains)
                 domain_prompt = domain_schema.inject_into_prompt(base_prompt_template)
                 domain_input = _build_llm_input(paper, domain_prompt, max_prompt_tokens)
                 response_format = None
@@ -131,22 +133,25 @@ async def _process_paper(
                     temperature=temperature,
                     top_p=top_p,
                 )
-                raw_by_domain[domain] = raw_text
+                raw_by_domain[group_label] = raw_text
                 domain_data, domain_error = parse_and_validate(raw_text, domain_schema)
                 if domain_error:
-                    errors_by_domain[domain] = domain_error
+                    errors_by_domain[group_label] = domain_error
                     append_error(
                         error_log,
                         {
                             "paper_id": paper.paper_id,
-                            "error": f"domain '{domain}' failed validation: {domain_error}",
+                            "error": f"domain group '{group_label}' failed validation: {domain_error}",
                             "stage": STAGE,
                             "error_type": "data_extraction_domain_validation_failed",
                         },
                     )
                     continue
-                if isinstance(domain_data.get(domain), dict):
-                    merged_payload[domain] = domain_data[domain]
+                for domain in domains:
+                    if isinstance(domain_data.get(domain), dict):
+                        merged_payload[domain] = domain_data[domain]
+                    else:
+                        errors_by_domain[domain] = "validated domain payload missing expected domain key"
 
             extracted_data = schema.validate_payload(merged_payload)
             merged_raw = json.dumps(

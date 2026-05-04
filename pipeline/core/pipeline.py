@@ -54,6 +54,7 @@ from pipeline.selection.pdf_parser import (
 from pipeline.integrations.llm_client import OpenAIResponder
 from pipeline.core.extraction_schema import (
     DynamicExtractionSchema,
+    domain_groups_for_schema,
     flatten_extracted_data,
     parse_and_validate,
 )
@@ -5086,8 +5087,13 @@ class PaperScreeningPipeline:
             LLM_SETTINGS.get("data_extraction_response_format_mode", "prompt_only") or "prompt_only"
         ).strip().lower()
 
-        for domain in self._extraction_schema.domains:
-            domain_schema = self._extraction_schema.for_domain(domain)
+        domain_groups = domain_groups_for_schema(
+            self._extraction_schema,
+            LLM_SETTINGS.get("data_extraction_domain_groups"),
+        )
+        for domains in domain_groups:
+            group_label = "+".join(domains)
+            domain_schema = self._extraction_schema.for_domains(domains)
             domain_prompt = domain_schema.inject_into_prompt(self._base_prompt_template)
             response_format_override: dict | None = None
             use_schema_response_format = response_format_mode == "json_schema"
@@ -5104,22 +5110,23 @@ class PaperScreeningPipeline:
             )
             self._add_llm_usage(usage_totals, usage)
             if not raw_text:
-                errors_by_domain[domain] = "empty_response"
+                errors_by_domain[group_label] = "empty_response"
                 continue
             if isinstance(raw_text, str) and raw_text.startswith("LLM error"):
-                errors_by_domain[domain] = raw_text
+                errors_by_domain[group_label] = raw_text
                 continue
 
             parsed_domain, validation_error = parse_and_validate(raw_text, domain_schema)
             if validation_error:
-                errors_by_domain[domain] = validation_error
+                errors_by_domain[group_label] = validation_error
                 continue
 
-            domain_payload = parsed_domain.get(domain)
-            if isinstance(domain_payload, dict):
-                merged_payload[domain] = domain_payload
-            else:
-                errors_by_domain[domain] = "validated domain payload missing expected domain key"
+            for domain in domains:
+                domain_payload = parsed_domain.get(domain)
+                if isinstance(domain_payload, dict):
+                    merged_payload[domain] = domain_payload
+                else:
+                    errors_by_domain[domain] = "validated domain payload missing expected domain key"
 
         try:
             merged_payload = self._extraction_schema.validate_payload(merged_payload)
@@ -5128,6 +5135,7 @@ class PaperScreeningPipeline:
             merged_payload = self._extraction_schema.default_payload()
 
         usage_totals["domain_count"] = len(self._extraction_schema.domains)
+        usage_totals["domain_group_count"] = len(domain_groups)
         usage_totals["domain_error_count"] = len(errors_by_domain)
         return json.dumps(merged_payload, ensure_ascii=False), usage_totals, errors_by_domain
 

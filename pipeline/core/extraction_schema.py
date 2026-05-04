@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast, get_args
@@ -84,6 +85,7 @@ class DynamicExtractionSchema:
     model: type[BaseModel]
     instructions_text: str
     domain_overview_text: str
+    prompt_scoped: bool = False
 
     @classmethod
     def from_kb(cls, kb_path: str | Path | None = None) -> "DynamicExtractionSchema":
@@ -118,13 +120,11 @@ class DynamicExtractionSchema:
 
         prompt = prompt_template or ""
         original_prompt = prompt
-        # human readable hint: Full-schema snapshots already contain the full
-        # conceptual framework in the user prompt, so repeating it wastes tokens
-        # and makes the prompt hard to audit. One-domain runtime calls get only
-        # the matching # STEPS guidance after broad conceptual sections are
-        # removed.
-        is_domain_scoped = len(self.domains) == 1
-        guidance_text = format_prompt_domain_guidance(original_prompt, self.variables) if is_domain_scoped else ""
+        # human readable hint: Full-schema snapshots keep the scientist-written
+        # conceptual framework. Scoped runtime calls, whether one domain or a
+        # configured domain group, copy only matching # STEPS guidance after
+        # broad conceptual sections are removed.
+        guidance_text = format_prompt_domain_guidance(original_prompt, self.variables) if self.prompt_scoped else ""
         generated_block = format_generated_prompt_block(guidance_text, self.domain_overview_text, self.instructions_text)
 
         for placeholder, replacement_kind in PROMPT_MARKER_REPLACEMENTS.items():
@@ -133,7 +133,7 @@ class DynamicExtractionSchema:
         if any(placeholder in original_prompt for placeholder in PROMPT_MARKER_REPLACEMENTS):
             return prompt
 
-        if is_domain_scoped:
+        if self.prompt_scoped:
             prompt = remove_prompt_conceptual_schema_sections(prompt, remove_steps=True, remove_end_goal=True)
         else:
             prompt = remove_prompt_conceptual_schema_sections(prompt, remove_steps=False, remove_end_goal=True)
@@ -165,9 +165,19 @@ class DynamicExtractionSchema:
     def for_domain(self, domain: str) -> "DynamicExtractionSchema":
         """human readable hint: build a smaller schema for one domain so the LLM returns shorter JSON."""
 
-        selected = tuple(variable for variable in self.variables if variable.domain == domain)
+        return self.for_domains((domain,))
+
+    def for_domains(self, domains: Iterable[str]) -> "DynamicExtractionSchema":
+        """human readable hint: build a scoped schema for one or more configured domains."""
+
+        requested = tuple(dict.fromkeys(str(domain) for domain in domains if str(domain or "").strip()))
+        selected = tuple(variable for variable in self.variables if variable.domain in requested)
         if not selected:
-            raise ValueError(f"Unknown extraction domain: {domain}")
+            raise ValueError(f"Unknown extraction domain group: {', '.join(requested) or '<empty>'}")
+        found_domains = {variable.domain for variable in selected}
+        missing_domains = [domain for domain in requested if domain not in found_domains]
+        if missing_domains:
+            raise ValueError(f"Unknown extraction domain(s): {', '.join(missing_domains)}")
         response_shape = build_response_shape(selected)
         return DynamicExtractionSchema(
             kb_path=self.kb_path,
@@ -176,6 +186,7 @@ class DynamicExtractionSchema:
             model=build_pydantic_model(selected),
             instructions_text=format_instruction_block(selected, response_shape),
             domain_overview_text=format_domain_overview(selected),
+            prompt_scoped=True,
         )
 
     def validate_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -235,6 +246,42 @@ def format_prompt_domain_guidance(prompt_template: str, variables: tuple[Extract
             ]
         )
     return "\n".join(lines)
+
+
+def domain_groups_for_schema(
+    schema: DynamicExtractionSchema,
+    configured_groups: Any,
+) -> tuple[tuple[str, ...], ...]:
+    """human readable hint: convert user-configured domain groups into valid schema-domain batches."""
+
+    schema_domains = tuple(schema.domains)
+    schema_domain_set = set(schema_domains)
+    if not configured_groups:
+        return tuple((domain,) for domain in schema_domains)
+
+    groups: list[tuple[str, ...]] = []
+    seen: set[str] = set()
+    for group_index, group in enumerate(configured_groups, start=1):
+        if isinstance(group, str):
+            domains = (group.strip(),)
+        elif isinstance(group, Iterable):
+            domains = tuple(str(domain).strip() for domain in group if str(domain or "").strip())
+        else:
+            raise ValueError(f"Invalid data extraction domain group #{group_index}: {group!r}")
+        domains = tuple(dict.fromkeys(domain for domain in domains if domain))
+        unknown = [domain for domain in domains if domain not in schema_domain_set]
+        if unknown:
+            raise ValueError(
+                "DATA_EXTRACTION domain group references unknown schema domain(s): " + ", ".join(unknown)
+            )
+        if domains:
+            groups.append(domains)
+            seen.update(domains)
+
+    for domain in schema_domains:
+        if domain not in seen:
+            groups.append((domain,))
+    return tuple(groups)
 
 
 def prompt_guidance_blocks_for_domains(

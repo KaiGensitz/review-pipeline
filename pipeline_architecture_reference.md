@@ -59,7 +59,7 @@ Cross-reference: for an operator-facing 1-X runtime sequence (including exactly 
 
 - `title_abstract`: full `Title + Abstract` is injected directly into prompt `{data}` (no chunking/top-k filtering), eligibility JSONL outputs.
 - `full_text`: per-paper folder/PDF workflow, page-line chunking with relevance selection (`top_k`/threshold), eligibility JSONL outputs, and compact/full per-paper artifact persistence.
-- `data_extraction`: human-readable extraction prompt plus the configured extraction schema CSV, prompt-derived guidance, KB-derived dynamic schema validation, per-paper extraction JSONL/CSV outputs, evidence JSON. The default mode sends one full-text request per paper; domain-wise requests are an optional fallback.
+- `data_extraction`: human-readable extraction prompt plus the configured extraction schema CSV, prompt-derived guidance, KB-derived dynamic schema validation, per-paper extraction JSONL/CSV outputs, evidence JSON. The default mode sends one request per configured schema-domain batch.
 - External CSV metadata headers and extraction aggregate administrative columns are resolved through user-editable aliases in `config/user_orchestrator.py`, keeping `pipeline/` Python generic across review topics and export systems.
 - Direct extraction runner: `pipeline/core/run_extraction.py` remains executable and delegates schema validation to `pipeline/core/extraction_schema.py` and file handling to `pipeline/core/extraction_io.py`.
 - Prompt-derived retrieval/schema signals are isolated in `pipeline/selection/prompt_signals.py`; `pipeline/core/pipeline.py` now consumes those helpers instead of carrying the parsing logic inline.
@@ -74,12 +74,12 @@ Prompt/schema behavior:
 - Aggregate extraction output labels and the AI reviewer label are controlled by `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, not by hardcoded pipeline constants.
 - `data_extraction` generates `{variable_name}_value` and `{variable_name}_quote` for every row in the configured extraction schema CSV; missing values use `Not Available`, `false`, or `[]`, with quote `null`.
 - `data_extraction` is performed asynchronously with the user-editable `LLM_SETTINGS["async_max_concurrency"]` semaphore for LLM requests.
-- `data_extraction` defaults to one complete extraction request per paper (`data_extraction_split_by_domain=False`) so full-text evidence is not resent for every schema domain. If domain-wise mode is enabled, each domain is capped with `data_extraction_domain_max_tokens`.
+- `data_extraction` defaults to grouped schema-domain requests (`data_extraction_split_by_domain=True`) so each response remains small enough to validate while `data_extraction_domain_groups` reduces repeated full-text calls. Each batch is capped with `data_extraction_domain_max_tokens`.
 - The extraction response-format transport is configurable. `prompt_only` avoids provider-side `json_schema` incompatibilities while still validating every response against the KB-derived Pydantic model after generation.
 - Data extraction evidence defaults to cached normalized full text (`full_text_normalized.txt`); selected chunks are retained for audit and fallback.
-- With `data_extraction_split_by_domain=False`, the saved `data_extraction_prompt_template_*.txt` snapshot contains the human prompt plus the generated schema contract. With domain-wise mode enabled, exact KB-injected domain prompts are checked through per-paper input traces.
+- With `data_extraction_split_by_domain=True`, the saved `data_extraction_prompt_template_*.txt` snapshot stays close to the human prompt, while exact KB-injected batch prompts are checked through per-paper input traces.
 - Evidence-mode tradeoff:
-  - `full_text`: best recall and quote coverage. In default single-call mode, full text is sent once per paper; in optional domain-wise mode, token cost rises because the full text is repeated across domain calls. In this mode `data_extraction_pos-neg_examples.csv` has low direct impact.
+  - `full_text`: best recall and quote coverage. In grouped domain-wise mode, full text is repeated for each configured schema batch, trading extra input tokens for much shorter and more reliable JSON responses. In this mode `data_extraction_pos-neg_examples.csv` has low direct impact.
   - `selected_chunks`: lower token cost and faster runs, but recall depends on retrieval. In this mode `data_extraction_pos-neg_examples.csv` has high impact because it guides evidence selection.
 - If `{eligibility_criteria}` is in the prompt, the pipeline attempts to inject `knowledge-base/eligibility_criteria.txt`.
 - If the placeholder is absent, no criteria-file lookup is performed.

@@ -69,7 +69,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: Data extraction defaults to `data_extraction_response_format_mode="prompt_only"` because this GPUSstack model returned malformed JSON when sent strict `json_schema` response_format payloads.
 - Human readable hint: Data extraction defaults to `data_extraction_evidence_mode="full_text"` so extraction prompts use cached normalized full text rather than only the screening-selected chunks.
 - Human readable hint: With `data_extraction_evidence_mode="full_text"`, `knowledge-base/data_extraction_pos-neg_examples.csv` has low direct impact; it becomes important only when extraction uses `selected_chunks`.
-- Human readable hint: Data extraction defaults to `data_extraction_split_by_domain=False`, which sends the full normalized manuscript once per paper and validates the complete CSV schema in one response. Set it to `True` only as a fallback when a backend struggles with one larger extraction JSON.
+- Human readable hint: Data extraction defaults to `data_extraction_split_by_domain=True` with optional `data_extraction_domain_groups`, which keeps each JSON response smaller while reducing repeated full-text calls compared with one call per individual domain.
 - Human readable hint: Total model context budget is configured in `LLM_SETTINGS["context_window_total_tokens"]` and combined with `max_tokens` to derive prompt budget at runtime.
 
 ## main.py
@@ -518,7 +518,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: stable fingerprint to verify whether two input texts are exactly identical.
 
 #### PaperScreeningPipeline._persist_prompt_template_snapshot()
-- Human readable hint: persist one prompt snapshot per campaign hash and reuse identical existing snapshots to avoid duplicate files; default data extraction snapshots contain the user prompt plus the generated schema contract, while optional domain-wise exact prompts live in input traces.
+- Human readable hint: persist one prompt snapshot per campaign hash and reuse identical existing snapshots to avoid duplicate files; grouped data extraction snapshots stay close to the user prompt while exact schema-injected batch prompts live in input traces.
 
 #### PaperScreeningPipeline.run()
 - Human readable hint: Main pipeline: prep folders (if needed), QC sample, then screen papers. Split-only prep skips prompt snapshot persistence.
@@ -562,7 +562,7 @@ This appendix provides function-level explanations for scripts and classes in th
 #### PaperScreeningPipeline._process_paper_async(paper)
 - Human readable hint: run stage-specific chunking, selection, LLM calls, validation, and diagnostics in one async flow.
 - Human readable hint: full_text keeps the final valid adjudication output and records borderline state in diagnostics instead of forcing a final hard validation failure.
-- Human readable hint: data_extraction normally calls the LLM once per paper with the full schema; optional domain-wise mode calls once per KB domain, validates each small response, merges domains, and logs only domains that fail.
+- Human readable hint: data_extraction normally calls the LLM once per configured schema-domain batch, validates each smaller response, merges domains, and logs only batches that fail.
 
 #### PaperScreeningPipeline._process_paper(paper)
 - Human readable hint: sync mode reuses the async processing core to avoid duplicate decision logic.
@@ -805,7 +805,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: send one extraction prompt with the KB-generated OpenAI `response_format` and return the raw JSON text.
 
 #### _process_paper(...)
-- Human readable hint: process one paper with bounded concurrency, CSV-schema validation, fallback output, and append-only errors; optional domain-wise mode uses the same schema one domain at a time.
+- Human readable hint: process one paper with bounded concurrency, CSV-schema validation, fallback output, and append-only errors; grouped mode uses the same schema in smaller configured batches.
 
 #### run_extraction()
 - Human readable hint: direct async runner for prepared `input/per_paper_data_extraction/` folders.
@@ -843,7 +843,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: compatibility shim; extraction schemas now come from the CSV KB, not from prompt JSON.
 
 #### DynamicExtractionSchema.inject_into_prompt(prompt_template)
-- Human readable hint: keeps the user prompt as the conceptual framework, removes the conceptual response guide from runtime prompts, and inserts the KB-generated field contract before `# CONTEXT`; optional one-domain runtime calls copy only matching `# STEPS` guidance.
+- Human readable hint: keeps the user prompt as the conceptual framework, removes the conceptual response guide from runtime prompts, and inserts the KB-generated field contract before `# CONTEXT`; scoped runtime calls copy only matching `# STEPS` guidance for one domain or one configured domain batch.
 - Human readable hint: legacy insertion placeholders are still tolerated for old prompt files, but future user prompts should be plain, readable review frameworks without technical markers.
 
 #### DynamicExtractionSchema.domains
@@ -851,6 +851,9 @@ This appendix provides function-level explanations for scripts and classes in th
 
 #### DynamicExtractionSchema.for_domain(domain)
 - Human readable hint: build a one-domain schema and instruction block for short, more reliable extraction responses.
+
+#### DynamicExtractionSchema.for_domains(domains)
+- Human readable hint: build a scoped schema for a configured group of domains so the run can balance fewer LLM calls with reliable smaller JSON responses.
 
 #### DynamicExtractionSchema.validate_payload(payload)
 - Human readable hint: validate one model JSON response and serialize it with exact KB-generated keys.
@@ -876,6 +879,9 @@ This appendix provides function-level explanations for scripts and classes in th
 #### format_prompt_domain_guidance(prompt_template, variables)
 - Human readable hint: select only the conceptual prompt guidance relevant to the active CSV domain(s), using schema text plus optional `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` from `user_orchestrator.py`.
 
+#### domain_groups_for_schema(schema, configured_groups)
+- Human readable hint: validate user-configured extraction domain batches against the active schema CSV and append any missing domains as singleton batches.
+
 #### _contains_normalized_phrase(searchable, alias)
 - Human readable hint: match configured/schema aliases as whole words or phrases, so a domain label such as `population` does not accidentally match a neighboring concept such as `target populations`.
 
@@ -883,7 +889,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: split the human prompt's `# STEPS` into reusable domain guidance; the conceptual response guide is left as user-facing explanation, not copied into runtime domain prompts.
 
 #### remove_prompt_conceptual_schema_sections(prompt_template)
-- Human readable hint: remove broad conceptual blocks only when the runtime mode no longer needs them; default full-schema calls keep `# STEPS`, while one-domain calls remove broad steps after the matching guidance has been extracted.
+- Human readable hint: remove broad conceptual blocks only when the runtime mode no longer needs them; full-schema calls keep `# STEPS`, while scoped calls remove broad steps after the matching guidance has been extracted.
 
 #### build_pydantic_model(variables)
 - Human readable hint: create one nested domain model where every variable has `{variable_name}_value` and `{variable_name}_quote`.
