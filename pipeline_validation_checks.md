@@ -47,12 +47,12 @@ This document lists implementation-level checks to verify run readiness and outp
 - Topic keyword signals used by full-text ranking are now derived from the active prompt (`Intervention / Exposure` + `Outcome` include lists), not fixed to one review theme.
 - Prompt section names used for retrieval signals come from `PROMPT_SIGNAL_SECTION_ALIASES` in `config/user_orchestrator.py`; edit that block if a future prompt uses different include/exclude section labels.
 - Data-extraction schemas are derived from `DATA_EXTRACTION_SCHEMA_FILE` in `config/user_orchestrator.py` (default `knowledge-base/data_extraction_schema.csv`), including Covidence column mappings, not from review-topic-specific Python classes.
-- Data-extraction prompts should be human-readable conceptual frameworks. Do not add technical insertion markers; domain-wise runtime prompts automatically insert matching `# STEPS` guidance plus the exact schema CSV contract before `# CONTEXT`.
+- Data-extraction prompts should be human-readable conceptual frameworks. Do not add technical insertion markers; runtime prompts automatically insert the exact schema CSV contract before `# CONTEXT`.
 - Domain-specific prompt matching uses schema text plus optional `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` from `config/user_orchestrator.py`; review-topic words should stay there, in prompts, or in schema CSVs.
 - Input export/admin headers should be checked in `CSV_METADATA_COLUMN_ALIASES` and `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, not in pipeline Python.
-- For domain-wise data extraction, verify the runtime prompt contains only the relevant conceptual guidance for the active domain plus the exact `{variable_name}_value` / `{variable_name}_quote` keys from `DATA_EXTRACTION_SCHEMA_FILE`.
-- With `data_extraction_split_by_domain=True`, the saved prompt-template snapshot is intentionally close to the user-authored prompt; inspect input traces when you need the exact schema-injected prompt sent for one paper/domain.
-- Data extraction is split by KB domain by default; if errors occur, inspect `data_extraction_domain_validation_failed` entries to identify the failing domain rather than rerunning the whole paper blindly.
+- With default single-call data extraction, verify the runtime prompt keeps the conceptual `# STEPS` checklist and includes the complete `{variable_name}_value` / `{variable_name}_quote` contract from `DATA_EXTRACTION_SCHEMA_FILE`.
+- If `data_extraction_split_by_domain=True`, verify each runtime prompt contains only the relevant conceptual guidance for the active domain plus that domain's exact schema keys.
+- If domain-wise extraction errors occur, inspect `data_extraction_domain_validation_failed` entries to identify the failing domain rather than rerunning the whole paper blindly.
 - For GPUSstack `gpt-oss-120b`, keep `LLM_SETTINGS["data_extraction_response_format_mode"]="prompt_only"` unless a small live test proves that `json_schema` is enforced correctly.
 - Data extraction should use `LLM_SETTINGS["data_extraction_evidence_mode"]="full_text"` when the objective is extraction from the complete normalized PDF rather than a small retrieval slice.
 - Full-text retrieval now uses hybrid PDF extraction quality controls (pdfplumber + PyPDF fallback, repeated header/footer cleanup).

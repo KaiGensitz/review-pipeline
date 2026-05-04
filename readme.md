@@ -155,9 +155,9 @@ Behavior notes:
   - extraction schema and Covidence validation mapping are read from `DATA_EXTRACTION_SCHEMA_FILE` in [config/user_orchestrator.py](config/user_orchestrator.py)
   - CSV/admin headers are read through `CSV_METADATA_COLUMN_ALIASES` and `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS` in [config/user_orchestrator.py](config/user_orchestrator.py); pipeline Python stays topic- and export-vendor-generic
   - prompt-to-domain matching uses schema text plus optional `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` in [config/user_orchestrator.py](config/user_orchestrator.py)
-  - extraction is split by KB `domain` by default, so each LLM call receives a smaller schema and the validated domain outputs are merged
+  - extraction defaults to one full-text LLM call per paper, so the manuscript is not resent once per schema domain
   - [config/prompt_script_data_extraction.txt](config/prompt_script_data_extraction.txt) is the human-readable conceptual framework. It should not contain technical insertion markers; the pipeline automatically inserts the active schema CSV contract before `# CONTEXT` at runtime.
-  - with domain-wise extraction enabled, prompt-template snapshots stay close to the user-authored prompt; use input traces to inspect the exact schema-injected runtime prompt
+  - if `data_extraction_split_by_domain=True`, extraction falls back to one call per schema domain; use input traces to inspect the exact schema-injected runtime prompt
   - direct async command remains available: `python -m pipeline.core.run_extraction`
   - `data_extraction_pos-neg_examples.csv` mainly matters when `LLM_SETTINGS["data_extraction_evidence_mode"]="selected_chunks"`; with the default `full_text` mode, the LLM receives cached normalized full text, so extraction quality is driven mostly by `data_extraction_schema.csv` and `prompt_script_data_extraction.txt`
 
@@ -282,14 +282,14 @@ Data-extraction schema and validation mapping:
 - The configured extraction schema CSV defines `domain`, `variable_name`, `variable_type`, `allowed_options`, `instruction`, and `covidence_column_name`.
 - The LLM output uses `{variable_name}_value` and `{variable_name}_quote` under each domain.
 - Validation maps each LLM value field to the exact Covidence header named in `covidence_column_name`.
-- `LLM_SETTINGS["data_extraction_split_by_domain"]` defaults to `True`; `data_extraction_domain_max_tokens` caps each domain response to prevent runaway malformed JSON.
+- `LLM_SETTINGS["data_extraction_split_by_domain"]` defaults to `False`; this sends the full normalized manuscript once per paper and validates the complete schema in one response. Set it to `True` only when a backend struggles with one larger extraction JSON; `data_extraction_domain_max_tokens` then caps each domain response.
 - `LLM_SETTINGS["data_extraction_response_format_mode"]` defaults to `prompt_only` for GPUSstack compatibility; use `json_schema` only with a backend proven to enforce OpenAI Structured Outputs.
 - `LLM_SETTINGS["data_extraction_evidence_mode"]` defaults to `full_text`, so extraction uses cached `full_text_normalized.txt` instead of only the selected screening chunks.
 
 Data-extraction evidence modes:
 - `full_text` mode, current default:
-  - Pros: highest recall; does not depend on retrieval quality; best for final extraction and quote audit.
-  - Cons: high token use because full text is repeated across domain-wise calls; slower and more expensive.
+  - Pros: highest recall; does not depend on retrieval quality; best for final extraction and quote audit. With the default single-call extraction mode, the full text is sent once per paper.
+  - Cons: higher token use than selected chunks; if domain-wise extraction is enabled, the full text is repeated across domain calls.
   - POS/NEG KB impact: low. `data_extraction_schema.csv` and the extraction prompt drive quality.
 - `selected_chunks` mode:
   - Pros: much lower token use; faster; `data_extraction_pos-neg_examples.csv` can improve chunk retrieval.

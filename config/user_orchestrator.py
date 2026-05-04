@@ -125,8 +125,8 @@ CSV_METADATA_COLUMN_ALIASES = {
 # human readable hint: optional bridge terms that connect prompt sections to schema domains.
 # Keep these current-study terms here, not in pipeline/ Python files.
 DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES = {
-	"study_details": ["study metadata", "study characteristics", "first author", "author_year", "year", "country", "study design", "duration", "funding"],
-	"population": ["study metadata", "population", "sample size", "age", "gender", "ethnicity", "health status", "demographics", "baseline table"],
+	"study_details": ["study metadata", "study characteristics", "first author", "author year", "study design", "duration", "funding"],
+	"population": ["population", "sample size", "mean age", "gender overall", "ethnicity overall", "health status overall", "demographics", "baseline table"],
 	"context": ["urban context", "urban", "setting", "built environment", "location", "real-world", "metropolitan"],
 	"outcomes": ["outcomes", "physical activity", "primary pa outcome", "pa outcome", "mvpa", "step count"],
 	"concepts": ["rq1", "rq2", "rq3", "rq4", "ai & tech", "ai and technology", "architecture", "smartphone", "sensing", "psychosocial", "behavior change", "inclusivity", "ethics", "sustainability"],
@@ -267,7 +267,7 @@ LLM_SETTINGS = {
 	"prompt_path": str(PROMPT_FILE),  # stage-specific prompt; changes decision logic per stage
 	"context_window_total_tokens": 78000,  # model context window (input + output combined); set per model
 	"max_tokens": 10000,  # response length cap; too low can truncate JSON, too high costs more
-	"data_extraction_split_by_domain": True,  # True = one smaller structured call per extraction domain, then merge
+	"data_extraction_split_by_domain": False,  # False = one full-text call per paper; True = safer but repeats full text for each domain
 	"data_extraction_response_format_mode": "prompt_only",  # prompt_only avoids broken json_schema handling on some GPUSstack models
 	"data_extraction_domain_max_tokens": 5000,  # per-domain output cap; quote-heavy domains need room to finish valid JSON
 	"data_extraction_evidence_mode": "full_text",  # full_text = use cached normalized full text; selected_chunks = use retrieval slice

@@ -134,7 +134,9 @@ class DynamicExtractionSchema:
             return prompt
 
         if is_domain_scoped:
-            prompt = remove_prompt_conceptual_schema_sections(prompt)
+            prompt = remove_prompt_conceptual_schema_sections(prompt, remove_steps=True, remove_end_goal=True)
+        else:
+            prompt = remove_prompt_conceptual_schema_sections(prompt, remove_steps=False, remove_end_goal=True)
 
         context_match = re.search(r"(?im)^#\s*CONTEXT\b", prompt)
         if context_match:
@@ -267,13 +269,20 @@ def extract_prompt_guidance_blocks(prompt_template: str) -> list[str]:
     return [block for block in blocks if block.strip()]
 
 
-def remove_prompt_conceptual_schema_sections(prompt_template: str) -> str:
-    """human readable hint: for one-domain calls, remove broad conceptual blocks after extracting the relevant guidance."""
+def remove_prompt_conceptual_schema_sections(
+    prompt_template: str,
+    *,
+    remove_steps: bool = True,
+    remove_end_goal: bool = True,
+) -> str:
+    """human readable hint: remove broad prompt sections only after their useful guidance has been preserved."""
 
     removals: list[tuple[int, int]] = []
     for heading, start, _content_start, end, _text in _iter_prompt_sections(prompt_template):
         heading_key = _normalize_prompt_text(heading)
-        if heading_key.startswith("steps") or heading_key.startswith("end goal"):
+        if (remove_steps and heading_key.startswith("steps")) or (
+            remove_end_goal and heading_key.startswith("end goal")
+        ):
             removals.append((start, end))
 
     prompt = prompt_template
@@ -323,7 +332,17 @@ def _prompt_block_matches_domains(
 
     searchable = _normalize_prompt_text(block)
     domain_aliases = _aliases_for_domains(domains, variables)
-    return any(alias in searchable for alias in domain_aliases)
+    return any(_contains_normalized_phrase(searchable, alias) for alias in domain_aliases)
+
+
+def _contains_normalized_phrase(searchable: str, alias: str) -> bool:
+    """human readable hint: match prompt/schema labels as whole words so one domain does not catch a near-word from another domain."""
+
+    normalized_alias = _normalize_prompt_text(alias)
+    if not searchable or not normalized_alias:
+        return False
+    phrase_pattern = r"(?<![a-z0-9])" + r"\s+".join(re.escape(part) for part in normalized_alias.split()) + r"(?![a-z0-9])"
+    return re.search(phrase_pattern, searchable) is not None
 
 
 def _aliases_for_domains(domains: tuple[str, ...], variables: tuple[ExtractionVariable, ...]) -> set[str]:
@@ -338,7 +357,6 @@ def _aliases_for_domains(domains: tuple[str, ...], variables: tuple[ExtractionVa
     for variable in variables:
         aliases.add(_normalize_prompt_text(variable.variable_name))
         aliases.add(_normalize_prompt_text(variable.covidence_column_name))
-        aliases.add(_normalize_prompt_text(variable.instruction))
     return {alias for alias in aliases if alias}
 
 
