@@ -52,7 +52,7 @@ Field definitions and evaluation logic. You must output a single, flat JSON obje
 
 - "wrong_publication_type": 
    Question: "Does the record lack an empirical methodology or participant exposure?"
-   Logic: "Return true (Exclusion Met) if it is a secondary review, pure simulation (ABM), conceptual framework, methodological design guideline, or a short prototype/design paper lacking participant-level intervention exposure (e.g., using pilot data purely for algorithmic simulation). Return false if clinical empirical trials, protocols, usability studies, or human behavior modeling are reported."
+   Logic: "Return true (Exclusion Met) if it is a secondary review/analysis, pure simulation (ABM), conceptual framework, methodological design guideline, not reviewed preprint, or a short prototype/design paper lacking participant-level intervention exposure (e.g., using pilot data purely for algorithmic simulation). Return false if clinical empirical trials, protocols, usability studies, or human behavior modeling are reported."
 
 - "insufficient_context": 
    Question: "Is the extracted full-text evidence corrupted, unreadable, short, or in a foreign language?"

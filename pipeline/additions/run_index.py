@@ -12,15 +12,27 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from config.user_orchestrator import PATH_SETTINGS
+from config.user_orchestrator import CITATION_SEARCHING_SCREENING, CITATION_SEARCHING_STAGE_RULES, PATH_SETTINGS
 from pipeline.additions.emissions_merge import (
     merge_emissions_with_run_column as _merge_emissions_with_run_column_csvsafe,
 )
 
+def _stage_root(stage: str) -> Path:
+    """human readable hint: keep citation-searching index files beside citation-searching outputs."""
+
+    output_root = Path(PATH_SETTINGS.get("output_root", "output"))
+    if CITATION_SEARCHING_SCREENING:
+        citation_rule = CITATION_SEARCHING_STAGE_RULES.get(stage, {})
+        output_dir = citation_rule.get("output_dir")
+        if output_dir:
+            return output_root / str(output_dir)
+    return output_root / stage
+
+
 def _latest_base_outputs(stage: str, run_label: str) -> dict[str, Path | None]:
     """human readable hint: locate the most recent outputs for a stage+run_label."""
 
-    stage_root = Path(PATH_SETTINGS["output_root"]) / stage
+    stage_root = _stage_root(stage)
     sample_tag = run_label.replace("_sample", "") if run_label.endswith("_sample") else run_label
 
     suffix_candidates: list[str] = []
@@ -67,7 +79,7 @@ def _latest_base_outputs(stage: str, run_label: str) -> dict[str, Path | None]:
 def _latest_qc_sample_csv(stage: str) -> Path | None:
     """human readable hint: find the newest QC sample CSV for a stage, if present."""
 
-    stage_root = Path(PATH_SETTINGS.get("output_root", "output")) / stage
+    stage_root = _stage_root(stage)
     matches = sorted(stage_root.glob(f"{stage}_qc_sample_batch_*.csv"))
     return max(matches, key=lambda p: p.stat().st_mtime) if matches else None
 
@@ -297,10 +309,10 @@ def _append_index_row(
 
     try:
         with idx_path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
             for row in rows:
-                writer.writerow(row)
+                writer.writerow({field: row.get(field, "") for field in fieldnames})
     except Exception:
         return
 
@@ -311,7 +323,7 @@ def _update_index_from_artifact(stage: str, artifact: dict | None, attempt_index
         return
 
     run_label = artifact.get("run_label") or "remaining_sample"
-    stage_root = Path(PATH_SETTINGS.get("output_root", "output")) / stage
+    stage_root = _stage_root(stage)
     idx_path = stage_root / f"{stage}_eligibility_index.csv"
 
     def _to_path(val: object) -> Path | None:
@@ -492,7 +504,7 @@ def _summarize_codecarbon_csv(path: Path | None) -> dict[str, float]:
 def _write_combined_qc_remaining_totals(stage: str) -> None:
     """human readable hint: write explicit qc+remaining total files for resource usage and CodeCarbon."""
 
-    stage_root = Path(PATH_SETTINGS.get("output_root", "output")) / stage
+    stage_root = _stage_root(stage)
     stage_root.mkdir(parents=True, exist_ok=True)
 
     qc_base = _latest_base_outputs(stage, "qc_sample")
@@ -693,7 +705,7 @@ def _minute_stamp_from_remaining_emissions_name(stage: str, path: Path) -> str |
 def _cleanup_stale_remaining_tracking_files(stage: str) -> None:
     """human readable hint: delete stale zero-token remaining_sample tracking artifacts from earlier runs."""
 
-    stage_root = Path(PATH_SETTINGS.get("output_root", "output")) / stage
+    stage_root = _stage_root(stage)
     if not stage_root.exists():
         return
 
@@ -751,7 +763,7 @@ def _cleanup_stale_remaining_tracking_files(stage: str) -> None:
 def _auto_generate_qc_mismatch_csv(stage: str, artifact: dict[str, object] | None) -> None:
     """human readable hint: automatically build an explicit mismatch CSV after QC validation completes."""
 
-    stage_root = Path(PATH_SETTINGS.get("output_root", "output")) / stage
+    stage_root = _stage_root(stage)
     alignments = sorted(
         stage_root.glob(f"{stage}_qc_sample_validation_alignment*.csv"),
         key=lambda path: path.stat().st_mtime,
@@ -800,7 +812,7 @@ def _qc_screened_already(stage: str, run_label: str = "qc_sample") -> bool:
     if run_label != "qc_sample":
         return False
 
-    stage_root = Path(PATH_SETTINGS.get("output_root", Path("output"))) / stage
+    stage_root = _stage_root(stage)
     patterns = [
         f"{stage}_qc_sample_main_eligibility_*.jsonl",  # new naming (preferred)
         f"{stage}_qc_sample_eligibility_*.jsonl",       # fallback naming
@@ -829,7 +841,7 @@ def _merge_emissions_with_run_column(
 ) -> dict[str, object] | None:
     """human readable hint: delegate CodeCarbon merge to the dedicated CSV-safe emissions helper module."""
 
-    stage_root = Path(PATH_SETTINGS["output_root"]) / stage
+    stage_root = _stage_root(stage)
     return _merge_emissions_with_run_column_csvsafe(
         stage_root=stage_root,
         stage=stage,

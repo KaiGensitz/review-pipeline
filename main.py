@@ -598,7 +598,7 @@ class MainWorkflow:
                         if not _retry_csv_needed(retry_csv, stage):
                             _archive_retry_csv(retry_csv)
 
-        rule = STAGE_RULES[stage]
+        rule = _active_stage_rule(stage, citation_searching=self.citation_searching_mode)
         if input_files:
             missing_inputs: list[str] = []
             for raw_path in input_files:
@@ -705,10 +705,12 @@ class MainWorkflow:
                 )
 
                 if stage == "data_extraction":
-                    full_text_dir = csv_dir / "per_paper_full_text"
+                    full_text_rule = _active_stage_rule("full_text", citation_searching=self.citation_searching_mode)
+                    full_text_pdf_dir = str(full_text_rule.get("pdf_dir") or "per_paper_full_text")
+                    full_text_dir = csv_dir / full_text_pdf_dir
                     if not full_text_dir.exists():
                         print(
-                            f"[warning] per_paper_full_text missing at {full_text_dir}. "
+                            f"[warning] {full_text_pdf_dir} missing at {full_text_dir}. "
                             "Run the full_text stage first (or rerun after creating full_text folders)."
                         )
                         return
@@ -778,6 +780,15 @@ def _active_screen_patterns(stage: str, *, citation_searching: bool = False) -> 
         patterns = configured.get("screen_patterns", [])
         return [str(pattern) for pattern in patterns]
     return [str(pattern) for pattern in STAGE_RULES.get(stage, {}).get("screen_patterns", [])]
+
+
+def _active_stage_rule(stage: str, *, citation_searching: bool = False) -> dict:
+    """human readable hint: merge citation-search stage overrides onto the normal stage rule."""
+
+    rule = dict(STAGE_RULES.get(stage, {}))
+    if citation_searching:
+        rule.update(CITATION_SEARCHING_STAGE_RULES.get(stage, {}))
+    return rule
 
 
 def _prepare_citation_searching_delta(csv_dir: Path, stage: str) -> list[str]:

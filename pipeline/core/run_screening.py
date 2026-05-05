@@ -20,6 +20,8 @@ from config.user_orchestrator import (
     SCREENING_DEFAULTS,
     CURRENT_STAGE,
     STAGE_RULES,
+    CITATION_SEARCHING_SCREENING,
+    CITATION_SEARCHING_STAGE_RULES,
     require_setting,
 )
 from pipeline.core.metadata_aliases import read_metadata_value
@@ -116,6 +118,11 @@ def _stage_root(stage: str) -> Path:
 
     Note: each stage writes into output/<stage>/.
     """
+    if CITATION_SEARCHING_SCREENING:
+        citation_rule = CITATION_SEARCHING_STAGE_RULES.get(stage, {})
+        output_dir = citation_rule.get("output_dir")
+        if output_dir:
+            return DEFAULT_STAGE_ROOT / str(output_dir)
     return DEFAULT_STAGE_ROOT / stage
 
 

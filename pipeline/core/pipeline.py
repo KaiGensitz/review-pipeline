@@ -71,6 +71,7 @@ from pipeline.core.metadata_aliases import (
 )
 from config.user_orchestrator import (
     CURRENT_STAGE,
+    CITATION_SEARCHING_STAGE_RULES,
     EMBEDDING_SETTINGS,
     LLM_SETTINGS,
     PATH_SETTINGS,
@@ -344,6 +345,7 @@ class PaperScreeningPipeline:
         self.force_new_qc = force_new_qc
         self.error_log_path = Path(error_log_path) if error_log_path else Path("output/error_log.txt")
         self.stage = stage if stage is not None else CURRENT_STAGE
+        self._pdf_dir_name = self._resolve_stage_pdf_dir_name()
         self.pdf_root = Path(pdf_root) if pdf_root else None
         self.overflow_log_path = Path(overflow_log_path) if overflow_log_path else Path("output/overflow_log.txt")
         self.split_only = split_only
@@ -617,6 +619,34 @@ class PaperScreeningPipeline:
                 file=sys.stderr,
             )
 
+    def _is_citation_searching_run(self) -> bool:
+        """human readable hint: infer citation-searching scope from the run label set by main.py."""
+
+        return str(self.run_label or "").startswith("citation_searching")
+
+    def _resolve_stage_pdf_dir_name(self) -> str:
+        """human readable hint: resolve the user-configured per-paper PDF folder for this run."""
+
+        return self._pdf_dir_name_for_stage(self.stage)
+
+    def _pdf_dir_name_for_stage(self, stage: str) -> str:
+        """human readable hint: resolve per-paper folder names without hardcoding stage paths."""
+
+        rule = dict(STAGE_RULES.get(stage, {}))
+        if self._is_citation_searching_run():
+            rule.update(CITATION_SEARCHING_STAGE_RULES.get(stage, {}))
+        return str(rule.get("pdf_dir") or "")
+
+    def _full_text_pdf_dir(self) -> Path:
+        """human readable hint: centralize the full-text PDF folder used by prep and screening."""
+
+        return self.csv_dir / (self._pdf_dir_name_for_stage("full_text") or "per_paper_full_text")
+
+    def _data_extraction_pdf_dir(self) -> Path:
+        """human readable hint: centralize the data-extraction per-paper folder used by extraction."""
+
+        return self.csv_dir / (self._pdf_dir_name_for_stage("data_extraction") or "per_paper_data_extraction")
+
     def run(self) -> bool:
         """Main pipeline: prep folders (if needed), QC sample, then screen papers."""
 
@@ -683,10 +713,11 @@ class PaperScreeningPipeline:
         if self.stage == "full_text":
             self._materialize_paper_folders_full_text()
             if self.split_only:
-                missing = self._find_missing_pdfs(self.csv_dir / "per_paper_full_text")
+                full_text_dir = self._full_text_pdf_dir()
+                missing = self._find_missing_pdfs(full_text_dir)
                 if missing and not self.quiet:
                     print(
-                        f"[prep] PDFs missing for {len(missing)} folder(s) in per_paper_full_text. Add one PDF per folder:"
+                        f"[prep] PDFs missing for {len(missing)} folder(s) in {full_text_dir.name}. Add one PDF per folder:"
                     )
                     for name in missing:
                         print(f"  - {name}")
@@ -697,10 +728,11 @@ class PaperScreeningPipeline:
         elif self.stage == "data_extraction":
             self._materialize_data_extraction_subset()
             if self.split_only:
-                missing = self._find_missing_pdfs(self.csv_dir / "per_paper_data_extraction")
+                data_extraction_dir = self._data_extraction_pdf_dir()
+                missing = self._find_missing_pdfs(data_extraction_dir)
                 if missing and not self.quiet:
                     print(
-                        f"[prep] PDFs missing for {len(missing)} folder(s) in per_paper_data_extraction. Add one PDF per folder:"
+                        f"[prep] PDFs missing for {len(missing)} folder(s) in {data_extraction_dir.name}. Add one PDF per folder:"
                     )
                     for name in missing:
                         print(f"  - {name}")
@@ -4517,14 +4549,14 @@ class PaperScreeningPipeline:
         self._write_compact_human_normalized_text(folder_path, metadata_snapshot, normalized_text)
 
     def _materialize_paper_folders_full_text(self) -> None:
-        """Split select CSV rows into per-paper folders under csv_dir/per_paper_full_text."""
+        """Split select CSV rows into per-paper folders under the configured full-text PDF folder."""
 
         csv_rows = self._collect_csv_rows(select_only=True)
         if not csv_rows:
             print("[warning] no select CSV rows found for materialization")
             return
 
-        base_dir = self.csv_dir / "per_paper_full_text"
+        base_dir = self._full_text_pdf_dir()
         base_dir.mkdir(parents=True, exist_ok=True)
         folders: list[Path] = []
 
@@ -4651,7 +4683,7 @@ class PaperScreeningPipeline:
     def _materialize_data_extraction_subset(self) -> None:
         """Create per-paper data_extraction folders from included IDs."""
 
-        source_dir = self.csv_dir / "per_paper_full_text"
+        source_dir = self._full_text_pdf_dir()
         if not source_dir.exists():
             print(
                 f"[warning] full_text folders not found at {source_dir}; run split-only at full_text stage first"
@@ -4671,7 +4703,7 @@ class PaperScreeningPipeline:
             self._paper_folders = []
             return
 
-        target_dir = self.csv_dir / "per_paper_data_extraction"
+        target_dir = self._data_extraction_pdf_dir()
         target_dir.mkdir(parents=True, exist_ok=True)
 
         copied: list[Path] = []
@@ -6252,7 +6284,7 @@ class PaperScreeningPipeline:
             self._extraction_aggregate_writer = ExtractionAggregateWriter(
                 output_dir=self.stage_output_dir,
                 consensus_path=self.csv_dir / "data_extraction_schema.csv",
-                input_paper_dir=self.csv_dir / "per_paper_data_extraction",
+                input_paper_dir=self._data_extraction_pdf_dir(),
                 reset=bool(self.qc_only),
             )
             if not self.quiet:

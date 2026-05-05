@@ -12,7 +12,7 @@ load_dotenv(REPO_ROOT / ".env")
 # USER-EDITABLE RUN SETTINGS
 # ---------------------------------------------------------------------------
 
-CURRENT_STAGE = "title_abstract"  # user-editable: title_abstract | full_text | data_extraction
+CURRENT_STAGE = "full_text"  # user-editable: title_abstract | full_text | data_extraction
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")  # API key loaded from .env
 LLM_MODEL = "gpt-oss-120b"  # screening model name on your endpoint; working for sure: "gpt-oss-120b" (17.04.2026)
 EMBED_MODEL = "qwen3-embedding-0.6b"  # embedding model name on your endpoint; working for sure: "qwen3-embedding-0.6b" (17.04.2026)
@@ -83,12 +83,17 @@ STAGE_RULES = {
 CITATION_SEARCHING_STAGE_RULES = {
 	"title_abstract": {
 		"screen_patterns": ["citationSearching_title-abstract_*.csv"],
+		"output_dir": "title_abstract_citationSearching",
 	},
 	"full_text": {
 		"screen_patterns": ["citationSearching_full-text_*.csv"],
+		"pdf_dir": "per_paper_full_text",
+		"output_dir": "full_text_citationSearching",
 	},
 	"data_extraction": {
 		"screen_patterns": ["citationSearching_data-extraction_*.csv"],
+		"pdf_dir": "per_paper_data_extraction",
+		"output_dir": "data_extraction_citationSearching",
 	},
 }
 
@@ -317,10 +322,21 @@ SCREENING_DEFAULTS = {
 	"enable_time_savings": True,  # True = compute human-time savings when QC minutes exist; set False to skip
 }
 
+def _active_output_stage_dir_name(stage: str) -> str:
+	"""human readable hint: citation-search runs can write into visibly separate stage folders."""
+
+	if CITATION_SEARCHING_SCREENING:
+		citation_rule = CITATION_SEARCHING_STAGE_RULES.get(stage, {})
+		output_dir = citation_rule.get("output_dir")
+		if output_dir:
+			return str(output_dir)
+	return stage
+
+
 # CodeCarbon configuration (all tunable parameters live here)
 CARBON_CONFIG = {
 	"project_name": "review_pipeline",  # label used by CodeCarbon in all stages
-	"output_dir": str(REPO_ROOT / "output" / CURRENT_STAGE),  # where emissions logs are written
+	"output_dir": str(REPO_ROOT / "output" / _active_output_stage_dir_name(CURRENT_STAGE)),  # where emissions logs are written
 	"measure_power_secs": 60,  # sampling interval in seconds; lower = more detail, more overhead
 	"tracking_mode": "process",  # "machine" = whole device; "process" = this run only
 	"on_csv_write": "append",  # "append" keeps a history; "update" overwrites totals
