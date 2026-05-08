@@ -35,9 +35,9 @@ For publication and reproducibility packages, document:
 
 - Exact model identifiers and runtime settings (including temperature, `max_tokens`, and `context_window_total_tokens`).
 - Prompt versions used per stage.
-- Data-extraction schema KB version (`DATA_EXTRACTION_SCHEMA_FILE`, default `knowledge-base/data_extraction_schema.csv`) and its Covidence `covidence_column_name` mappings.
+- Data-extraction schema KB version (`DATA_EXTRACTION_SCHEMA_FILE`, default `knowledge-base/data_extraction_schema.csv`) and its consensus/export `covidence_column_name` mappings.
 - For data extraction, report the prompt as the conceptual review framework and the schema CSV as the authoritative machine contract; the runtime prompt combines both automatically before the evidence section.
-- External export/admin mappings configured for the study (`CSV_METADATA_COLUMN_ALIASES`, `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, optional `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES`), especially if the input source is not Covidence.
+- External export/admin mappings configured for the study (`CSV_METADATA_COLUMN_ALIASES`, `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, optional `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES`), especially if the input source changes.
 - Data-extraction evidence mode:
   - `full_text`: higher recall and better quote auditability, with higher token/resource use; `data_extraction_pos-neg_examples.csv` is mostly optional.
   - `selected_chunks`: lower token/resource use, but depends on retrieval quality; `data_extraction_pos-neg_examples.csv` should be archived and justified because it shapes evidence selection.
@@ -54,6 +54,7 @@ These are protocol suggestions and must be explicitly confirmed per study:
 
 - Screening: sensitivity target and agreement target (for example PABAK threshold).
 - Data extraction: concordance/accuracy threshold per field and overall.
+- AI-first expert oversight: reviewer assignment config, packet paths, expert decisions, corrections, error types/effects, and prompt/schema refinement triggers.
 - Escalation rule when QC performance is below threshold (prompt/knowledge-base refinement and repeat QC).
 
 ## Sustainability and Ethics Notes

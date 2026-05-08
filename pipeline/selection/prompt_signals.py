@@ -35,15 +35,15 @@ SECTION_RESCUE_KEYWORDS = (
 DEFAULT_PRIMARY_TOPIC_SIGNAL_TERMS: tuple[str, ...] = ()
 DEFAULT_SECONDARY_TOPIC_SIGNAL_TERMS: tuple[str, ...] = ()
 INTERVENTION_SIGNAL_PATTERN = NO_TOPIC_SIGNAL_PATTERN
-AI_SIGNAL_PATTERN = NO_TOPIC_SIGNAL_PATTERN
-PA_SIGNAL_PATTERN = NO_TOPIC_SIGNAL_PATTERN
+PRIMARY_TOPIC_SIGNAL_PATTERN = NO_TOPIC_SIGNAL_PATTERN
+SECONDARY_TOPIC_SIGNAL_PATTERN = NO_TOPIC_SIGNAL_PATTERN
 
 MONITORING_SIGNAL_SEED_PATTERN = re.compile(
     r"\b(monitor|assess|evaluat|feasib|usabil|acceptab|observ|classif|predict|detect|framework|protocol|pilot|measur|diagnos|benchmark)\w*\b",
     re.IGNORECASE,
 )
 INTERVENTION_ACTION_SEED_PATTERN = re.compile(
-    r"\b(interven|randomi|trial|assign|arm|program|coach|feedback|counsel|behavior|exercise|treat|support|nudge|goal|recommend|prescrib|prompt|deliver)\w*\b",
+    r"\b(interven|randomi|trial|assign|arm|program|coach|feedback|counsel|behavior|treat|support|nudge|goal|recommend|prescrib|prompt|deliver)\w*\b",
     re.IGNORECASE,
 )
 KB_SIGNAL_CONTEXT_STOPWORDS = frozenset(
@@ -407,11 +407,11 @@ def build_prompt_signal_config(prompt_template: str) -> dict[str, Any]:
     )
     primary_pattern, primary_terms = _compile_signal_pattern_from_terms(
         primary_seed_terms,
-        AI_SIGNAL_PATTERN,
+        PRIMARY_TOPIC_SIGNAL_PATTERN,
     )
     secondary_pattern, secondary_terms = _compile_signal_pattern_from_terms(
         secondary_seed_terms,
-        PA_SIGNAL_PATTERN,
+        SECONDARY_TOPIC_SIGNAL_PATTERN,
     )
 
     source = "prompt_criteria" if intervention_include or outcome_include else "no_prompt_signals"

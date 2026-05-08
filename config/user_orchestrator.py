@@ -12,14 +12,14 @@ load_dotenv(REPO_ROOT / ".env")
 # USER-EDITABLE RUN SETTINGS
 # ---------------------------------------------------------------------------
 
-CURRENT_STAGE = "full_text"  # user-editable: title_abstract | full_text | data_extraction
+CURRENT_STAGE = "data_extraction"  # user-editable: title_abstract | full_text | data_extraction
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")  # API key loaded from .env
 LLM_MODEL = "gpt-oss-120b"  # screening model name on your endpoint; working for sure: "gpt-oss-120b" (17.04.2026)
 EMBED_MODEL = "qwen3-embedding-0.6b"  # embedding model name on your endpoint; working for sure: "qwen3-embedding-0.6b" (17.04.2026)
 CSV_DIR = REPO_ROOT / "input"  # where you drop Covidence exports
 QC_ENABLED = True  # False = skip QC sampling and go straight to full screening
 QC_SAMPLE_RATE = 0.1  # 0.0–1.0; 0.10 ~10% QC sample
-CITATION_SEARCHING_SCREENING = True  # True = use citation-search CSV patterns and skip QC sampling
+CITATION_SEARCHING_SCREENING = False  # True = use citation-search CSV patterns and skip QC sampling
 
 # USER-EDITABLE STUDY TAGS.
 # human readable hint: these tags encode the current protocol's exclusion reasons.
@@ -71,7 +71,7 @@ STAGE_RULES = {
 	},
 	"data_extraction": {
 		# Extraction uses full-text PDFs from the included set.
-		"screen_patterns": ["*_included_csv_*.csv"],
+		"screen_patterns": ["*_included_csv_*.csv", "citationSearching_data-extraction_*.csv"],
 		"neg_patterns": ["*_excluded_csv_*.csv"],
 		"pdf_dir": "per_paper_data_extraction",
 	},
@@ -161,6 +161,11 @@ DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS = {
 	"quote_audit_headers": ["Covidence #", "Title", "Domain", "Variable", "Consensus_Column", "AI_Value", "AI_Quote"],
 	"paper_id_column": "Covidence #",
 	"title_column": "Title",
+	"quote_audit_domain_column": "Domain",
+	"quote_audit_variable_column": "Variable",
+	"quote_audit_consensus_column": "Consensus_Column",
+	"quote_audit_value_column": "AI_Value",
+	"quote_audit_quote_column": "AI_Quote",
 	"reviewer_name_column": "Reviewer Name",
 	"reviewer_name_value": "AI",
 	"study_id_column": "Study ID",
@@ -179,6 +184,164 @@ DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES = {
 	"population.country_overall": ["country", "Country", "Country Overall"],
 	"outcomes.reported": ["outcomes_reported"],
 }
+
+# USER-EDITABLE DATA-EXTRACTION QUOTE EXPORT ALIASES.
+# human readable hint: optional wide-table quote columns are human layout choices.
+# The long quote-audit table always contains every schema variable quote; these aliases fill selected quote columns in consensus-style exports.
+DATA_EXTRACTION_QUOTE_COLUMN_ALIASES = {
+	"study_details.study_design": ["study_design_quote"],
+	"population.sample_size": ["sample_quote"],
+	"context.setting": ["setting_quote"],
+	"context.data_collection_method": ["data_collection_quote"],
+}
+
+# USER-EDITABLE DATA-EXTRACTION EVIDENCE-HINT ALIASES.
+# human readable hint: these terms help the generic snippet selector find review-relevant evidence in long normalized PDFs.
+# Keep review-topic vocabulary here, in prompts, or in the schema CSV rather than in pipeline/ Python files.
+DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_ALIASES = {
+	"population.mean_age": ["age", "aged", "ages", "years", "year-old", "eligibility", "inclusion", "criteria"],
+	"population.gender_overall": ["gender", "sex", "female", "male", "women", "men"],
+	"population.sample_size": [
+		"sample size",
+		"target sample",
+		"final sample",
+		"planned sample",
+		"power calculation",
+		"power analysis",
+		"powered to",
+		"participants",
+		"participant",
+		"n =",
+		"eligible",
+		"enroll",
+		"enrolled",
+		"enrollment",
+		"consented",
+		"recruited",
+		"recruitment",
+	],
+	"population.ethnicity_overall": ["ethnicity", "ethnic", "race", "racial"],
+	"population.country_overall": ["country", "countries", "site", "clinic", "recruitment", "residing"],
+	"context.setting": ["country", "countries", "setting", "site", "clinic", "recruitment", "residing", "location"],
+	"context.evidence_source": [
+		"journal",
+		"published",
+		"published online",
+		"doi",
+		"original investigation",
+		"article",
+		"peer-reviewed",
+		"preprint",
+		"conference",
+		"proceedings",
+		"trial registration",
+		"thesis",
+		"dissertation",
+		"report",
+	],
+	"study_details.funding_sources": ["funding", "funded", "grant", "support", "sponsor"],
+	"study_details.conflicts_of_interest": ["conflict", "interest", "competing", "disclosure"],
+	"concepts.AI_model": ["model", "algorithm", "agent", "system", "decision", "recommendation"],
+	"concepts.AI_transparency": ["transparent", "transparency", "explain", "explainable", "black-box"],
+	"concepts.ethical_considerations": ["ethics", "ethical", "approval", "consent", "privacy", "safety"],
+	"concepts.sustainability_considerations": [
+		"sustainability",
+		"sustainable",
+		"environmental",
+		"battery",
+		"low-power",
+		"power consumption",
+		"energy consumption",
+		"energy-efficient",
+		"resource-efficient",
+		"green AI",
+		"pro-nature",
+	],
+	"concepts.behavioral_theory": ["theory", "framework", "model", "construct"],
+	"concepts.behavioral_strategies": ["strategy", "strategies", "technique", "intervention", "component"],
+	"synthesis.key_findings": ["finding", "findings", "outcome", "results", "effect", "change"],
+	"synthesis.limitations": ["limitation", "limitations", "future", "caution"],
+	"concepts.development_process": ["development", "design", "iterative", "prototype", "testing"],
+	"concepts.sensing_modalities": ["sensor", "sensors", "sensing", "wearable", "device", "monitor"],
+}
+
+# USER-EDITABLE DATA-EXTRACTION EVIDENCE-HINT LOW-PRIORITY PATTERNS.
+# human readable hint: these generic source zones often contain affiliations, references, licenses, or PDF boilerplate rather than participant evidence.
+DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_LOW_PRIORITY_PATTERNS = [
+	"author affiliation",
+	"corresponding author",
+	"e-mail address",
+	"downloaded on",
+	"licensed use",
+	"restrictions apply",
+	"references",
+	"bibliography",
+	"copyright",
+	"all rights reserved",
+	"answer categories",
+	"number of items",
+]
+
+# USER-EDITABLE DATA-EXTRACTION SUPPLEMENTAL CITED EVIDENCE SETTINGS.
+# human readable hint: cited source texts stay outside pipeline code; put user-supplied protocol/development/source evidence in one of these per-paper subfolders.
+DATA_EXTRACTION_SUPPLEMENTAL_CITED_EVIDENCE = {
+	"enabled": True,
+	"folder_names": ["supplemental_cited_evidence", "cited_evidence", "supplemental_evidence"],
+	"file_globs": ["*.txt", "*.md", "*.pdf"],
+	"max_files_per_paper": 8,
+	"max_words_per_file": 4000,
+}
+
+# USER-EDITABLE DATA-EXTRACTION EXPERT OVERSIGHT SETTINGS.
+# human readable hint: this validation round is AI-first extraction with expert human oversight, not AI-vs-human gold standard extraction.
+DATA_EXTRACTION_EXPERT_REVIEW_SETTINGS = {
+	"source_output_dir": REPO_ROOT / "output" / "data_extraction_v6",
+	"packet_output_dir": REPO_ROOT / "output" / "data_extraction_v6" / "expert_review_packets",
+	"sample_mode": "all_papers_in_output",
+	"include_shared_methodological_variables_in_each_packet": True,
+	"review_decision_options": ["accept", "correct", "mark_unavailable", "unclear"],
+	"error_type_options": ["missed_data", "misallocated_data", "fabricated_or_unsupported_data", "formatting_or_type_issue"],
+	"error_effect_options": ["inconsequential", "minor", "major"],
+	"prompt_refinement_trigger_decisions": ["correct", "mark_unavailable"],
+	"prompt_refinement_trigger_error_effects": ["major"],
+}
+
+# USER-EDITABLE DATA-EXTRACTION EXPERT REVIEWERS.
+# human readable hint: reviewer names and review-topic assignments live here, not in pipeline Python files.
+DATA_EXTRACTION_EXPERT_REVIEWERS = {
+	"ai_technology_expert": {
+		"display_name": "Shawan",
+		"variables": [
+			"concepts.AI_architecture",
+			"concepts.AI_model",
+			"concepts.AI_transparency",
+			"concepts.AI_input_features",
+			"concepts.human_AI_interaction",
+			"concepts.sensing_modalities",
+			"concepts.smartphone_usage",
+			"concepts.ethical_considerations",
+		],
+	},
+	"psychology_theory_expert": {
+		"display_name": "Marc",
+		"variables": [
+			"concepts.behavioral_theory",
+			"concepts.behavioral_strategies",
+			"concepts.human_AI_interaction",
+			"concepts.inclusivity_considerations",
+		],
+	},
+}
+
+# USER-EDITABLE SHARED DATA-EXTRACTION OVERSIGHT VARIABLES.
+# human readable hint: table-sensitive or recurrent-risk fields can be included in every expert packet.
+DATA_EXTRACTION_EXPERT_REVIEW_SHARED_VARIABLES = [
+	"population.mean_age",
+	"population.sample_size",
+	"population.gender_overall",
+	"population.health_status",
+	"study_details.study_design",
+]
 
 # USER-EDITABLE PROMPT SIGNAL SECTION ALIASES.
 # human readable hint: used only when prompt sections contain "- Include:" / "- Exclude:" lists for retrieval signals.
@@ -289,16 +452,22 @@ LLM_SETTINGS = {
 	"context_window_total_tokens": 78000,  # model context window (input + output combined); set per model
 	"max_tokens": 10000,  # response length cap; too low can truncate JSON, too high costs more
 	"data_extraction_split_by_domain": True,  # True = validate smaller schema batches; False = one fragile full-schema response
-	"data_extraction_domain_groups": [["study_details", "population"], ["outcomes", "context"], ["concepts"], ["synthesis"]],  # optional schema-domain batches; missing domains are appended automatically
+	"data_extraction_domain_groups": [["study_details"], ["population"], ["outcomes"], ["context"], ["concepts"], ["synthesis"]],  # optional schema-domain batches; population and context stay separate because they are evidence-location-sensitive
 	"data_extraction_response_format_mode": "prompt_only",  # prompt_only avoids broken json_schema handling on some GPUSstack models
 	"data_extraction_domain_max_tokens": 5000,  # per-domain output cap; quote-heavy domains need room to finish valid JSON
 	"data_extraction_evidence_mode": "full_text",  # full_text = use cached normalized full text; selected_chunks = use retrieval slice
+	"data_extraction_generate_normalized_text": True,  # True = preflight-create full_text_normalized.txt + data_extraction chunk artifacts from PDFs when missing
 	"data_extraction_full_text_max_words": 0,  # 0 = no word cap; set a number only if full texts exceed model context
+	"data_extraction_schema_evidence_hints": True,  # True = prepend compact schema-derived evidence snippets before full normalized text
+	"data_extraction_evidence_hints_per_variable": 3,  # snippets per schema variable; table-heavy extraction needs enough hints to surface demographic rows
+	"data_extraction_evidence_hint_max_chars": 420,  # max characters per snippet
+	"data_extraction_evidence_hints_max_total_chars": 18000,  # total cap for the evidence-hints block
+	"data_extraction_evidence_hint_context_lines": 2,  # neighboring normalized-text lines kept with matches so table labels and values stay together
 	"temperature": 0.0,  # randomness; lower = more stable decisions, higher = more variable
 	"top_p": 1.0,  # keep at 1.0 with temperature=0.0 for stable decoding behavior
 	"seed": 42,  # reproducibility seed (set an integer number like 42 to stabilize provider-side sampling)
 	"async_max_concurrency": 2,  # endpoint-safe default for full_text/data_extraction; raise only after stable QC runs
-	"async_max_retries": 1,  # one transient retry avoids 20+ minute stalls when the proxy is down
+	"async_max_retries": 2,  # two total attempts gives one retry for empty transient domain responses
 	"async_backoff_base_seconds": 2.0,  # slower retry start reduces repeated pressure on a failing endpoint
 	"async_backoff_max_seconds": 20.0,  # maximum retry delay cap
 	"async_jitter_seconds": 0.2,  # random jitter added to backoff to reduce thundering herd

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from config.user_orchestrator import (
     CURRENT_STAGE,
+    DATA_EXTRACTION_SCHEMA_FILE,
     PATH_SETTINGS,
     LLM_API_KEY,
     LLM_MODEL,
@@ -17,7 +18,7 @@ from config.user_orchestrator import (
     CITATION_SEARCHING_STAGE_RULES,
 )
 from pipeline.core.run_screening import run_pipeline
-from pipeline.core.citation_io import CovidenceCitationParser
+from pipeline.core.citation_io import CitationCsvParser
 from pipeline.additions.resource_usage import backfill_time_savings
 from pipeline.additions.retry_flow import (
     _archive_retry_csv,
@@ -354,7 +355,7 @@ def _prompt_yes_no(message: str) -> bool:
         if resp in {"n", "no"}:
             _PROMPT_STATE["all_yes"] = False
             return False
-        print("Please answer 'y' or 'n'.")
+        print("[input] Please answer 'y' or 'n'.")
 
 
 def _run_validation() -> bool:
@@ -543,6 +544,8 @@ class MainWorkflow:
         active_prompt_path, active_kb_path = _active_prompt_and_kb(stage)
         print(f"[config] Active prompt file: {active_prompt_path}")
         print(f"[config] Active knowledge-base file: {active_kb_path}")
+        if stage == "data_extraction":
+            print(f"[config] Active data-extraction schema file: {DATA_EXTRACTION_SCHEMA_FILE}")
 
         if not _prompt_yes_no("[qc] Are the prompt, knowledge base, and study tags identical to previous runs? [y/n]: "):
             print("[qc] Please confirm or update prompt, knowledge-base, and study-tag settings before running.")
@@ -623,7 +626,7 @@ class MainWorkflow:
             paper_dir = csv_dir / str(rule["pdf_dir"])
             first_prep_run = not paper_dir.exists()
 
-            print("[main] Preparing per-paper folders for full_text (setup preflight)...")
+            print("[setup] Preparing per-paper folders for full_text (setup preflight)...")
             _run_pipeline_guarded(
                 stage=stage,
                 split_only=True,
@@ -694,7 +697,7 @@ class MainWorkflow:
 
         if qc_enabled_effective:
             if stage != "full_text":
-                print(f"[main] Preparing per-paper folders for {stage} (no screening in this step)...")
+                print(f"[setup] Preparing per-paper folders for {stage} (setup preflight; no screening in this step)...")
                 _run_pipeline_guarded(
                     stage=stage,
                     split_only=True,
@@ -794,7 +797,7 @@ def _active_stage_rule(stage: str, *, citation_searching: bool = False) -> dict:
 def _prepare_citation_searching_delta(csv_dir: Path, stage: str) -> list[str]:
     """human readable hint: diff citation-search exports before LLM screening."""
 
-    parser = CovidenceCitationParser()
+    parser = CitationCsvParser()
     targets = parser.find_target_files(str(csv_dir), stage)
     parser.ingest_and_diff(
         current_export_path=targets["citation"],

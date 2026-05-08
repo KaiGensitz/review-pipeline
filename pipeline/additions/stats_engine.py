@@ -25,7 +25,12 @@ from statsmodels.stats.proportion import proportion_confint
 
 # human readable hint: proportion_confint supplies exact (Clopper-Pearson) binomial CIs (Seabold, S., & Perktold, J., 2010).
 
-from config.user_orchestrator import CURRENT_STAGE, STUDY_TAGS_IGNORE, STUDY_TAGS_INCLUDE
+from config.user_orchestrator import (
+    CURRENT_STAGE,
+    DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS,
+    STUDY_TAGS_IGNORE,
+    STUDY_TAGS_INCLUDE,
+)
 from pipeline.core.extraction_schema import (
     DynamicExtractionSchema,
     ExtractionVariable,
@@ -41,6 +46,24 @@ STAGE_OUTPUT_DIR = OUTPUT_DIR
 EXTRACTION_AI_PATH = OUTPUT_DIR / f"{CURRENT_STAGE}_results.jsonl"
 EXTRACTION_HUMAN_PATH = ROOT / "input" / "data_extraction_schema.csv"
 LOGGER = logging.getLogger(__name__)
+
+
+def _admin_setting(key: str, default: Any) -> Any:
+    """human readable hint: administrative validation labels live in user_orchestrator.py, not pipeline code."""
+
+    if isinstance(DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS, dict):
+        return DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS.get(key, default)
+    return default
+
+
+VALIDATION_PAPER_ID_COLUMN = str(_admin_setting("paper_id_column", "paper_id"))
+VALIDATION_VARIABLE_COLUMN = str(_admin_setting("quote_audit_variable_column", "variable"))
+VALIDATION_CONSENSUS_COLUMN = str(_admin_setting("quote_audit_consensus_column", "consensus_column"))
+VALIDATION_AI_VALUE_COLUMN = str(_admin_setting("quote_audit_value_column", "ai_value"))
+VALIDATION_AI_QUOTE_COLUMN = str(_admin_setting("quote_audit_quote_column", "ai_quote"))
+VALIDATION_HUMAN_VALUE_COLUMN = "human_value"
+VALIDATION_ERROR_TYPE_COLUMN = "error_type"
+VALIDATION_ERROR_EFFECT_COLUMN = "error_effect"
 
 EXCLUSION_TAGS = [t.lower() for t in STUDY_TAGS_INCLUDE]
 IGNORE_TAGS = {t.lower() for t in STUDY_TAGS_IGNORE}
@@ -735,10 +758,10 @@ def validate_screening(stage: str, args) -> None:
     _write_report(stats, tp, tn, fp, fn, stage, suffix)
     _plot_confusion(tp, tn, fp, fn, suffix)
 
-    print(f"Validation complete (screening stage: {stage}). Outputs:")
-    print(f"- {_stage_file('validation_stats_report.txt', suffix).relative_to(ROOT)}")
-    print(f"- {_stage_file('validation_alignment.csv', suffix).relative_to(ROOT)}")
-    print(f"- {_stage_file('validation_matrix.png', suffix).relative_to(ROOT)}")
+    print(f"[validation] stage={stage} status=completed")
+    print(f"[output] validation_report path={_stage_file('validation_stats_report.txt', suffix).relative_to(ROOT)}")
+    print(f"[output] validation_alignment path={_stage_file('validation_alignment.csv', suffix).relative_to(ROOT)}")
+    print(f"[output] validation_matrix path={_stage_file('validation_matrix.png', suffix).relative_to(ROOT)}")
 
 
 def _load_ai_extraction_records() -> list[dict]:
@@ -952,13 +975,13 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
             if not match:
                 audit_rows.append(
                     {
-                        "Paper_ID": paper_id,
-                        "Variable": variable.variable_name,
-                        "Human_Value": "" if human_value is None else str(human_value),
-                        "AI_Value": "" if ai_value is None else str(ai_value),
-                        "AI_Quote": ai_quote,
-                        "Error_Type": "",
-                        "Error_Effect": "",
+                        VALIDATION_PAPER_ID_COLUMN: paper_id,
+                        VALIDATION_VARIABLE_COLUMN: variable.variable_name,
+                        VALIDATION_HUMAN_VALUE_COLUMN: "" if human_value is None else str(human_value),
+                        VALIDATION_AI_VALUE_COLUMN: "" if ai_value is None else str(ai_value),
+                        VALIDATION_AI_QUOTE_COLUMN: ai_quote,
+                        VALIDATION_ERROR_TYPE_COLUMN: "",
+                        VALIDATION_ERROR_EFFECT_COLUMN: "",
                     }
                 )
 
@@ -990,8 +1013,8 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
 
         metric_rows.append(
             {
-                "Variable": variable.variable_name,
-                "Consensus_Column": variable.covidence_column_name,
+                VALIDATION_VARIABLE_COLUMN: variable.variable_name,
+                VALIDATION_CONSENSUS_COLUMN: variable.covidence_column_name,
                 "Concordance_Matches": concordance_matches,
                 "Concordance_Total_Human_Present": concordance_n,
                 "Concordance": concordance,
@@ -1016,7 +1039,15 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
     per_variable.to_csv(metrics_path, index=False, encoding="utf-8")
     pd.DataFrame(
         audit_rows,
-        columns=["Paper_ID", "Variable", "Human_Value", "AI_Value", "AI_Quote", "Error_Type", "Error_Effect"],
+        columns=[
+            VALIDATION_PAPER_ID_COLUMN,
+            VALIDATION_VARIABLE_COLUMN,
+            VALIDATION_HUMAN_VALUE_COLUMN,
+            VALIDATION_AI_VALUE_COLUMN,
+            VALIDATION_AI_QUOTE_COLUMN,
+            VALIDATION_ERROR_TYPE_COLUMN,
+            VALIDATION_ERROR_EFFECT_COLUMN,
+        ],
     ).to_csv(audit_path, index=False, encoding="utf-8")
 
     lines = [
@@ -1042,16 +1073,16 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
         concordance = row["Concordance"]
         accuracy = row["Accuracy"]
         lines.append(
-            f"- {row['Variable']} -> {row['Consensus_Column']}: "
+            f"- {row[VALIDATION_VARIABLE_COLUMN]} -> {row[VALIDATION_CONSENSUS_COLUMN]}: "
             f"concordance={'n/a' if math.isnan(concordance) else f'{concordance:.3f}'}, "
             f"accuracy={'n/a' if math.isnan(accuracy) else f'{accuracy:.3f}'}"
         )
     report_path.write_text("\n".join(lines), encoding="utf-8")
 
-    print("Validation complete (data extraction stage). Outputs:")
-    print(f"- {report_path.relative_to(ROOT)}")
-    print(f"- {metrics_path.relative_to(ROOT)}")
-    print(f"- {audit_path.relative_to(ROOT)}")
+    print("[validation] stage=data_extraction status=completed")
+    print(f"[output] extraction_validation_report path={report_path.relative_to(ROOT)}")
+    print(f"[output] extraction_accuracy_csv path={metrics_path.relative_to(ROOT)}")
+    print(f"[output] extraction_error_audit path={audit_path.relative_to(ROOT)}")
 
 
 def _parse_args():

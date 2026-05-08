@@ -9,9 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from config.user_orchestrator import LLM_SETTINGS
+from config.user_orchestrator import DATA_EXTRACTION_SUPPLEMENTAL_CITED_EVIDENCE, LLM_SETTINGS
 from pipeline.core.metadata_aliases import read_metadata_value
-from pipeline.integrations.embedding_utils import normalize_extracted_text
+from pipeline.integrations.embedding_utils import normalize_extracted_text_for_llm
 from pipeline.selection.pdf_parser import extract_markdown_from_pdf_with_level
 
 
@@ -28,6 +28,116 @@ class PaperItem:
     metadata: dict[str, Any]
     selected_chunks: list[dict]
     normalized_text: str
+    supplemental_cited_evidence: str = ""
+
+
+@dataclass(frozen=True)
+class SupplementalEvidenceSource:
+    """human readable hint: one user-supplied cited source text attached to a paper."""
+
+    source_path: Path
+    text: str
+
+
+class SupplementalCitedEvidenceLoader:
+    """human readable hint: load optional cited-source text without encoding review facts in pipeline code."""
+
+    def __init__(self, settings: dict[str, Any] | None = None) -> None:
+        settings = settings if isinstance(settings, dict) else {}
+        self.enabled = bool(settings.get("enabled", False))
+        self.folder_names = self._clean_names(settings.get("folder_names"), default=["supplemental_cited_evidence"])
+        self.file_globs = self._clean_names(settings.get("file_globs"), default=["*.txt", "*.md"])
+        self.max_files_per_paper = max(0, int(settings.get("max_files_per_paper", 8) or 0))
+        self.max_words_per_file = max(0, int(settings.get("max_words_per_file", 4000) or 0))
+
+    @classmethod
+    def from_user_config(cls) -> "SupplementalCitedEvidenceLoader":
+        """human readable hint: construct the loader from the visible user-editable config block."""
+
+        return cls(DATA_EXTRACTION_SUPPLEMENTAL_CITED_EVIDENCE)
+
+    @staticmethod
+    def _clean_names(value: Any, default: list[str]) -> list[str]:
+        if not isinstance(value, list):
+            return list(default)
+        cleaned = [str(item).strip() for item in value if str(item or "").strip()]
+        return cleaned or list(default)
+
+    def load_for_folder(self, folder: Path) -> str:
+        """human readable hint: combine configured supplemental files into a provenance-labeled prompt block."""
+
+        if not self.enabled or self.max_files_per_paper <= 0:
+            return ""
+
+        sources = self._collect_sources(folder)
+        if not sources:
+            return ""
+
+        parts = [
+            "[Supplemental Cited Evidence]",
+            "Use these user-supplied cited-source excerpts only when a schema field permits cited or supplemental evidence. Keep provenance visible in the supporting quote.",
+        ]
+        for source in sources:
+            relative_path = self._relative_source_path(folder, source.source_path)
+            parts.append(f"[Supplemental Source: {relative_path}]\n{source.text}")
+        return "\n\n".join(parts)
+
+    def _collect_sources(self, folder: Path) -> list[SupplementalEvidenceSource]:
+        # human readable hint: only files inside configured per-paper subfolders are eligible.
+        sources: list[SupplementalEvidenceSource] = []
+        seen_paths: set[Path] = set()
+        for folder_name in self.folder_names:
+            source_dir = folder / folder_name
+            if not source_dir.exists() or not source_dir.is_dir():
+                continue
+            for pattern in self.file_globs:
+                for path in sorted(source_dir.glob(pattern)):
+                    if not path.is_file() or path in seen_paths:
+                        continue
+                    text = self._read_text(path)
+                    if not text:
+                        continue
+                    sources.append(SupplementalEvidenceSource(source_path=path, text=text))
+                    seen_paths.add(path)
+                    if len(sources) >= self.max_files_per_paper:
+                        return sources
+        return sources
+
+    def _read_text(self, path: Path) -> str:
+        if path.suffix.lower() == ".pdf":
+            try:
+                text, _parser_level = extract_markdown_from_pdf_with_level(path)
+            except Exception:
+                return ""
+            return self._trim_text(text)
+
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            try:
+                text = path.read_text(encoding="utf-8-sig")
+            except Exception:
+                return ""
+        except Exception:
+            return ""
+
+        return self._trim_text(text)
+
+    def _trim_text(self, text: str) -> str:
+        # human readable hint: keep supplemental evidence bounded so one cited source cannot crowd out the primary paper.
+        normalized = normalize_extracted_text_for_llm(text).strip()
+        if self.max_words_per_file > 0:
+            words = normalized.split()
+            if len(words) > self.max_words_per_file:
+                normalized = " ".join(words[: self.max_words_per_file])
+        return normalized
+
+    @staticmethod
+    def _relative_source_path(folder: Path, path: Path) -> str:
+        try:
+            return str(path.relative_to(folder))
+        except ValueError:
+            return path.name
 
 
 def load_metadata(folder: Path) -> tuple[str, dict[str, Any]]:
@@ -94,13 +204,16 @@ def collect_papers(csv_dir: Path) -> list[PaperItem]:
         return []
 
     papers: list[PaperItem] = []
+    supplemental_loader = SupplementalCitedEvidenceLoader.from_user_config()
     for folder in sorted(extraction_dir.iterdir()):
         if not folder.is_dir():
             continue
         paper_id, metadata = load_metadata(folder)
         selected_chunks = load_selected_chunks(folder, paper_id)
         text, pdf_path = load_paper_text(folder)
-        normalized_text = normalize_extracted_text(text or "") if text else ""
+        # human readable hint: keep table rows intact for downstream LLM extraction.
+        normalized_text = normalize_extracted_text_for_llm(text or "") if text else ""
+        supplemental_cited_evidence = supplemental_loader.load_for_folder(folder)
         papers.append(
             PaperItem(
                 paper_id=str(paper_id).strip(),
@@ -109,6 +222,7 @@ def collect_papers(csv_dir: Path) -> list[PaperItem]:
                 metadata=metadata,
                 selected_chunks=selected_chunks,
                 normalized_text=normalized_text,
+                supplemental_cited_evidence=supplemental_cited_evidence,
             )
         )
     return papers
@@ -132,6 +246,8 @@ def format_evidence(paper: PaperItem) -> str:
             parts.append(f"[Chunk {idx}]\n{text}")
     elif paper.normalized_text:
         parts.append(f"[Full Text]\n{paper.normalized_text}")
+    if paper.supplemental_cited_evidence:
+        parts.append(paper.supplemental_cited_evidence)
     return "\n\n".join(parts)
 
 

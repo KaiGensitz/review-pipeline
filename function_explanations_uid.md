@@ -50,6 +50,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: `CSV_METADATA_COLUMN_ALIASES` is where external export headers are mapped to generic internal metadata such as `paper_id`, `title`, `authors`, and `publication_year`; these export-header facts do not live in `pipeline/` code.
 - Human readable hint: `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` is the optional bridge between human prompt section wording and schema domains. Keep review-topic vocabulary here or in the prompt/schema CSV, not inside pipeline Python.
 - Human readable hint: `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS` controls aggregate extraction output labels, including the AI reviewer label, while `DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES` supplies optional fallback consensus-column aliases for variables.
+- Human readable hint: `DATA_EXTRACTION_EXPERT_REVIEW_SETTINGS`, `DATA_EXTRACTION_EXPERT_REVIEWERS`, and `DATA_EXTRACTION_EXPERT_REVIEW_SHARED_VARIABLES` configure AI-first expert oversight packets without hardcoding reviewer names or schema-variable assignments in pipeline Python.
 - Human readable hint: `PROMPT_SIGNAL_SECTION_ALIASES` defines which prompt section names are treated as primary/secondary retrieval signal lists when prompts contain include/exclude sections.
 - Human readable hint: `CITATION_SEARCHING_SCREENING` switches screening into the citation-search workflow, reads `CITATION_SEARCHING_STAGE_RULES`, runs delta extraction against the baseline export, skips QC sampling, and keeps outputs scoped separately.
 ### Script-level functions
@@ -69,8 +70,12 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: Current endpoint-safe default profile uses `top_k=10`, `chunk_size=20`, and `async_max_concurrency=2` so full-text/data-extraction runs do not overload the LLM proxy during QC.
 - Human readable hint: Data extraction defaults to `data_extraction_response_format_mode="prompt_only"` because this GPUSstack model returned malformed JSON when sent strict `json_schema` response_format payloads.
 - Human readable hint: Data extraction defaults to `data_extraction_evidence_mode="full_text"` so extraction prompts use cached normalized full text rather than only the screening-selected chunks.
-- Human readable hint: With `data_extraction_evidence_mode="full_text"`, `knowledge-base/data_extraction_pos-neg_examples.csv` has low direct impact; it becomes important only when extraction uses `selected_chunks`.
-- Human readable hint: Data extraction defaults to `data_extraction_split_by_domain=True` with optional `data_extraction_domain_groups`, which keeps each JSON response smaller while reducing repeated full-text calls compared with one call per individual domain.
+- Human readable hint: Data extraction preflights every included per-paper folder before QC sampling, creating `full_text_normalized.txt`, `full_text_artifact.json`, `data_extraction_artifact.json`, and `data_extraction_selected_chunks.jsonl` when needed.
+- Human readable hint: `DATA_EXTRACTION_SUPPLEMENTAL_CITED_EVIDENCE` controls optional per-paper cited-source evidence folders; supplied `.txt`, `.md`, or `.pdf` protocol/development/source evidence is appended to data-extraction prompts with source labels and also appears in input traces.
+- Human readable hint: With `data_extraction_evidence_mode="full_text"`, `DATA_EXTRACTION_SCHEMA_FILE` is the strongest extraction contract; `knowledge-base/data_extraction_pos-neg_examples.csv` still helps retrieval/ranking and becomes especially important when extraction uses `selected_chunks`.
+- Human readable hint: Data-extraction schema instructions include generic demographic safeguards for denominator consistency, full-cohort-over-subgroup preference for overall fields, same-table population sweeps, per-arm protocol sample-size arithmetic, repeated-row age/gender table counting, and separate race/ethnicity preservation.
+- Human readable hint: The `context.evidence_source` schema variable now means publication/source legitimacy type, such as peer-reviewed journal article, conference proceeding, preprint, trial registration, thesis/dissertation, report, or other grey literature, not an article-internal section name.
+- Human readable hint: Data extraction defaults to `data_extraction_split_by_domain=True` with optional `data_extraction_domain_groups`; population and context are kept as focused batches because they depend on table, recruitment, and location evidence.
 - Human readable hint: Total model context budget is configured in `LLM_SETTINGS["context_window_total_tokens"]` and combined with `max_tokens` to derive prompt budget at runtime.
 
 ## main.py
@@ -183,6 +188,10 @@ This appendix provides function-level explanations for scripts and classes in th
 #### InputTraceRunner.run(args)
 - Human readable hint: execute the full trace workflow from eligibility record lookup to report writing.
 
+#### InputTraceRunner.run_all_data_extraction_output(args)
+- Human readable hint: create one input trace per paper from a data-extraction output folder, including versioned folders passed with `--stage-output-dir`, prefer the newest most-complete retry output per paper, link each result back to its per-paper normalized full text, list present/missing schema fields, and add schema-derived nearby evidence hits for missing fields.
+- Human readable hint: data-extraction input traces mirror runtime prompt input and therefore include configured supplemental cited evidence blocks when the per-paper folder contains them.
+
 ### Script-level functions
 - Human readable hint: compatibility wrappers or helper functions used by the primary class.
 
@@ -225,11 +234,53 @@ This appendix provides function-level explanations for scripts and classes in th
 #### _load_prompt_template(stage)
 - Human readable hint: mirror runtime prompt assembly with optional eligibility criteria injection.
 
+#### _load_jsonl_payload(path)
+- Human readable hint: read the first non-meta JSONL payload from a stage output file.
+
+#### _trace_search_terms_for_variable(variable)
+- Human readable hint: derive audit search terms from schema variable names, export columns, and instructions so input traces stay generic.
+
+#### _line_hits_for_terms(text, terms)
+- Human readable hint: find compact normalized-text snippets that may explain why a missing extraction field deserves human review.
+
 #### _parse_args()
 - Human readable hint: No docstring in source; placeholder retained intentionally for exhaustive traceability.
 
 #### run_trace()
 - Human readable hint: Compatibility wrapper for direct module execution.
+
+## pipeline/additions/extraction_plausibility_audit.py
+
+### Class ExtractionPlausibilityAuditRunner
+- Human readable hint: orchestrate loading the candidate and baseline data-extraction exports, comparing schema variables, attaching input-trace evidence, running generic plausibility checks, and writing reviewer-audit artifacts.
+
+#### ExtractionPlausibilityAuditRunner.run()
+- Human readable hint: produce `data_extraction_version_diff.csv`, `data_extraction_plausibility_flags.csv`, and `data_extraction_plausibility_summary.md` under the candidate output folder.
+
+### Class ConsensusTable
+- Human readable hint: represent one wide reviewer-facing consensus CSV and resolve paper ID/title columns through user-editable config.
+
+### Class SchemaColumnResolver
+- Human readable hint: map each schema CSV variable to the reviewer-facing export column using `covidence_column_name` plus user-editable aliases.
+
+### Class QuoteAuditTable
+- Human readable hint: index the long quote-audit CSV so every schema variable can be checked for value/quote support.
+
+### Class InputTraceIndex
+- Human readable hint: parse generated input traces and summarize schema-derived evidence hits for fields the LLM returned as missing.
+
+### Class VersionComparator
+- Human readable hint: compare candidate versus baseline outputs and classify changed cells as present-to-missing, missing-to-present, or changed-present-value.
+
+### Class PlausibilityAuditor
+- Human readable hint: run generic reviewer checks for version regressions/recoveries, schema contract mismatches, missing quote support, missing values with trace evidence, and population denominator/count inconsistencies.
+- Human readable hint: flags `evidence_source` values that look like article-internal section names after the schema contract defines that field as publication/source type.
+
+### Class AuditReportWriter
+- Human readable hint: write spreadsheet-friendly diff and flag reports plus a compact Markdown summary for human QC triage.
+
+### Script-level functions
+- Human readable hint: command-line helpers for running `python -m pipeline.additions.extraction_plausibility_audit` with configurable candidate, baseline, schema, and report paths.
 
 ## pipeline/additions/resource_usage.py
 
@@ -572,7 +623,20 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: Format selected chunks into a readable prompt section.
 
 #### PaperScreeningPipeline._load_data_extraction_full_text_input(paper)
-- Human readable hint: load cached normalized full text for extraction prompts and apply the optional word cap from `LLM_SETTINGS`.
+- Human readable hint: load cached normalized full text for extraction prompts, preserve table structure with LLM-focused cleanup, apply the optional word cap from `LLM_SETTINGS`, prepend schema-guided evidence hints when enabled, and append configured supplemental cited evidence when present.
+
+#### PaperScreeningPipeline._with_domain_scoped_schema_evidence_hints(context, domain_schema)
+- Human readable hint: when data extraction is split by schema domain, replace the broad all-variable evidence map with a smaller evidence map for the active domain group before each LLM call.
+
+#### PaperScreeningPipeline._preflight_data_extraction_full_text_inputs(papers)
+- Human readable hint: before QC sampling or remaining-paper filtering, ensure every data-extraction folder has usable normalized full text and data-extraction chunk-audit sidecars.
+- Human readable hint: preflight writes one latest JSON report so repeated QC runs do not clutter the output folder.
+
+#### PaperScreeningPipeline._ensure_full_text_normalized_for_data_extraction(paper)
+- Human readable hint: run the full-text PDF parsing/cache path inside a data-extraction run when `full_text_normalized.txt` is missing or empty.
+
+#### PaperScreeningPipeline._ensure_data_extraction_selected_chunks(paper)
+- Human readable hint: create `data_extraction_selected_chunks.jsonl` and update `data_extraction_artifact.json` from generic chunk selection before LLM extraction.
 
 #### PaperScreeningPipeline._title_abstract_full_input(paper)
 - Human readable hint: Build one full context block for title_abstract (no chunking/retrieval).
@@ -597,7 +661,7 @@ This appendix provides function-level explanations for scripts and classes in th
 
 #### PaperScreeningPipeline._select_chunks_with_rescue(chunks, supplemental_rows)
 - Human readable hint: select evidence with adaptive fallback and enforce non-title/method quotas for full_text.
-- Human readable hint: applies hybrid chunk ranking (embedding + method/triad + readability + sentence completeness).
+- Human readable hint: applies hybrid chunk ranking (embedding + method evidence + prompt-derived topic cues + readability + sentence completeness).
 - Human readable hint: applies a final raw-chunk non-title rescue when selected evidence collapses to title-only context.
 
 #### PaperScreeningPipeline._hybrid_chunk_score(row)
@@ -620,16 +684,19 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: load canonical metadata from per-stage artifact files for synchronized sidecar exports.
 
 #### PaperScreeningPipeline._write_compact_human_normalized_text(folder_path, metadata_snapshot, normalized_text)
-- Human readable hint: write human-checkable normalized text with metadata copied from stage artifact metadata.
+- Human readable hint: write human-checkable normalized text with metadata copied from stage artifact metadata; data extraction writes the full-text evidence sidecar as `full_text_normalized.txt`.
 
 #### PaperScreeningPipeline._persist_compact_text_artifacts(paper, pdf_path, cache_key, normalized_text, normalized_pages)
-- Human readable hint: persist per-paper compact machine artifacts and synchronized normalized text sidecar.
+- Human readable hint: persist per-paper compact full-text machine artifacts and synchronized normalized text sidecar from both full-text and data-extraction PDF-backed runs.
 
 #### PaperScreeningPipeline._materialize_paper_folders_full_text()
 - Human readable hint: Split select CSV rows into per-paper folders under csv_dir/per_paper_full_text.
 
 #### PaperScreeningPipeline._materialize_data_extraction_subset()
 - Human readable hint: Create per-paper data_extraction folders from included IDs.
+
+#### PaperScreeningPipeline._materialize_data_extraction_from_csv_inputs()
+- Human readable hint: Create per-paper data_extraction folders from explicit CSV inputs (for example citation-search deltas), preserve existing evidence files, and reuse full_text artifacts when available.
 
 #### PaperScreeningPipeline._find_missing_pdfs(base_dir)
 - Human readable hint: List folders that do not contain any PDF.
@@ -665,7 +732,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: call the LLM and return both text and usage; optional prompt/schema/max-token overrides support small domain-level extraction calls.
 
 #### PaperScreeningPipeline._call_data_extraction_domains_async(context, paper_id)
-- Human readable hint: run data extraction as one smaller Structured Outputs request per KB domain, then merge validated domain payloads.
+- Human readable hint: run data extraction as one smaller Structured Outputs request per configured KB domain group, send only domain-scoped evidence hints for that call, then merge validated domain payloads.
 
 #### PaperScreeningPipeline._get_openai_client(base_url)
 - Human readable hint: Create a configured OpenAI API client.
@@ -748,26 +815,26 @@ This appendix provides function-level explanations for scripts and classes in th
 
 ## pipeline/core/citation_io.py
 
-### Class CovidenceCitationParser
+### Class CitationCsvParser
 - Human readable hint: citation-search ingestion bridge that converts an upstream deduplicated citation CSV into generic screening records using `CSV_METADATA_COLUMN_ALIASES`.
 - __init__ parameters: none
 
-#### CovidenceCitationParser.__init__()
+#### CitationCsvParser.__init__()
 - Human readable hint: initialize parser state, source tracking, and missing-metadata counters.
 
-#### CovidenceCitationParser.ingest_covidence_csv(filepath)
+#### CitationCsvParser.ingest_csv(filepath)
 - Human readable hint: read a citation CSV, resolve metadata through user-configured aliases, standardize publication fields, and flag missing title/abstract/DOI values without failing the run.
 
-#### CovidenceCitationParser.find_target_files(input_dir, stage)
+#### CitationCsvParser.find_target_files(input_dir, stage)
 - Human readable hint: locate the newest baseline database export and citation-search whole-stage export from strict stage-specific filename patterns.
 
-#### CovidenceCitationParser.ingest_and_diff(current_export_path, previous_export_path, stage)
+#### CitationCsvParser.ingest_and_diff(current_export_path, previous_export_path, stage)
 - Human readable hint: read current and baseline exports with Pandas, filter already-seen rows by configured paper ID aliases with DOI/title fallback, and standardize only novel records.
 
-#### CovidenceCitationParser.export_for_screening(output_dir)
+#### CitationCsvParser.export_for_screening(output_dir)
 - Human readable hint: write a citation-search novel-record handoff CSV, a JSONL audit copy, and `citation_ingestion_log.txt`; default filenames match the citation-search stage patterns.
 
-#### CovidenceCitationParser._standardize_row(row, row_number, source_path)
+#### CitationCsvParser._standardize_row(row, row_number, source_path)
 - Human readable hint: map one source row into generic citation metadata and ingestion flags.
 
 ## pipeline/core/screening_schema.py
@@ -841,11 +908,12 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: export aggregated data-extraction tables for validation and quote audit.
 
 #### export_tables(output_dir, consensus_path, input_paper_dir)
-- Human readable hint: write one AI-vs-human comparison CSV and one quote-audit CSV.
+- Human readable hint: write one AI-vs-human comparison CSV and one quote-audit CSV, deduplicating per-paper outputs so successful retries supersede stale failed rows.
 
 ### Class ExtractionAggregateWriter
-- Human readable hint: create the two run-level extraction CSVs at run start and append each completed paper immediately.
+- Human readable hint: create the two run-level extraction CSVs at run start and replace each paper's aggregate rows when a newer retry completes.
 - Human readable hint: fill the configured reviewer column with the configured AI label from `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS` so AI rows can be distinguished from human reviewer rows.
+- Human readable hint: fill optional wide-table quote columns through `DATA_EXTRACTION_QUOTE_COLUMN_ALIASES`; the long quote-audit CSV remains the complete quote record for every schema variable.
 
 #### build_consensus_comparison_rows(records, schema, headers, input_paper_dir)
 - Human readable hint: map nested KB extraction values into the same column layout as the human consensus CSV.
@@ -853,10 +921,31 @@ This appendix provides function-level explanations for scripts and classes in th
 #### build_quote_audit_rows(records, schema, variable_to_header, input_paper_dir)
 - Human readable hint: keep extracted values and supporting quotes in a long table for reviewer checking.
 
+## pipeline/additions/export_expert_review_packets.py
+
+### Script-level functions
+- Human readable hint: create and summarize AI-first extraction expert oversight packets from existing extraction outputs.
+
+#### export_expert_review_packets(source_output_dir, packet_output_dir)
+- Human readable hint: read the configured schema, quote-audit CSV, per-paper extraction sidecars, and reviewer assignments to write one CSV per expert plus one combined tracking CSV.
+
+#### summarize_expert_review(review_file, packet_output_dir)
+- Human readable hint: summarize completed expert oversight decisions by schema variable, including acceptance/correction rates, error type/effect counts, and prompt/schema refinement triggers.
+
+#### main()
+- Human readable hint: command-line entrypoint with `export` and `summarize` subcommands.
+
 ## pipeline/core/extraction_schema.py
 
 ### Class ExtractionVariable
 - Human readable hint: one row from `knowledge-base/data_extraction_schema.csv`, including the human consensus/export column used for validation.
+
+### Class SchemaEvidenceHintConfig
+- Human readable hint: stores user-tunable limits for the compact schema-guided evidence map inserted before long normalized text.
+
+### Class SchemaEvidenceHintBuilder
+- Human readable hint: scans normalized full text with terms derived from the schema CSV plus optional `DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_ALIASES`, keeping review-specific bridge words in user config rather than pipeline code.
+- Human readable hint: keeps nearby table rows with matched lines so labels and values survive PDF normalization, and uses configurable low-priority patterns to rank boilerplate, affiliation, and measurement-layout rows below participant/method evidence.
 
 ### Class DynamicExtractionSchema
 - Human readable hint: combines two sources at runtime: the prompt provides the human-readable research framework, while the schema CSV provides the exact machine contract, default missing-data payload, and optional OpenAI Structured Outputs schema.
@@ -920,7 +1009,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: create one nested domain model where every variable has `{variable_name}_value` and `{variable_name}_quote`.
 
 #### format_instruction_block(variables, response_shape)
-- Human readable hint: turn KB rows into LLM instructions and include the consensus/export mapping for audit traceability.
+- Human readable hint: turn KB rows into LLM instructions, require a focused availability sweep before missing-value defaults, and include the consensus/export mapping for audit traceability.
 
 #### parse_and_validate(raw_text, schema)
 - Human readable hint: parse raw LLM output, validate dynamically, and return fallback data on failure.
@@ -928,16 +1017,22 @@ This appendix provides function-level explanations for scripts and classes in th
 ## pipeline/core/extraction_io.py
 
 ### Class PaperItem
-- Human readable hint: one prepared paper folder with metadata, selected chunks, optional PDF path, and normalized text.
+- Human readable hint: one prepared paper folder with metadata, selected chunks, optional PDF path, normalized text, and optional supplemental cited evidence.
+
+### Class SupplementalEvidenceSource
+- Human readable hint: one user-supplied cited source text attached to a data-extraction paper folder.
+
+### Class SupplementalCitedEvidenceLoader
+- Human readable hint: reads only user-configured per-paper supplemental evidence subfolders, trims source text with visible limits, and renders source-labeled prompt blocks without hardcoding review-topic or study-specific facts.
 
 ### Script-level functions
 - Human readable hint: file and formatting helpers for data extraction.
 
 #### collect_papers(csv_dir)
-- Human readable hint: collect prepared paper folders from `input/per_paper_data_extraction/`.
+- Human readable hint: collect prepared paper folders from `input/per_paper_data_extraction/`, apply LLM-focused text cleanup that preserves tables, and attach optional supplemental cited evidence configured in `user_orchestrator.py`.
 
 #### format_evidence(paper)
-- Human readable hint: build the compact evidence block used by the extraction prompt.
+- Human readable hint: build the compact evidence block used by the extraction prompt, including source-labeled supplemental cited evidence when supplied.
 
 #### flatten_extracted(payload, prefix)
 - Human readable hint: flatten nested extraction output into dot-path CSV columns while keeping quote columns separate.
@@ -1002,6 +1097,9 @@ This appendix provides function-level explanations for scripts and classes in th
 #### TextPdfUtils.normalize_extracted_text(text)
 - Human readable hint: apply conservative cleanup to extracted PDF text before sentence splitting and prompt assembly.
 
+#### TextPdfUtils.normalize_extracted_text_for_llm(text)
+- Human readable hint: preserve table structure while removing common PDF layout artifacts before LLM extraction.
+
 #### TextPdfUtils.detect_language_code(text)
 - Human readable hint: detect language code (for example en/de/fr) used by full_text language policy checks.
 
@@ -1043,6 +1141,9 @@ This appendix provides function-level explanations for scripts and classes in th
 
 #### split_text_into_sentences(text, language)
 - Human readable hint: Split text into sentences using NLTK.
+
+#### normalize_extracted_text_for_llm(text)
+- Human readable hint: Apply LLM-focused cleanup while preserving table structure.
 
 ## pipeline/integrations/llm_client.py
 

@@ -16,14 +16,89 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from config.user_orchestrator import CURRENT_STAGE, LLM_SETTINGS, PATH_SETTINGS, PROMPT_FILES
-from pipeline.integrations.embedding_utils import normalize_extracted_text
+from config.user_orchestrator import (
+    CURRENT_STAGE,
+    DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_ALIASES,
+    DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_LOW_PRIORITY_PATTERNS,
+    LLM_SETTINGS,
+    PATH_SETTINGS,
+    PROMPT_FILES,
+)
+from pipeline.integrations.embedding_utils import (
+    normalize_extracted_text,
+    normalize_extracted_text_for_llm,
+)
 from pipeline.core.metadata_aliases import read_metadata_value
+from pipeline.core.extraction_io import SupplementalCitedEvidenceLoader
+from pipeline.core.extraction_schema import (
+    DynamicExtractionSchema,
+    ExtractionVariable,
+    MISSING_TEXT_VALUES,
+    MISSING_TEXT_VALUE,
+    SchemaEvidenceHintBuilder,
+    SchemaEvidenceHintConfig,
+)
 
 ELIGIBILITY_CRITERIA_PLACEHOLDER = "{eligibility_criteria}"
 DEFAULT_OUTPUT_ROOT = Path(PATH_SETTINGS.get("output_root", "output"))
+DATA_EXTRACTION_TRACE_STOPWORDS = {
+    "about",
+    "above",
+    "after",
+    "also",
+    "abstract",
+    "available",
+    "baseline-characteristics",
+    "column",
+    "compute",
+    "consensus",
+    "criteria",
+    "data",
+    "domain",
+    "exactly",
+    "evidence",
+    "explicit",
+    "explicitly",
+    "extract",
+    "field",
+    "from",
+    "given",
+    "group",
+    "groups",
+    "information",
+    "label",
+    "missing",
+    "not",
+    "overall",
+    "paper",
+    "participant",
+    "participants",
+    "population",
+    "reported",
+    "results",
+    "return",
+    "summary",
+    "summaries",
+    "prefer",
+    "schema",
+    "source",
+    "stated",
+    "study",
+    "table",
+    "tables",
+    "text",
+    "that",
+    "this",
+    "value",
+    "values",
+    "variable",
+    "when",
+    "with",
+    "preserving",
+    "measure",
+}
 
 
 def _sha256_text(value: str) -> str:
@@ -242,7 +317,8 @@ def _load_data_extraction_full_text_context(folder: Path, paper_id: str, title: 
         marker_index = raw_text.find(marker)
         if marker_index >= 0:
             raw_text = raw_text[marker_index + len(marker):]
-        normalized_text = normalize_extracted_text(raw_text).strip()
+        # human readable hint: mirror the extraction-time normalization for full-text evidence.
+        normalized_text = normalize_extracted_text_for_llm(raw_text).strip()
         if not normalized_text:
             continue
         max_words = int(LLM_SETTINGS.get("data_extraction_full_text_max_words", 0) or 0)
@@ -253,9 +329,37 @@ def _load_data_extraction_full_text_context(folder: Path, paper_id: str, title: 
         parts = [f"Paper ID: {paper_id}"]
         if title:
             parts.append(f"Title: {title.strip()}")
+        evidence_hints = _build_data_extraction_schema_evidence_hints(normalized_text)
+        if evidence_hints:
+            parts.append(evidence_hints)
         parts.append("[Full Normalized Text]\n" + normalized_text)
+        supplemental_cited_evidence = SupplementalCitedEvidenceLoader.from_user_config().load_for_folder(folder)
+        if supplemental_cited_evidence:
+            parts.append(supplemental_cited_evidence)
         return "\n\n".join(parts)
     return ""
+
+
+def _build_data_extraction_schema_evidence_hints(normalized_text: str) -> str:
+    """human readable hint: mirror the runtime schema-guided evidence map in trace outputs."""
+
+    if not bool(LLM_SETTINGS.get("data_extraction_schema_evidence_hints", True)):
+        return ""
+    try:
+        schema = DynamicExtractionSchema.from_kb()
+    except Exception:
+        return ""
+    config = SchemaEvidenceHintConfig(
+        enabled=True,
+        snippets_per_variable=max(0, int(LLM_SETTINGS.get("data_extraction_evidence_hints_per_variable", 2) or 0)),
+        max_snippet_chars=max(120, int(LLM_SETTINGS.get("data_extraction_evidence_hint_max_chars", 420) or 420)),
+        max_total_chars=max(1000, int(LLM_SETTINGS.get("data_extraction_evidence_hints_max_total_chars", 18000) or 18000)),
+        context_lines=max(0, int(LLM_SETTINGS.get("data_extraction_evidence_hint_context_lines", 1) or 0)),
+        alias_map=DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_ALIASES,
+        low_priority_patterns=tuple(DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_LOW_PRIORITY_PATTERNS),
+    )
+    # human readable hint: use the same schema-owned builder as runtime extraction input assembly.
+    return SchemaEvidenceHintBuilder(schema.variables, config).build(normalized_text)
 
 
 def _iter_selected_chunk_candidates(eligibility_file: Path, stage: str) -> list[Path]:
@@ -689,6 +793,102 @@ def _load_prompt_template(stage: str, campaign_id: str = "") -> tuple[str, str]:
     return prompt_template.replace(ELIGIBILITY_CRITERIA_PLACEHOLDER, criteria_text).strip(), source_label
 
 
+def _load_jsonl_payload(path: Path) -> dict[str, Any] | None:
+    """human readable hint: read the first non-meta JSONL payload from a stage output file."""
+
+    if not path.exists():
+        return None
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if isinstance(payload, dict) and not payload.get("meta"):
+                return payload
+    return None
+
+
+def _is_missing_extraction_value(value: Any, variable: ExtractionVariable) -> bool:
+    """human readable hint: classify missing extraction values using the same type defaults as the schema."""
+
+    if value is None:
+        return True
+    if variable.variable_type == "boolean":
+        if isinstance(value, bool):
+            return value is False
+        return str(value).strip().casefold() in MISSING_TEXT_VALUES | {"false", "0", "no", "n"}
+    if variable.variable_type == "list":
+        if isinstance(value, list):
+            return len([item for item in value if str(item).strip()]) == 0
+        return str(value).strip().casefold() in MISSING_TEXT_VALUES
+    return str(value).strip().casefold() in MISSING_TEXT_VALUES
+
+
+def _value_for_variable(extracted: dict[str, Any], variable: ExtractionVariable) -> Any:
+    """human readable hint: fetch one schema variable value from nested extraction JSON."""
+
+    domain_payload = extracted.get(variable.domain)
+    if not isinstance(domain_payload, dict):
+        return None
+    return domain_payload.get(variable.value_key)
+
+
+def _quote_for_variable(extracted: dict[str, Any], variable: ExtractionVariable) -> str:
+    """human readable hint: fetch one schema variable quote from nested extraction JSON."""
+
+    domain_payload = extracted.get(variable.domain)
+    if not isinstance(domain_payload, dict):
+        return ""
+    quote = domain_payload.get(variable.quote_key)
+    return str(quote or "").strip()
+
+
+def _trace_search_terms_for_variable(variable: ExtractionVariable) -> list[str]:
+    """human readable hint: derive lightweight evidence-search terms from schema text without study-specific code."""
+
+    # human readable hint: input traces should audit with the same generic schema terms used in runtime evidence hints.
+    config = SchemaEvidenceHintConfig(alias_map=DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_ALIASES)
+    return SchemaEvidenceHintBuilder([variable], config).terms_for_variable(variable)[:10]
+
+
+def _line_hits_for_terms(text: str, terms: list[str], max_hits: int = 5) -> list[tuple[int, str]]:
+    """human readable hint: find short normalized-text snippets that might explain a missing field."""
+
+    if not text.strip() or not terms:
+        return []
+    pattern = re.compile("|".join(r"(?<![A-Za-z0-9])" + re.escape(term) + r"(?![A-Za-z0-9])" for term in terms), re.I)
+    hits: list[tuple[int, str]] = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        cleaned = re.sub(r"\s+", " ", line).strip()
+        if not cleaned or not pattern.search(cleaned):
+            continue
+        hits.append((line_number, cleaned[:500]))
+        if len(hits) >= max_hits:
+            break
+    return hits
+
+
+def _read_normalized_text(folder: Path) -> tuple[Path | None, str]:
+    """human readable hint: read the normalized full text file that extraction used as evidence."""
+
+    for candidate in (folder / "full_text_normalized.txt", folder / "data_extraction_normalized.txt"):
+        if candidate.exists():
+            return candidate, candidate.read_text(encoding="utf-8")
+    return None, ""
+
+
+def _iter_data_extraction_output_dirs(stage_root: Path) -> list[Path]:
+    """human readable hint: list per-paper data-extraction output folders that contain JSONL results."""
+
+    if not stage_root.exists():
+        return []
+    return [
+        folder
+        for folder in sorted(stage_root.iterdir(), key=lambda path: path.name)
+        if folder.is_dir() and (folder / "data_extraction_results.jsonl").exists()
+    ]
+
+
 def _diagnose_mismatch(
     context_ok: bool,
     prompt_template_ok: bool,
@@ -717,9 +917,21 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--paper-id", help="Paper ID from the configured metadata aliases")
     parser.add_argument("--input-hash", help="Stored llm_input_sha256 to search for")
     parser.add_argument("--eligibility-file", help="Optional explicit eligibility JSONL path")
+    parser.add_argument(
+        "--all-data-extraction-output",
+        action="store_true",
+        help="Create one trace per paper from output/data_extraction results without requiring eligibility JSONL.",
+    )
+    parser.add_argument(
+        "--stage-output-dir",
+        help="Optional stage output folder to inspect, e.g. output/data_extraction_v7.",
+    )
     parser.add_argument("--show-full-prompt", action="store_true", help="Also output merged prompt (template + evidence)")
     parser.add_argument("--output", help="Optional explicit output .txt path")
     args = parser.parse_args()
+
+    if args.all_data_extraction_output:
+        return args
 
     if not args.paper_id and not args.input_hash:
         parser.error("Provide either --paper-id or --input-hash.")
@@ -739,6 +951,10 @@ class InputTraceRunner:
 
         args = args or _parse_args()
         stage = str(args.stage).strip() if getattr(args, "stage", None) else self.stage
+
+        if bool(getattr(args, "all_data_extraction_output", False)):
+            self.run_all_data_extraction_output(args)
+            return
 
         if stage not in {"title_abstract", "full_text", "data_extraction"}:
             raise ValueError(f"Unsupported stage '{stage}'.")
@@ -830,13 +1046,190 @@ class InputTraceRunner:
 
         output_path.write_text("\n".join(lines), encoding="utf-8")
 
-        print("Input trace completed.")
-        print(f"- report: {output_path}")
-        print(f"- context hash match: {context_ok}")
-        print(f"- prompt template hash match: {prompt_template_ok}")
-        print(f"- full prompt hash match: {full_prompt_ok}")
+        print("[trace] input_trace status=completed")
+        print(f"[output] trace_report path={output_path}")
+        print(f"[trace] context_hash_match={context_ok}")
+        print(f"[trace] prompt_template_hash_match={prompt_template_ok}")
+        print(f"[trace] full_prompt_hash_match={full_prompt_ok}")
         if mismatch_cause != "none":
-            print(f"- mismatch cause: {mismatch_cause}")
+            print(f"[trace] mismatch_cause={mismatch_cause}")
+
+    def run_all_data_extraction_output(self, args: argparse.Namespace | None = None) -> None:
+        """human readable hint: create audit traces from data_extraction outputs and normalized full texts."""
+
+        args = args or argparse.Namespace(stage="data_extraction", output=None, show_full_prompt=False)
+        stage = str(getattr(args, "stage", "data_extraction") or "data_extraction").strip()
+        if stage != "data_extraction":
+            raise ValueError("--all-data-extraction-output is only supported for stage='data_extraction'.")
+
+        configured_stage_output_dir = getattr(args, "stage_output_dir", None)
+        stage_root = Path(configured_stage_output_dir) if configured_stage_output_dir else _candidate_stage_dirs(stage)[0]
+        if not stage_root.exists():
+            raise FileNotFoundError(f"Stage output directory not found: {stage_root}")
+        output_root = Path(getattr(args, "output", "") or "") if getattr(args, "output", None) else stage_root / "input_traces"
+        output_root.mkdir(parents=True, exist_ok=True)
+        csv_root = Path(PATH_SETTINGS.get("csv_dir", "input"))
+        schema = DynamicExtractionSchema.from_kb()
+        prompt_template, prompt_template_source = _load_prompt_template(stage)
+        prompt_template_hash = _sha256_text(prompt_template)
+        rows: list[dict[str, str]] = []
+        result_candidates: dict[str, tuple[int, float, Path, dict[str, Any]]] = {}
+
+        # human readable hint: retries can leave stale per-paper result folders; trace only the newest most-complete payload per paper.
+        for result_dir in _iter_data_extraction_output_dirs(stage_root):
+            results_path = result_dir / "data_extraction_results.jsonl"
+            result_payload = _load_jsonl_payload(results_path)
+            if not isinstance(result_payload, dict):
+                continue
+            paper_id = str(result_payload.get("paper_id") or result_dir.name.split("_", 1)[0]).strip()
+            clean_paper_id = paper_id.lstrip("#")
+            extracted = result_payload.get("extracted_data")
+            if not isinstance(extracted, dict):
+                extracted = {}
+            present_count = sum(
+                0 if _is_missing_extraction_value(_value_for_variable(extracted, variable), variable) else 1
+                for variable in schema.variables
+            )
+            try:
+                mtime = results_path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            previous = result_candidates.get(clean_paper_id)
+            if previous is None or (present_count, mtime) >= (previous[0], previous[1]):
+                result_candidates[clean_paper_id] = (present_count, mtime, result_dir, result_payload)
+
+        for _clean_paper_id, (_present_count, _mtime, result_dir, result_payload) in result_candidates.items():
+            results_path = result_dir / "data_extraction_results.jsonl"
+            paper_id = str(result_payload.get("paper_id") or result_dir.name.split("_", 1)[0]).strip()
+            extracted = result_payload.get("extracted_data")
+            if not isinstance(extracted, dict):
+                extracted = {}
+            try:
+                input_folder = _find_paper_folder(stage, paper_id, csv_root)
+            except Exception:
+                input_folder = csv_root / "per_paper_data_extraction" / result_dir.name
+
+            metadata = _load_folder_metadata(input_folder)
+            title = read_metadata_value(metadata, "title")
+            selected_chunks = _load_selected_chunks(input_folder, stage, paper_id) if input_folder.exists() else []
+            context_text, selected_chunks = _reconstruct_context(
+                stage,
+                paper_id,
+                csv_root,
+                fallback_metadata=metadata,
+            )
+            normalized_path, normalized_raw = _read_normalized_text(input_folder)
+            normalized_for_search = normalize_extracted_text_for_llm(normalized_raw).strip()
+            context_hash = _sha256_text(context_text)
+            full_prompt = prompt_template.replace("{data}", context_text)
+            full_prompt_hash = _sha256_text(full_prompt)
+
+            present_lines: list[str] = []
+            missing_lines: list[str] = []
+            missing_fields: list[str] = []
+            evidence_hint_lines: list[str] = ["=== Evidence Hint Search For Missing Fields ==="]
+
+            for variable in schema.variables:
+                value = _value_for_variable(extracted, variable)
+                quote = _quote_for_variable(extracted, variable)
+                field_path = f"{variable.domain}.{variable.variable_name}"
+                if _is_missing_extraction_value(value, variable):
+                    missing_fields.append(field_path)
+                    missing_lines.append(
+                        f"- {field_path} -> {MISSING_TEXT_VALUE}; consensus_column={variable.covidence_column_name}"
+                    )
+                    terms = _trace_search_terms_for_variable(variable)
+                    hits = _line_hits_for_terms(normalized_for_search, terms)
+                    evidence_hint_lines.append("")
+                    evidence_hint_lines.append(f"[{field_path}] search_terms={', '.join(terms) or 'NA'}")
+                    if hits:
+                        for line_number, snippet in hits:
+                            evidence_hint_lines.append(f"  L{line_number}: {snippet}")
+                    else:
+                        evidence_hint_lines.append("  no nearby evidence hits found by schema-derived terms")
+                else:
+                    rendered_value = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
+                    present_lines.append(
+                        f"- {field_path} = {rendered_value}; quote={quote or 'NA'}"
+                    )
+
+            trace_paper_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", paper_id.lstrip("#") or paper_id).strip("_")
+            trace_name = f"data_extraction_{trace_paper_id}_input_trace.txt"
+            trace_path = output_root / trace_name
+            normalized_word_count = len(normalized_for_search.split())
+            lines: list[str] = [
+                "DATA EXTRACTION INPUT TRACE REPORT",
+                f"stage: {stage}",
+                f"paper_id: {paper_id}",
+                f"title: {title or 'NA'}",
+                f"output_dir: {result_dir}",
+                f"results_path: {results_path}",
+                f"input_folder: {input_folder}",
+                f"normalized_text_path: {normalized_path or 'NA'}",
+                f"normalized_text_sha256: {_sha256_text(normalized_raw) if normalized_raw else 'NA'}",
+                f"normalized_word_count: {normalized_word_count}",
+                f"selected_chunks_count: {len(selected_chunks)}",
+                f"prompt_template_source: {prompt_template_source}",
+                f"prompt_template_sha256: {prompt_template_hash}",
+                f"reconstructed_context_sha256: {context_hash}",
+                f"reconstructed_full_prompt_sha256: {full_prompt_hash}",
+                f"present_field_count: {len(present_lines)}",
+                f"missing_field_count: {len(missing_fields)}",
+                "",
+                "=== Present Extracted Fields ===",
+                *(present_lines or ["No present extracted fields found."]),
+                "",
+                "=== Missing Extracted Fields ===",
+                *(missing_lines or ["No missing extracted fields found."]),
+                "",
+                *evidence_hint_lines,
+                "",
+                *(_selected_chunk_confidence_lines(selected_chunks)),
+                "",
+                "=== Reconstructed LLM Input Context ===",
+                context_text,
+            ]
+            if bool(getattr(args, "show_full_prompt", False)):
+                lines.extend(["", "=== Reconstructed Full Prompt ===", full_prompt])
+            trace_path.write_text("\n".join(lines), encoding="utf-8")
+
+            rows.append(
+                {
+                    "paper_id": paper_id,
+                    "title": title,
+                    "trace_path": str(trace_path),
+                    "input_folder": str(input_folder),
+                    "normalized_text_path": str(normalized_path or ""),
+                    "normalized_word_count": str(normalized_word_count),
+                    "selected_chunks_count": str(len(selected_chunks)),
+                    "present_field_count": str(len(present_lines)),
+                    "missing_field_count": str(len(missing_fields)),
+                    "missing_fields": "; ".join(missing_fields),
+                }
+            )
+
+        summary_path = output_root / "data_extraction_input_trace_summary.csv"
+        with summary_path.open("w", encoding="utf-8", newline="") as handle:
+            fieldnames = [
+                "paper_id",
+                "title",
+                "trace_path",
+                "input_folder",
+                "normalized_text_path",
+                "normalized_word_count",
+                "selected_chunks_count",
+                "present_field_count",
+                "missing_field_count",
+                "missing_fields",
+            ]
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        print("[trace] data_extraction_input_traces status=completed")
+        print(f"[trace] papers_traced={len(rows)}")
+        print(f"[output] trace_dir path={output_root}")
+        print(f"[output] trace_summary path={summary_path}")
 
 
 def run_trace() -> None:

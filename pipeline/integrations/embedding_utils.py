@@ -65,6 +65,17 @@ DE_STOPWORDS = {
 	"diese",
 }
 
+# human readable hint: drop common PDF layout artifacts while preserving table rows for LLM extraction.
+LLM_DROP_LINE_PATTERNS = (
+	re.compile(r"==>\s*picture\b.*omitted\s*<==", re.IGNORECASE),
+	re.compile(r"start of picture text", re.IGNORECASE),
+	re.compile(r"end of picture text", re.IGNORECASE),
+	re.compile(r"page number not for citation purposes", re.IGNORECASE),
+	re.compile(r"\brenderx\b", re.IGNORECASE),
+	re.compile(r"\bxsl\b", re.IGNORECASE),
+	re.compile(r"^https?://\S+$", re.IGNORECASE),
+)
+
 
 class TextPdfUtils:
 	"""human readable hint: one utility class for language detection, PDF reading, and sentence splitting."""
@@ -93,6 +104,52 @@ class TextPdfUtils:
 		# Collapse repeated whitespace after all repairs.
 		value = re.sub(r"\s+", " ", value).strip()
 		return value
+
+	@staticmethod
+	def _should_drop_llm_line(line: str) -> bool:
+		"""human readable hint: remove noisy PDF artifact lines before LLM extraction."""
+
+		stripped = (line or "").strip()
+		if not stripped:
+			return True
+		return any(pattern.search(stripped) for pattern in LLM_DROP_LINE_PATTERNS)
+
+	@staticmethod
+	def normalize_extracted_text_for_llm(text: str) -> str:
+		"""human readable hint: preserve tables while cleaning PDF artifacts for LLM extraction."""
+
+		value = text or ""
+		if not value:
+			return ""
+
+		# Remove invisible soft hyphen artifacts from PDF extraction.
+		value = value.replace("\u00ad", "")
+		# Join explicit line-break hyphenations (e.g., "micro-\nrandomized" -> "microrandomized").
+		value = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", value)
+		# Normalize line endings and keep line breaks for table preservation.
+		value = value.replace("\r\n", "\n").replace("\r", "\n")
+
+		cleaned_lines: list[str] = []
+		blank_run = 0
+		for raw_line in value.split("\n"):
+			line = raw_line.strip()
+			if not line:
+				blank_run += 1
+				if blank_run > 1:
+					continue
+				cleaned_lines.append("")
+				continue
+			blank_run = 0
+			if TextPdfUtils._should_drop_llm_line(line):
+				continue
+			line = re.sub(r"[\t ]+", " ", line)
+			line = re.sub(r"([\.!\?;,:])(\w)", r"\1 \2", line)
+			line = re.sub(r"([A-Za-z])([0-9])", r"\1 \2", line)
+			line = re.sub(r"([0-9])([A-Za-z])", r"\1 \2", line)
+			line = re.sub(r"([a-z])([A-Z])", r"\1 \2", line)
+			cleaned_lines.append(line)
+
+		return "\n".join(cleaned_lines).strip()
 
 	@staticmethod
 	def detect_language_code(text: str) -> str | None:
@@ -311,3 +368,8 @@ def split_text_into_sentences(text: str, language: str) -> list[str]:
 def normalize_extracted_text(text: str) -> str:
 	"""Apply conservative cleanup to extracted PDF text before downstream processing."""
 	return TextPdfUtils.normalize_extracted_text(text)
+
+
+def normalize_extracted_text_for_llm(text: str) -> str:
+	"""Apply LLM-focused cleanup while preserving table structure."""
+	return TextPdfUtils.normalize_extracted_text_for_llm(text)

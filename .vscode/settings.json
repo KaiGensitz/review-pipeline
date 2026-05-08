@@ -16,6 +16,9 @@
         "ConvertTo-Csv": true,
         "Get-FileHash": true,
         "python.terminal.useEnvFile": true,
-        "python.envFile": "${workspaceFolder}/.env"
+        "python.envFile": "${workspaceFolder}/.env",
+        "Move-Item": true,
+        "New-Item": true,
+        "Out-Null": true
     }
 }

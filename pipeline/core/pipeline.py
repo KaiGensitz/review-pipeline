@@ -43,6 +43,7 @@ from pipeline.integrations.embedding_utils import (
     detect_language,
     detect_language_code,
     normalize_extracted_text,
+    normalize_extracted_text_for_llm,
 )
 from pipeline.selection.pdf_parser import (
     extract_markdown_from_pdf_with_level,
@@ -54,6 +55,8 @@ from pipeline.selection.pdf_parser import (
 from pipeline.integrations.llm_client import OpenAIResponder
 from pipeline.core.extraction_schema import (
     DynamicExtractionSchema,
+    SchemaEvidenceHintBuilder,
+    SchemaEvidenceHintConfig,
     domain_groups_for_schema,
     flatten_extracted_data,
     parse_and_validate,
@@ -69,9 +72,12 @@ from pipeline.core.metadata_aliases import (
     normalize_metadata_row,
     read_metadata_value,
 )
+from pipeline.core.extraction_io import SupplementalCitedEvidenceLoader
 from config.user_orchestrator import (
     CURRENT_STAGE,
     CITATION_SEARCHING_STAGE_RULES,
+    DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_ALIASES,
+    DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_LOW_PRIORITY_PATTERNS,
     EMBEDDING_SETTINGS,
     LLM_SETTINGS,
     PATH_SETTINGS,
@@ -373,6 +379,9 @@ class PaperScreeningPipeline:
         else:
             preparse_enabled = preparse_env.strip().lower() in {"1", "true", "yes", "on"}
         self._fulltext_preparse_enabled = self.stage == "full_text" and preparse_enabled
+        self._data_extraction_preflight_enabled = self.stage == "data_extraction" and bool(
+            LLM_SETTINGS.get("data_extraction_generate_normalized_text", True)
+        )
 
         preparse_log_default = bool(SCREENING_DEFAULTS.get("fulltext_preparse_log_each_paper", True))
         preparse_log_env = os.getenv("FULLTEXT_PREPARSE_LOG_EACH_PAPER")
@@ -694,9 +703,9 @@ class PaperScreeningPipeline:
 
         if not self.quiet:
             if self.split_only:
-                print(f"[prep] Creating per-paper folders from: {self.csv_dir.resolve()}")
+                print(f"[prep] Preparing per-paper folders from input_dir={self.csv_dir.resolve()}")
             else:
-                print(f"[pipeline] Screening from CSV dir: {self.csv_dir.resolve()}")
+                print(f"[pipeline] Stage input dir: {self.csv_dir.resolve()}")
 
         if not self.split_only:
             self._persist_prompt_template_snapshot()
@@ -751,6 +760,10 @@ class PaperScreeningPipeline:
         total_input_rows = len(planned_papers)
         total_planned = len(planned_papers)
 
+        if self.stage == "data_extraction":
+            _start_tracking_if_needed()
+            self._preflight_data_extraction_full_text_inputs(planned_papers)
+
         if not self.split_only and self.qc_enabled:
             created_sample = self._ensure_qc_sample(planned_papers, force_new=self.force_new_qc)
             if hasattr(self, "resource_tracker") and self.resource_tracker:
@@ -804,8 +817,9 @@ class PaperScreeningPipeline:
             self._preparse_full_text_pdfs(planned_papers)
 
         progress_total = total_planned if total_planned is not None else (self.sample_size or None)
+        progress_label = "processing" if self.stage == "data_extraction" else "screening"
         progress = (
-            tqdm(total=progress_total, desc="screening", ncols=100)
+            tqdm(total=progress_total, desc=progress_label, ncols=100)
             if (tqdm and progress_total and not self.quiet)
             else None
         )
@@ -930,7 +944,7 @@ class PaperScreeningPipeline:
                 error_flag = paper.paper_id in self._error_ids
                 if error_flag and not self.quiet:
                     print(
-                        f"\n[warn] LLM could not finalize a decision for paper {paper.paper_id}; see {self.error_log_path}",
+                        f"\n[warning] LLM could not finalize a decision for paper={paper.paper_id}; log={self.error_log_path}",
                         flush=True,
                     )
 
@@ -1170,7 +1184,7 @@ class PaperScreeningPipeline:
         self._total_runtime_seconds = time.time() - start_time
 
         if not self.quiet and self.summary_to_console:
-            print("[pipeline] screening run completed successfully")
+            print(f"[pipeline] stage={self.stage} run={self.run_label} status=completed")
 
         def _append_error_summary(total_planned: int) -> None:
             """human readable hint: append a run-level summary row into the error log."""
@@ -1199,7 +1213,7 @@ class PaperScreeningPipeline:
         if self.error_log_path.exists() and self.error_log_path.stat().st_size > 0 and (
             not self.quiet and self.summary_to_console
         ):
-            print(f"[pipeline] errors occurred; see {self.error_log_path.resolve()}")
+            print(f"[pipeline] stage={self.stage} run={self.run_label} status=completed_with_errors log={self.error_log_path.resolve()}")
 
         _append_error_summary(total_planned)
 
@@ -1445,6 +1459,232 @@ class PaperScreeningPipeline:
             if not self.quiet:
                 print(f"[warning] Could not write preparse report: {exc}")
 
+    def _has_full_text_normalized_content(self, folder_path: Path) -> bool:
+        """human readable hint: treat the normalized text sidecar as valid only when it contains body text."""
+
+        normalized_path = folder_path / "full_text_normalized.txt"
+        if not normalized_path.exists():
+            return False
+
+        try:
+            text = normalized_path.read_text(encoding="utf-8")
+        except Exception:
+            return False
+
+        marker = "=== normalized_full_text ==="
+        marker_index = text.find(marker)
+        body = text[marker_index + len(marker):] if marker_index >= 0 else text
+        return bool(normalize_extracted_text_for_llm(body).strip())
+
+    def _ensure_full_text_normalized_for_data_extraction(self, paper: PaperRecord) -> bool:
+        """human readable hint: run the full-text PDF parsing/cache path inside data_extraction when evidence is missing."""
+
+        folder = paper.metadata.get("folder_path")
+        if not folder:
+            self._log_error(
+                paper.paper_id,
+                "data_extraction preflight cannot find paper folder metadata",
+                error_type="data_extraction_preflight_folder_missing",
+            )
+            return False
+
+        folder_path = Path(folder)
+        if self._has_full_text_normalized_content(folder_path):
+            return True
+
+        resolved_path = self._resolve_pdf_path(paper)
+        if not resolved_path or not resolved_path.exists():
+            return False
+
+        text, _page_count, _used_path, _pages = self._load_pdf_text(
+            paper,
+            resolved_path,
+            include_pages=False,
+        )
+        return bool(normalize_extracted_text_for_llm(text or "").strip()) and self._has_full_text_normalized_content(
+            folder_path
+        )
+
+    def _preflight_data_extraction_full_text_inputs(self, papers: list[PaperRecord]) -> None:
+        """human readable hint: prepare all extraction PDFs before QC sampling chooses a subset."""
+
+        if not self._data_extraction_preflight_enabled or not papers:
+            return
+
+        self._suppress_noisy_parser_library_logs()
+
+        total = len(papers)
+        already_ready = 0
+        generated = 0
+        chunks_ready = 0
+        chunks_generated = 0
+        failed = 0
+        report_rows: list[dict[str, str]] = []
+
+        if not self.quiet:
+            print(f"[preflight] Checking data_extraction normalized full text for {total} paper(s)...")
+
+        for idx, paper in enumerate(papers, start=1):
+            folder = paper.metadata.get("folder_path")
+            folder_path = Path(folder) if folder else None
+            was_ready = bool(folder_path and self._has_full_text_normalized_content(folder_path))
+            ok = self._ensure_full_text_normalized_for_data_extraction(paper)
+            had_chunks = self._has_data_extraction_selected_chunks(paper)
+
+            if ok and was_ready:
+                already_ready += 1
+                status = "READY"
+            elif ok:
+                generated += 1
+                status = "GENERATED"
+            else:
+                failed += 1
+                status = "FAIL"
+
+            parser_level = self._read_parser_level_for_folder(folder_path) if folder_path else ""
+            parse_status = "OK" if ok else "FAIL"
+
+            # human readable hint: selected chunks are audit evidence; full normalized text remains the default LLM input.
+            chunks_status = "SKIPPED"
+            if ok:
+                if had_chunks:
+                    chunks_ready += 1
+                    chunks_status = "READY"
+                elif self._ensure_data_extraction_selected_chunks(paper):
+                    chunks_generated += 1
+                    chunks_status = "GENERATED"
+                else:
+                    chunks_status = "FAIL"
+
+            report_rows.append(
+                {
+                    "paper_id": str(paper.paper_id),
+                    "status": status,
+                    "parse_status": parse_status,
+                    "parser_level": parser_level,
+                    "selected_chunks_status": chunks_status,
+                    "folder_path": str(folder_path or ""),
+                }
+            )
+
+            if not self.quiet and self._fulltext_preparse_log_each_paper:
+                parser_suffix = f" parser='{parser_level}'" if parser_level else ""
+                print(
+                    f"[preflight] {idx}/{total} paper={paper.paper_id} "
+                    f"normalized_text={status} status={parse_status}{parser_suffix}",
+                    flush=True,
+                )
+
+        self._write_data_extraction_preflight_report(
+            report_rows,
+            total,
+            already_ready,
+            generated,
+            chunks_ready,
+            chunks_generated,
+            failed,
+        )
+
+        if not self.quiet:
+            print(
+                "[preflight] Data extraction full-text evidence ready: "
+                f"ready={already_ready} generated={generated} "
+                f"chunks_ready={chunks_ready} chunks_generated={chunks_generated} fail={failed} total={total}",
+                flush=True,
+            )
+
+    def _ensure_data_extraction_selected_chunks(self, paper: PaperRecord) -> bool:
+        """human readable hint: create data_extraction chunk-audit sidecars before the LLM run."""
+
+        try:
+            chunks, _pdf_text_tokens, _pdf_visual_tokens, _language_used = self._prepare_chunks(paper)
+            dropped_low_quality_candidates: list[dict] = []
+            if chunks:
+                chunks, _dropped_count, dropped_low_quality_candidates = self._filter_low_quality_chunks(chunks)
+            if not chunks:
+                return False
+            selected, _embed_usage, _selection_trace = self._select_chunks_with_rescue(
+                chunks,
+                dropped_low_quality_candidates,
+            )
+            selected, _score_stats = self._attach_chunk_certainty_metrics(selected)
+            self._write_selected_chunks_to_input(paper, selected)
+            return bool(selected)
+        except Exception as exc:  # pylint: disable=broad-except
+            self._log_error(
+                paper.paper_id,
+                f"data extraction selected-chunk preflight failed: {exc}",
+                error_type="data_extraction_selected_chunks_preflight_failed",
+            )
+            return False
+
+    def _has_data_extraction_selected_chunks(self, paper: PaperRecord) -> bool:
+        """human readable hint: check only data_extraction chunk sidecars, not older full_text fallbacks."""
+
+        folder = paper.metadata.get("folder_path")
+        if not folder:
+            return False
+
+        folder_path = Path(folder)
+        chunks_path = folder_path / "data_extraction_selected_chunks.jsonl"
+        if chunks_path.exists():
+            try:
+                with chunks_path.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        if not line.strip():
+                            continue
+                        payload = json.loads(line)
+                        if payload.get("paper_id") == paper.paper_id and isinstance(payload.get("selected_chunks"), list):
+                            return bool(payload.get("selected_chunks"))
+            except Exception:
+                return False
+
+        artifact_path = self._compact_artifact_path_for_folder(folder_path, stage="data_extraction")
+        if not artifact_path.exists():
+            return False
+        try:
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        return bool(payload.get("selected_chunks")) if isinstance(payload.get("selected_chunks"), list) else False
+
+    def _write_data_extraction_preflight_report(
+        self,
+        rows: list[dict[str, str]],
+        total: int,
+        already_ready: int,
+        generated: int,
+        chunks_ready: int,
+        chunks_generated: int,
+        failed: int,
+    ) -> None:
+        """human readable hint: record which data_extraction folders needed normalized text generation."""
+
+        payload = {
+            "meta": "data_extraction_full_text_preflight_report",
+            "stage": self.stage,
+            "run_label": self.run_label,
+            "run_id": self.run_id,
+            "total": total,
+            "already_ready": already_ready,
+            "generated": generated,
+            "selected_chunks_ready": chunks_ready,
+            "selected_chunks_generated": chunks_generated,
+            "failed": failed,
+            "rows": rows,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            self.stage_output_dir.mkdir(parents=True, exist_ok=True)
+            report_path = self.stage_output_dir / f"{self.stage}_full_text_preflight_report.json"
+            # human readable hint: keep one latest preflight report so repeated QC runs do not clutter the output folder.
+            report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:  # pylint: disable=broad-except
+            if not self.quiet:
+                print(f"[warning] Could not write data_extraction preflight report: {exc}")
+
     def _ensure_qc_sample(self, planned_papers: list[PaperRecord], force_new: bool = False) -> bool:
         """Create (or load) a QC sample and record its paper_ids."""
 
@@ -1534,7 +1774,7 @@ class PaperScreeningPipeline:
                 return True
             if resp in {"n", "no"}:
                 return False
-            print("Please answer 'y' or 'n'.")
+            print("[input] Please answer 'y' or 'n'.")
 
     def _normalize_row(self, row: dict, default_id: str = "") -> dict:
         """Normalize a raw CSV row into standard fields."""
@@ -1661,7 +1901,7 @@ class PaperScreeningPipeline:
                     remaining = max(total - completed, 0)
                     seconds_since_last = int(max(0.0, time.time() - last_completion_ts))
                     print(
-                        f"[async][heartbeat] stage={stage_label} done={completed}/{total} warn={warn_count} remaining={remaining} no_completion_for={seconds_since_last}s",
+                            f"[async][heartbeat] stage={stage_label} done={completed}/{total} warnings={warn_count} remaining={remaining} no_completion_for={seconds_since_last}s",
                         flush=True,
                     )
 
@@ -1700,7 +1940,7 @@ class PaperScreeningPipeline:
                         )
                         if decision_incomplete or llm_error:
                             print(
-                                f"[async][warn] paper={paper_item.paper_id} returned incomplete/invalid LLM output; check {self.error_log_path}",
+                                f"[async][warning] paper={paper_item.paper_id} returned incomplete/invalid LLM output; log={self.error_log_path}",
                                 flush=True,
                             )
                     queue.put(("result", result))
@@ -2247,7 +2487,7 @@ class PaperScreeningPipeline:
                         if attempt < max_attempts:
                             if not self.quiet:
                                 print(
-                                    f"[warn] async data extraction domain validation failed on attempt {attempt}/{max_attempts}; retrying paper {paper.paper_id}"
+                                    f"[warning] async data_extraction domain validation failed attempt={attempt}/{max_attempts}; retrying paper={paper.paper_id}"
                                 )
                             llm_decision = None
                             continue
@@ -2337,7 +2577,7 @@ class PaperScreeningPipeline:
                         if attempt < max_attempts:
                             if not self.quiet:
                                 print(
-                                    f"[warn] async chat attempt {attempt}/{max_attempts} incomplete; retrying for paper {paper.paper_id}"
+                                    f"[warning] async chat incomplete attempt={attempt}/{max_attempts}; retrying paper={paper.paper_id}"
                                 )
                             llm_decision = None
                             continue
@@ -2542,6 +2782,7 @@ class PaperScreeningPipeline:
             folder_path / "data_extraction_normalized.txt",
         ]
         raw_text = ""
+        normalized_text = ""
         for candidate in candidates:
             if not candidate.exists():
                 continue
@@ -2556,14 +2797,30 @@ class PaperScreeningPipeline:
                 )
                 return ""
 
-        if not raw_text:
-            return ""
+        if raw_text:
+            marker = "=== normalized_full_text ==="
+            marker_index = raw_text.find(marker)
+            if marker_index >= 0:
+                raw_text = raw_text[marker_index + len(marker):]
+            # human readable hint: preserve table structure while cleaning PDF artifacts for extraction.
+            normalized_text = normalize_extracted_text_for_llm(raw_text).strip()
 
-        marker = "=== normalized_full_text ==="
-        marker_index = raw_text.find(marker)
-        if marker_index >= 0:
-            raw_text = raw_text[marker_index + len(marker):]
-        normalized_text = normalize_extracted_text(raw_text).strip()
+        if not normalized_text and bool(LLM_SETTINGS.get("data_extraction_generate_normalized_text", False)):
+            # human readable hint: reuse the same normalized full-text sidecar that full_text screening writes.
+            if self._ensure_full_text_normalized_for_data_extraction(paper):
+                try:
+                    raw_text = (folder_path / "full_text_normalized.txt").read_text(encoding="utf-8")
+                    marker = "=== normalized_full_text ==="
+                    marker_index = raw_text.find(marker)
+                    if marker_index >= 0:
+                        raw_text = raw_text[marker_index + len(marker):]
+                    normalized_text = normalize_extracted_text_for_llm(raw_text).strip()
+                except Exception as exc:  # pylint: disable=broad-except
+                    self._log_error(
+                        paper.paper_id,
+                        f"failed to read generated normalized full text for extraction: {exc}",
+                        error_type="data_extraction_generated_full_text_read_failed",
+                    )
         if not normalized_text:
             return ""
 
@@ -2577,7 +2834,80 @@ class PaperScreeningPipeline:
         parts = [f"Paper ID: {paper.paper_id}"]
         if title_text:
             parts.append(f"Title: {title_text}")
+        evidence_hints = self._build_data_extraction_schema_evidence_hints(normalized_text)
+        if evidence_hints:
+            parts.append(evidence_hints)
         parts.append("[Full Normalized Text]\n" + normalized_text)
+        supplemental_cited_evidence = SupplementalCitedEvidenceLoader.from_user_config().load_for_folder(folder_path)
+        if supplemental_cited_evidence:
+            parts.append(supplemental_cited_evidence)
+        return "\n\n".join(parts)
+
+    def _build_data_extraction_schema_evidence_hints(self, normalized_text: str) -> str:
+        """human readable hint: prepend compact schema-derived snippets so extraction does not miss buried evidence."""
+
+        return self._build_schema_evidence_hints_for_schema(normalized_text, self._extraction_schema)
+
+    @staticmethod
+    def _data_extraction_schema_evidence_hint_config() -> SchemaEvidenceHintConfig:
+        """human readable hint: centralize evidence-hint limits so full and domain-scoped prompts stay aligned."""
+
+        return SchemaEvidenceHintConfig(
+            enabled=True,
+            snippets_per_variable=max(0, int(LLM_SETTINGS.get("data_extraction_evidence_hints_per_variable", 2) or 0)),
+            max_snippet_chars=max(120, int(LLM_SETTINGS.get("data_extraction_evidence_hint_max_chars", 420) or 420)),
+            max_total_chars=max(1000, int(LLM_SETTINGS.get("data_extraction_evidence_hints_max_total_chars", 18000) or 18000)),
+            context_lines=max(0, int(LLM_SETTINGS.get("data_extraction_evidence_hint_context_lines", 1) or 0)),
+            alias_map=DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_ALIASES,
+            low_priority_patterns=tuple(DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_LOW_PRIORITY_PATTERNS),
+        )
+
+    @classmethod
+    def _build_schema_evidence_hints_for_schema(
+        cls,
+        normalized_text: str,
+        schema: DynamicExtractionSchema | None,
+    ) -> str:
+        """human readable hint: build evidence hints for either the full schema or the active domain group."""
+
+        if not bool(LLM_SETTINGS.get("data_extraction_schema_evidence_hints", True)):
+            return ""
+        if schema is None:
+            return ""
+        config = cls._data_extraction_schema_evidence_hint_config()
+        # human readable hint: the builder lives with the schema so runtime prompts and trace audits share the same evidence map.
+        return SchemaEvidenceHintBuilder(schema.variables, config).build(normalized_text)
+
+    def _with_domain_scoped_schema_evidence_hints(
+        self,
+        context: str,
+        domain_schema: DynamicExtractionSchema,
+    ) -> str:
+        """human readable hint: reduce repeated extraction calls by sending only hints for the active domain group."""
+
+        if not bool(LLM_SETTINGS.get("data_extraction_schema_evidence_hints", True)):
+            return context
+
+        full_text_marker = "[Full Normalized Text]\n"
+        marker_index = context.find(full_text_marker)
+        if marker_index < 0:
+            return context
+
+        prefix = context[:marker_index].rstrip()
+        normalized_text = context[marker_index + len(full_text_marker) :].strip()
+        if not normalized_text:
+            return context
+
+        hint_marker = "[Schema-Guided Evidence Hints]"
+        hint_index = prefix.find(hint_marker)
+        if hint_index >= 0:
+            prefix = prefix[:hint_index].rstrip()
+
+        evidence_hints = self._build_schema_evidence_hints_for_schema(normalized_text, domain_schema)
+        parts = [prefix] if prefix else []
+        if evidence_hints:
+            parts.append(evidence_hints)
+        parts.append(full_text_marker + normalized_text)
         return "\n\n".join(parts)
 
     def _title_abstract_full_input(self, paper: PaperRecord) -> str:
@@ -2946,8 +3276,8 @@ class PaperScreeningPipeline:
         has_intervention = bool(self._intervention_signal_pattern.search(value))
         has_primary_topic = bool(self._topic_primary_signal_pattern.search(value))
         has_secondary_topic = bool(self._topic_secondary_signal_pattern.search(value))
-        has_triad = has_intervention and has_primary_topic and has_secondary_topic
-        return has_intervention, has_primary_topic, has_secondary_topic, has_triad
+        has_all_topic_cues = has_intervention and has_primary_topic and has_secondary_topic
+        return has_intervention, has_primary_topic, has_secondary_topic, has_all_topic_cues
 
     def _is_monitoring_only_text(self, text: str) -> bool:
         """Detect assessment/monitoring content that lacks explicit intervention mechanics."""
@@ -2980,16 +3310,16 @@ class PaperScreeningPipeline:
         text = str(row.get("text") or "")
         base_score = float(row.get("score", 0.0) or 0.0)
         section_label = self._infer_chunk_section_label(row)
-        has_intervention, has_ai, has_pa, has_triad = self._method_signal_flags(text)
+        has_intervention, has_primary_topic, has_secondary_topic, has_all_topic_cues = self._method_signal_flags(text)
         readability = self._chunk_readability_metrics(text)
         sentence_count = int(row.get("sentence_count") or 0)
 
         hybrid_score = base_score
         if section_label == "method":
             hybrid_score += 0.05
-        if has_triad:
+        if has_all_topic_cues:
             hybrid_score += 0.08
-        elif has_intervention and (has_ai or has_pa):
+        elif has_intervention and (has_primary_topic or has_secondary_topic):
             hybrid_score += 0.04
 
         hybrid_score += 0.04 * float(readability["readability_score"])
@@ -3023,7 +3353,7 @@ class PaperScreeningPipeline:
         return float(hybrid_score)
 
     def _method_priority_sort_key(self, row: dict) -> tuple[Any, ...]:
-        """Rank rows with method evidence first in full_text, then triad-rich evidence."""
+        """Rank rows with method evidence first in full_text, then prompt-cue-rich evidence."""
 
         score = float(row.get("score", 0.0) or 0.0)
         page_start = row.get("page_start") or 0
@@ -3040,8 +3370,8 @@ class PaperScreeningPipeline:
         )
         is_monitoring_only = self._is_monitoring_only_text(text)
         has_method_evidence = bool(section_label == "method" or METHOD_EVIDENCE_PATTERN.search(text))
-        has_intervention, has_ai, has_pa, has_triad = self._method_signal_flags(text)
-        has_dual = has_intervention and (has_ai or has_pa)
+        has_intervention, has_primary_topic, has_secondary_topic, has_all_topic_cues = self._method_signal_flags(text)
+        has_dual = has_intervention and (has_primary_topic or has_secondary_topic)
         hybrid_score = self._hybrid_chunk_score(row)
 
         return (
@@ -3049,7 +3379,7 @@ class PaperScreeningPipeline:
             is_monitoring_only,
             not has_method_evidence,
             section_label != "method",
-            not has_triad,
+            not has_all_topic_cues,
             not has_dual,
             -hybrid_score,
             -score,
@@ -4436,9 +4766,9 @@ class PaperScreeningPipeline:
         return chunks, 0, 0, resolved_language
 
     def _compact_artifacts_enabled(self) -> bool:
-        """Enable compact per-paper artifacts only during full_text runs."""
+        """human readable hint: compact artifacts are the normal per-paper cache for PDF-backed stages."""
 
-        return self.stage == "full_text" and self.artifact_mode == "compact"
+        return self.stage in {"full_text", "data_extraction"} and self.artifact_mode == "compact"
 
     def _compact_artifact_path_for_folder(self, folder_path: Path, stage: str | None = None) -> Path:
         """Return per-paper compact artifact path for the target stage."""
@@ -4482,10 +4812,12 @@ class PaperScreeningPipeline:
         folder_path: Path,
         metadata_snapshot: dict,
         normalized_text: str,
+        target_stage: str | None = None,
     ) -> None:
         """Write human-checkable normalized text with metadata copied from artifact metadata."""
 
-        normalized_path = folder_path / f"{self.stage}_normalized.txt"
+        stage_name = target_stage or self.stage
+        normalized_path = folder_path / f"{stage_name}_normalized.txt"
         content = [
             "=== metadata ===",
             json.dumps(metadata_snapshot, ensure_ascii=False, indent=2),
@@ -4546,7 +4878,12 @@ class PaperScreeningPipeline:
             json.dumps(artifact_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        self._write_compact_human_normalized_text(folder_path, metadata_snapshot, normalized_text)
+        self._write_compact_human_normalized_text(
+            folder_path,
+            metadata_snapshot,
+            normalized_text,
+            target_stage="full_text",
+        )
 
     def _materialize_paper_folders_full_text(self) -> None:
         """Split select CSV rows into per-paper folders under the configured full-text PDF folder."""
@@ -4682,107 +5019,135 @@ class PaperScreeningPipeline:
 
     def _materialize_data_extraction_subset(self) -> None:
         """Create per-paper data_extraction folders from included IDs."""
+        # human readable hint: use the active stage CSV(s) so every included ID gets a folder.
+        self._materialize_data_extraction_from_csv_inputs()
 
-        source_dir = self._full_text_pdf_dir()
-        if not source_dir.exists():
-            print(
-                f"[warning] full_text folders not found at {source_dir}; run split-only at full_text stage first"
-            )
-            self._paper_folders = []
-            return
+    def _materialize_data_extraction_from_csv_inputs(self) -> None:
+        """Create per-paper data_extraction folders from CSV inputs or stage defaults."""
 
-        included_csv = self._find_included_csv()
-        if not included_csv:
-            print("[warning] no *_included_csv_* file found; data_extraction subset not prepared")
-            self._paper_folders = []
-            return
-
-        included_ids = self._load_included_ids(included_csv)
-        if not included_ids:
-            print("[warning] no included IDs extracted; data_extraction subset not prepared")
+        csv_rows = self._collect_csv_rows(select_only=False)
+        if not csv_rows:
+            print("[warning] no input CSV rows found; data_extraction subset not prepared")
             self._paper_folders = []
             return
 
         target_dir = self._data_extraction_pdf_dir()
         target_dir.mkdir(parents=True, exist_ok=True)
 
+        # human readable hint: reuse existing full_text artifacts when available to avoid re-parsing PDFs.
+        source_dir = self._full_text_pdf_dir()
+        source_lookup: dict[str, Path] = {}
+        if source_dir.exists():
+            for folder in sorted(source_dir.iterdir()):
+                if not folder.is_dir():
+                    continue
+                row = self._metadata_snapshot_for_folder(folder)
+                if not row:
+                    continue
+                paper_id = self._extract_paper_id(row)
+                if paper_id:
+                    source_lookup[str(paper_id)] = folder
+
         copied: list[Path] = []
-        for folder in sorted(source_dir.iterdir()):
-            if not folder.is_dir():
+        missing: list[str] = []
+        seen_ids: set[str] = set()
+
+        for row in csv_rows:
+            canonical = self._canonicalize_row(row)
+            paper_id = str(read_metadata_value(canonical, "paper_id", "")).strip()
+            folder_name = self._build_paper_folder_name(row)
+            unique_key = paper_id or folder_name
+            if unique_key in seen_ids:
                 continue
-            row = self._metadata_snapshot_for_folder(folder)
-            if not row:
-                continue
+            seen_ids.add(unique_key)
 
-            paper_id = self._extract_paper_id(row)
-            if paper_id not in included_ids:
-                continue
+            dest = target_dir / folder_name
+            dest.mkdir(parents=True, exist_ok=True)
 
-            dest = target_dir / folder.name
-            try:
-                dest.mkdir(parents=True, exist_ok=True)
+            data_artifact_path = self._compact_artifact_path_for_folder(dest, stage="data_extraction")
+            data_artifact_payload: dict[str, Any] = {}
+            if data_artifact_path.exists():
+                try:
+                    loaded = json.loads(data_artifact_path.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        data_artifact_payload = loaded
+                except Exception:
+                    data_artifact_payload = {}
 
-                pdfs = sorted(folder.glob("*.pdf"))
-                if pdfs:
-                    shutil.copy2(pdfs[0], dest / pdfs[0].name)
-                # human readable hint: PDFs are not duplicated; normalized text and artifact JSON are sufficient.
-                # pdfs = sorted(folder.glob("*.pdf"))
-                # if pdfs: shutil.copy2(pdfs[0], dest / pdfs[0].name)
+            data_artifact_payload.update(
+                {
+                    "meta": "stage_artifact",
+                    "schema_version": 1,
+                    "stage": "data_extraction",
+                    "paper_id": paper_id or folder_name,
+                    "metadata": canonical,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            data_artifact_path.write_text(
+                json.dumps(data_artifact_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
-                full_text_chunks = folder / "full_text_selected_chunks.jsonl"
-                if full_text_chunks.exists():
-                    shutil.copy2(full_text_chunks, dest / "data_extraction_selected_chunks.jsonl")
+            source_folder = source_lookup.get(paper_id) if paper_id else None
+            if source_folder and source_folder.exists():
+                self._copy_reusable_full_text_artifacts(source_folder, dest)
+                if not any(dest.glob("*.pdf")):
+                    pdfs = sorted(source_folder.glob("*.pdf"))
+                    if pdfs:
+                        shutil.copy2(pdfs[0], dest / pdfs[0].name)
 
-                full_text_artifact = folder / "full_text_artifact.json"
-                if full_text_artifact.exists():
-                    shutil.copy2(full_text_artifact, dest / full_text_artifact.name)
+            if not any(dest.glob("*.pdf")) and paper_id:
+                source_pdf = self._find_source_pdf_for_paper_id(paper_id)
+                if source_pdf and source_pdf.exists():
+                    shutil.copy2(source_pdf, dest / source_pdf.name)
 
-                full_text_normalized = folder / "full_text_normalized.txt"
-                if full_text_normalized.exists():
-                    shutil.copy2(full_text_normalized, dest / full_text_normalized.name)
+            if not any(dest.glob("*.pdf")):
+                missing.append(dest.name)
 
-                data_artifact_path = self._compact_artifact_path_for_folder(dest, stage="data_extraction")
-                data_artifact_payload: dict[str, Any] = {}
-                if data_artifact_path.exists():
-                    try:
-                        loaded = json.loads(data_artifact_path.read_text(encoding="utf-8"))
-                        if isinstance(loaded, dict):
-                            data_artifact_payload = loaded
-                    except Exception:
-                        data_artifact_payload = {}
-
-                data_artifact_payload.update(
-                    {
-                        "meta": "stage_artifact",
-                        "schema_version": 1,
-                        "stage": "data_extraction",
-                        "paper_id": str(read_metadata_value(row, "paper_id", folder.name)),
-                        "metadata": row,
-                        "updated_at": datetime.now(timezone.utc).isoformat(),
-                    }
-                )
-                data_artifact_path.write_text(
-                    json.dumps(data_artifact_payload, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-
-                for stale_name in ("metadata.json", "metadata.csv"):
-                    stale_path = dest / stale_name
-                    if stale_path.exists():
-                        try:
-                            stale_path.unlink()
-                        except Exception:
-                            pass
-
-                copied.append(dest)
-            except Exception as exc:  # pylint: disable=broad-except
-                self._log_error(
-                    str(paper_id),
-                    f"data_extraction folder copy failed: {exc}",
-                    error_type="data_extraction_copy_failed",
-                )
+            copied.append(dest)
 
         self._paper_folders = copied
+
+        # human readable hint: stop early when PDFs are missing so extraction does not silently skip evidence.
+        if missing and not self.split_only:
+            print(
+                f"[prep] PDFs missing for {len(missing)} folder(s) in {target_dir.name}. "
+                "Add one PDF per folder, then rerun main.py:"
+            )
+            for name in missing:
+                print(f"  - {name}")
+            self._paper_folders = []
+            return
+
+    def _copy_reusable_full_text_artifacts(self, source_folder: Path, dest_folder: Path) -> None:
+        """human readable hint: carry full-text parsing results forward instead of deleting or re-parsing them."""
+
+        reusable_names = [
+            "full_text_artifact.json",
+            "full_text_normalized.txt",
+        ]
+        reusable_names.extend(path.name for path in sorted(source_folder.glob("*_normalized_text.txt")))
+        reusable_names.extend(path.name for path in sorted(source_folder.glob("*_normalized_pages.json")))
+        reusable_names.extend(path.name for path in sorted(source_folder.glob("*_normalized_meta.json")))
+
+        seen: set[str] = set()
+        for name in reusable_names:
+            if name in seen:
+                continue
+            seen.add(name)
+            source_path = source_folder / name
+            dest_path = dest_folder / name
+            if not source_path.exists() or dest_path.exists():
+                continue
+            try:
+                shutil.copy2(source_path, dest_path)
+            except Exception as exc:  # pylint: disable=broad-except
+                self._log_error(
+                    dest_folder.name,
+                    f"failed to copy reusable full-text artifact '{name}': {exc}",
+                    error_type="full_text_artifact_copy_failed",
+                )
 
     @staticmethod
     def _find_missing_pdfs(base_dir: Path) -> list[str]:
@@ -4955,7 +5320,12 @@ class PaperScreeningPipeline:
                             if include_pages and not pages and not advanced_mode_for_pdf:
                                 pages = [text]
                             metadata_snapshot = self._metadata_snapshot_for_folder(path.parent, fallback=paper.metadata)
-                            self._write_compact_human_normalized_text(path.parent, metadata_snapshot, text)
+                            self._write_compact_human_normalized_text(
+                                path.parent,
+                                metadata_snapshot,
+                                text,
+                                target_stage="full_text",
+                            )
                             for stale_path in (cache_text_path, cache_pages_path, cache_meta_path):
                                 try:
                                     if stale_path.exists():
@@ -5188,8 +5558,9 @@ class PaperScreeningPipeline:
             use_schema_response_format = response_format_mode == "json_schema"
             if response_format_mode == "json_object":
                 response_format_override = {"type": "json_object"}
+            domain_context = self._with_domain_scoped_schema_evidence_hints(context, domain_schema)
             raw_text, usage = await self._call_llm_async(
-                context,
+                domain_context,
                 prompt_template=domain_prompt,
                 extraction_schema=domain_schema,
                 response_format_override=response_format_override,
@@ -6083,7 +6454,8 @@ class PaperScreeningPipeline:
             folder_path.mkdir(parents=True, exist_ok=True)
 
             if self._compact_artifacts_enabled():
-                artifact_path = self._compact_artifact_path_for_folder(folder_path, stage="full_text")
+                artifact_stage = self.stage
+                artifact_path = self._compact_artifact_path_for_folder(folder_path, stage=artifact_stage)
                 artifact_payload: dict[str, Any] = {}
                 if artifact_path.exists():
                     try:
@@ -6098,7 +6470,7 @@ class PaperScreeningPipeline:
                     {
                         "meta": "stage_artifact",
                         "schema_version": 1,
-                        "stage": "full_text",
+                        "stage": artifact_stage,
                         "paper_id": str(paper.paper_id),
                         "run_label": self.run_label,
                         "run_id": self.run_id,
@@ -6112,7 +6484,7 @@ class PaperScreeningPipeline:
                     encoding="utf-8",
                 )
 
-                if not self.compact_keep_legacy_selected_chunks:
+                if self.stage != "data_extraction" and not self.compact_keep_legacy_selected_chunks:
                     return
 
             chunks_path = folder_path / f"{self.stage}_selected_chunks.jsonl"

@@ -8,7 +8,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast, get_args
+from typing import Any, Literal, Mapping, cast, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 
@@ -73,6 +73,352 @@ class ExtractionVariable:
     @property
     def quote_path(self) -> str:
         return f"{self.domain}.{self.quote_key}"
+
+
+@dataclass(frozen=True)
+class SchemaEvidenceHintConfig:
+    """human readable hint: tune the compact evidence map prepended to long extraction inputs."""
+
+    enabled: bool = True
+    snippets_per_variable: int = 2
+    max_snippet_chars: int = 420
+    max_total_chars: int = 18000
+    context_lines: int = 1
+    alias_map: Mapping[str, Iterable[str]] | None = None
+    low_priority_patterns: tuple[str, ...] = ()
+
+
+class SchemaEvidenceHintBuilder:
+    """human readable hint: build generic, schema-derived snippets from normalized full text."""
+
+    STOPWORDS = frozenset(
+        {
+            "about",
+            "above",
+            "after",
+            "also",
+            "abstract",
+            "and",
+            "author",
+            "authors",
+            "available",
+            "baseline",
+            "clinical",
+            "column",
+            "consensus",
+            "context",
+            "concepts",
+            "contribution",
+            "contributions",
+            "data",
+            "declaration",
+            "declarations",
+            "details",
+            "domain",
+            "exactly",
+            "explicit",
+            "explicitly",
+            "extract",
+            "field",
+            "for",
+            "from",
+            "information",
+            "label",
+            "location",
+            "look",
+            "method",
+            "methods",
+            "missing",
+            "not",
+            "only",
+            "overall",
+            "outcomes",
+            "paper",
+            "participant",
+            "population",
+            "prefer",
+            "preserving",
+            "rather",
+            "reported",
+            "resource",
+            "resources",
+            "result",
+            "results",
+            "return",
+            "says",
+            "schema",
+            "search",
+            "sections",
+            "setting",
+            "source",
+            "stated",
+            "study",
+            "summaries",
+            "summary",
+            "tables",
+            "text",
+            "that",
+            "the",
+            "this",
+            "trial",
+            "such",
+            "than",
+            "use",
+            "using",
+            "value",
+            "values",
+            "variable",
+            "when",
+            "where",
+            "with",
+            "energy",
+        }
+    )
+
+    def __init__(
+        self,
+        variables: Iterable[ExtractionVariable],
+        config: SchemaEvidenceHintConfig | None = None,
+    ) -> None:
+        self.variables = tuple(variables)
+        self.config = config or SchemaEvidenceHintConfig()
+        self.alias_map = self._normalize_alias_map(self.config.alias_map)
+        self.low_priority_patterns = tuple(
+            str(pattern).strip().casefold()
+            for pattern in self.config.low_priority_patterns
+            if str(pattern).strip()
+        )
+
+    def build(self, normalized_text: str) -> str:
+        """human readable hint: create a short field-by-field evidence map before the full text."""
+
+        if not self.config.enabled:
+            return ""
+        text = (normalized_text or "").strip()
+        if not text or self.config.snippets_per_variable <= 0:
+            return ""
+
+        header_lines: list[str] = [
+            "[Schema-Guided Evidence Hints]",
+            (
+                "These snippets are selected mechanically from the normalized full text using schema variable names, "
+                "export labels, and instructions. Use them as a fast evidence map, then verify values against the full text below."
+            ),
+        ]
+        entries: list[tuple[ExtractionVariable, list[tuple[int, str]]]] = []
+
+        # human readable hint: first collect candidate snippets so every schema variable gets a chance before depth is added.
+        for variable in self.variables:
+            terms = self.terms_for_variable(variable)
+            if not terms:
+                continue
+            snippets = self.find_snippets(
+                normalized_text=text,
+                terms=terms,
+                max_snippets=self.config.snippets_per_variable,
+                max_chars=self.config.max_snippet_chars,
+            )
+            if not snippets:
+                continue
+            entries.append((variable, snippets))
+
+        grouped_lines = list(header_lines)
+        current_size = sum(len(line) for line in grouped_lines)
+        truncated = False
+
+        # human readable hint: render breadth-first so later schema domains are not starved by long early-domain evidence.
+        for snippet_index in range(self.config.snippets_per_variable):
+            last_domain = ""
+            for variable, snippets in entries:
+                if snippet_index >= len(snippets):
+                    continue
+                if variable.domain != last_domain:
+                    domain_line = f"Domain: {variable.domain}"
+                    if current_size + len(domain_line) > self.config.max_total_chars:
+                        truncated = True
+                        break
+                    grouped_lines.append(domain_line)
+                    current_size += len(domain_line)
+                    last_domain = variable.domain
+
+                line_number, snippet = snippets[snippet_index]
+                label = variable.variable_name if snippet_index == 0 else f"{variable.variable_name} additional"
+                line = f"- {label}: L{line_number}: {snippet}"
+                if current_size + len(line) > self.config.max_total_chars:
+                    truncated = True
+                    break
+                grouped_lines.append(line)
+                current_size += len(line)
+            if truncated:
+                grouped_lines.append("- evidence_hints_truncated: total hint budget reached")
+                break
+        return "\n".join(grouped_lines) if len(grouped_lines) > 2 else ""
+
+    def terms_for_variable(self, variable: ExtractionVariable) -> list[str]:
+        """human readable hint: derive compact search terms from the schema contract, not the study topic."""
+
+        terms: list[str] = []
+
+        # human readable hint: user-configured aliases provide review-specific bridge terms without hardcoding them here.
+        for alias_key in self._alias_keys_for_variable(variable):
+            for alias in self.alias_map.get(alias_key, ()):
+                if alias not in terms:
+                    terms.append(alias)
+
+        raw_text = " ".join(
+            [
+                variable.domain,
+                variable.variable_name.replace("_", " "),
+                variable.covidence_column_name,
+                variable.instruction,
+            ]
+        )
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9+\-]{2,}", raw_text.casefold()):
+            normalized = token.strip("-")
+            if not normalized or normalized in self.STOPWORDS:
+                continue
+            if normalized not in terms:
+                terms.append(normalized)
+        return terms[:14]
+
+    def find_snippets(
+        self,
+        normalized_text: str,
+        terms: list[str],
+        max_snippets: int,
+        max_chars: int,
+    ) -> list[tuple[int, str]]:
+        """human readable hint: find short field-relevant snippets while preserving line numbers for quote audit."""
+
+        if not normalized_text.strip() or not terms or max_snippets <= 0:
+            return []
+
+        pattern = re.compile(
+            "|".join(r"(?<![A-Za-z0-9])" + re.escape(term) + r"(?![A-Za-z0-9])" for term in terms),
+            flags=re.IGNORECASE,
+        )
+        lines = normalized_text.splitlines()
+        scored: list[tuple[int, int, int, int, str]] = []
+        seen_snippets: set[str] = set()
+        for line_number, line in enumerate(lines, start=1):
+            clean_line = re.sub(r"\s+", " ", line).strip()
+            if not clean_line:
+                continue
+            matches = list(pattern.finditer(clean_line))
+            if not matches:
+                continue
+            snippet_source = self._line_with_context(lines, line_number, clean_line)
+            context_offset = max(0, snippet_source.find(clean_line))
+            snippet = self.snippet_around_match(snippet_source, context_offset + matches[0].start(), max_chars=max_chars)
+            normalized_snippet = snippet.casefold()
+            if normalized_snippet in seen_snippets:
+                continue
+            seen_snippets.add(normalized_snippet)
+            score = len({match.group(0).casefold() for match in pattern.finditer(snippet)})
+            score += self._structured_bonus(snippet)
+            if re.search(r"\d", snippet):
+                score += 1
+            if self._is_low_priority(snippet):
+                score -= 20
+            # human readable hint: prefer compact high-signal lines over huge abstracts when scores are similar.
+            length_penalty = 1 if len(clean_line) > max_chars * 3 else 0
+            source_penalty = 1 if self._is_low_priority(snippet) else 0
+            scored.append((score, source_penalty, length_penalty, line_number, snippet))
+
+        usable_scored = [item for item in scored if item[1] == 0] or scored
+        usable_scored.sort(key=lambda item: (-item[0], item[1], item[2], item[3]))
+        return [
+            (line_number, snippet)
+            for _score, _source_penalty, _length_penalty, line_number, snippet in usable_scored[:max_snippets]
+        ]
+
+    @staticmethod
+    def snippet_around_match(line: str, match_start: int, max_chars: int) -> str:
+        """human readable hint: keep evidence hints short but centered near the matched schema term."""
+
+        clean_line = re.sub(r"\s+", " ", line).strip()
+        if len(clean_line) <= max_chars:
+            return clean_line
+        half_window = max(60, max_chars // 2)
+        start = max(0, match_start - half_window)
+        end = min(len(clean_line), start + max_chars)
+        if end - start < max_chars:
+            start = max(0, end - max_chars)
+        prefix = "..." if start > 0 else ""
+        suffix = "..." if end < len(clean_line) else ""
+        return prefix + clean_line[start:end].strip() + suffix
+
+    @staticmethod
+    def _normalize_alias_map(alias_map: Mapping[str, Iterable[str]] | None) -> dict[str, tuple[str, ...]]:
+        """human readable hint: normalize optional user aliases once so snippet matching stays fast."""
+
+        normalized: dict[str, tuple[str, ...]] = {}
+        if not alias_map:
+            return normalized
+        for key, aliases in alias_map.items():
+            clean_key = str(key or "").strip().casefold()
+            if not clean_key:
+                continue
+            clean_aliases: list[str] = []
+            for alias in aliases or ():
+                clean_alias = str(alias or "").strip().casefold()
+                if clean_alias and clean_alias not in clean_aliases:
+                    clean_aliases.append(clean_alias)
+            if clean_aliases:
+                normalized[clean_key] = tuple(clean_aliases)
+        return normalized
+
+    @staticmethod
+    def _alias_keys_for_variable(variable: ExtractionVariable) -> tuple[str, ...]:
+        """human readable hint: let users target aliases broadly by domain or precisely by schema field."""
+
+        return (
+            f"{variable.domain}.{variable.variable_name}".casefold(),
+            variable.variable_name.casefold(),
+            f"{variable.domain}.*".casefold(),
+            variable.domain.casefold(),
+        )
+
+    def _line_with_context(self, lines: list[str], line_number: int, clean_line: str) -> str:
+        """human readable hint: include neighboring rows so table labels and values stay together."""
+
+        if self.config.context_lines <= 0:
+            return clean_line
+        index = line_number - 1
+        if self._looks_structured(clean_line):
+            before = 1
+            after = self.config.context_lines + 2
+        else:
+            before = self.config.context_lines
+            after = self.config.context_lines
+        start = max(0, index - before)
+        end = min(len(lines), index + after + 1)
+        joined = " ".join(re.sub(r"\s+", " ", item).strip() for item in lines[start:end] if item.strip())
+        return joined or clean_line
+
+    @staticmethod
+    def _looks_structured(text: str) -> bool:
+        """human readable hint: recognize table-like rows without knowing any study-specific columns."""
+
+        clean = str(text or "")
+        return clean.count("|") >= 2 or bool(re.search(r"\b(table|figure)\b", clean, flags=re.IGNORECASE))
+
+    @staticmethod
+    def _structured_bonus(text: str) -> int:
+        """human readable hint: prefer extracted table rows because numeric participant facts often live there."""
+
+        clean = str(text or "")
+        if clean.count("|") >= 2:
+            return 6
+        if re.search(r"\b(table|figure)\b", clean, flags=re.IGNORECASE):
+            return 2
+        return 0
+
+    def _is_low_priority(self, text: str) -> bool:
+        """human readable hint: rank generic boilerplate below participant/method evidence without deleting it."""
+
+        lowered = str(text or "").casefold()
+        return any(pattern in lowered for pattern in self.low_priority_patterns)
 
 
 @dataclass(frozen=True)
@@ -557,6 +903,8 @@ def format_instruction_block(variables: tuple[ExtractionVariable, ...], response
         "# KB-DRIVEN EXTRACTION SCHEMA",
         "For every variable below, return two fields: <variable_name>_value and <variable_name>_quote.",
         f'If evidence is absent, return "{MISSING_TEXT_VALUE}" for string/enum/integer/float values, false for booleans, [] for lists, and null for the quote.',
+        "Before using a missing-value default, perform a focused availability sweep for that variable: search the abstract, methods, results, tables, trial/protocol sections, and the schema variable name/export-column wording plus close synonyms from its instruction.",
+        "If the variable instruction names acceptable fallback evidence, such as eligibility criteria for protocol papers, that fallback counts as explicit evidence and should be extracted with a supporting quote.",
         "Use the shortest exact quote that proves the value, usually one sentence, table row, or table label plus value. Do not copy long paragraphs.",
         "",
         "Variables and instructions:",

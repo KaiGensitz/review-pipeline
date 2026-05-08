@@ -162,7 +162,7 @@ class OpenAIResponder:
 					delay = min(backoff_max_seconds, backoff_base_seconds * (2 ** attempt))
 					delay += random.uniform(0.0, max(0.0, jitter_seconds))
 					print(
-						f"[warn] async chat retry {attempt + 1}/{max_retries + 1} for model='{self.model}' after transient error: {exc}",
+						f"[warning] async chat retry {attempt + 1}/{max_retries + 1} for model='{self.model}' after transient error: {exc}",
 						file=sys.stderr,
 					)
 					await asyncio.sleep(delay)

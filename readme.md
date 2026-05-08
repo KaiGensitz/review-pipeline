@@ -154,7 +154,9 @@ Behavior notes:
   - Knowledge-base default: [knowledge-base/data_extraction_pos-neg_examples.csv](knowledge-base/data_extraction_pos-neg_examples.csv)
   - Knowledge-base override: set `KNOWLEDGE_BASE_FILES["data_extraction"]` or `KB_FILE_OVERRIDES["data_extraction"]` in [config/user_orchestrator.py](config/user_orchestrator.py)
   - PDFs reused in `input/per_paper_data_extraction/`
-  - extraction schema and Covidence validation mapping are read from `DATA_EXTRACTION_SCHEMA_FILE` in [config/user_orchestrator.py](config/user_orchestrator.py)
+  - before QC sampling or full screening, data extraction checks every included per-paper folder for usable `full_text_normalized.txt`; missing files are generated from the folder PDF with the same normalized full-text artifact path used by `full_text`
+  - data extraction preserves reusable full-text artifacts, writes/updates `data_extraction_artifact.json`, and keeps `data_extraction_selected_chunks.jsonl` as chunk-audit evidence even when the LLM prompt uses full normalized text
+  - extraction schema and consensus/export-header validation mapping are read from `DATA_EXTRACTION_SCHEMA_FILE` in [config/user_orchestrator.py](config/user_orchestrator.py)
   - CSV/admin headers are read through `CSV_METADATA_COLUMN_ALIASES` and `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS` in [config/user_orchestrator.py](config/user_orchestrator.py); pipeline Python stays topic- and export-vendor-generic
   - prompt-to-domain matching uses schema text plus optional `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` in [config/user_orchestrator.py](config/user_orchestrator.py)
   - extraction defaults to schema-domain batches, so each LLM response stays small enough to validate while configured groups reduce repeated full-text calls
@@ -199,9 +201,10 @@ Dynamic behavior implemented in pipeline:
 - Topic retrieval signals are derived from prompt include lists and KB examples, without hidden protocol-specific seed terms in Python code.
 - Prompt-derived retrieval/schema signal helpers live in `pipeline/selection/prompt_signals.py`, keeping the main pipeline class focused on orchestration.
 - `main.py` keeps the interactive stage flow; retry bookkeeping, output indexing, and startup checks live in focused `pipeline/additions` modules.
-- Data-extraction validation is dynamic: each KB `variable_name` maps to the exact Covidence header in `covidence_column_name`.
-- Data-extraction prompting is prompt-driven plus CSV-validated: users edit the prompt for review concepts/domains and edit `DATA_EXTRACTION_SCHEMA_FILE` for exact output variables, value types, missing-value rules, and Covidence headers.
+- Data-extraction validation is dynamic: each KB `variable_name` maps to the exact consensus/export header named in `covidence_column_name`.
+- Data-extraction prompting is prompt-driven plus CSV-validated: users edit the prompt for review concepts/domains and edit `DATA_EXTRACTION_SCHEMA_FILE` for exact output variables, value types, missing-value rules, and consensus/export headers.
 - Input metadata and aggregate-output administrative labels are config-driven through `CSV_METADATA_COLUMN_ALIASES` and `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, so a different export system should require config edits rather than pipeline edits.
+- AI-first extraction expert oversight is configured through `DATA_EXTRACTION_EXPERT_REVIEW_SETTINGS`, `DATA_EXTRACTION_EXPERT_REVIEWERS`, and `DATA_EXTRACTION_EXPERT_REVIEW_SHARED_VARIABLES`; reviewer names and assigned schema variables stay in [config/user_orchestrator.py](config/user_orchestrator.py).
 - Citation-search runs can be separated from normal screening by setting `CITATION_SEARCHING_SCREENING=True`; the pipeline then reads citation-search patterns from `CITATION_SEARCHING_STAGE_RULES`, generates a delta CSV under `input/citation_searching_delta/`, skips QC sampling, and writes scoped outputs under `citation_searching`.
 - No code edits are required for topic changes if prompt, knowledge base, and `user_orchestrator.py` are updated consistently.
 
@@ -240,7 +243,7 @@ Dynamic behavior implemented in pipeline:
 - full text:
   - `python -m pipeline.additions.stats_engine --included <included_csv> --excluded <excluded_csv>`
 - data extraction:
-  - `python -m pipeline.additions.stats_engine --consensus <Covidence_gold_standard.csv>`
+  - `python -m pipeline.additions.stats_engine --consensus <human_gold_standard.csv>`
 
 ## Input-Forensics Utility
 
@@ -273,6 +276,8 @@ Data extraction additionally writes per-paper:
 Data extraction run-level exports for review and audit:
 - The files are created at the start of a data-extraction run and appended as each QC or remaining paper finishes.
 - `python -m pipeline.additions.export_extraction_tables` can still rebuild them from per-paper JSONL files.
+- `python -m pipeline.additions.export_expert_review_packets export` writes expert oversight packets from an existing extraction output folder.
+- `python -m pipeline.additions.export_expert_review_packets summarize` summarizes completed expert oversight decisions by schema variable.
 - `data_extraction_all_papers_for_consensus_comparison.csv`: one AI row per paper in the same header layout as `input/data_extraction_schema.csv`
 - `data_extraction_all_papers_quote_audit.csv`: long audit table with value plus supporting quote for every variable
 
@@ -284,10 +289,11 @@ Data-extraction validation additionally writes run-level exports:
 Data-extraction schema and validation mapping:
 - The configured extraction schema CSV defines `domain`, `variable_name`, `variable_type`, `allowed_options`, `instruction`, and `covidence_column_name`.
 - The LLM output uses `{variable_name}_value` and `{variable_name}_quote` under each domain.
-- Validation maps each LLM value field to the exact Covidence header named in `covidence_column_name`.
+- Validation maps each LLM value field to the exact consensus/export header named in `covidence_column_name`.
 - `LLM_SETTINGS["data_extraction_split_by_domain"]` defaults to `True`; this validates smaller schema-domain batches instead of one fragile all-fields JSON response. `data_extraction_domain_groups` can combine compatible domains into fewer calls, and `data_extraction_domain_max_tokens` caps each batch response.
 - `LLM_SETTINGS["data_extraction_response_format_mode"]` defaults to `prompt_only` for GPUSstack compatibility; use `json_schema` only with a backend proven to enforce OpenAI Structured Outputs.
 - `LLM_SETTINGS["data_extraction_evidence_mode"]` defaults to `full_text`, so extraction uses cached `full_text_normalized.txt` instead of only the selected screening chunks.
+- `LLM_SETTINGS["data_extraction_generate_normalized_text"]` defaults to `True`, so data extraction runs a full-text evidence preflight for all included papers before QC sampling narrows the screening set.
 
 Data-extraction evidence modes:
 - `full_text` mode, current default:
@@ -321,7 +327,7 @@ Data-extraction evidence modes:
 - Keep `LLM_SETTINGS["max_tokens"]` lower than `context_window_total_tokens`; effective prompt budget is computed as `context_window_total_tokens - max_tokens`.
 - Endpoint-safe optimization profile defaults are now set to: `SCREENING_DEFAULTS.top_k=10`, `EMBEDDING_SETTINGS.chunk_size=20`, `LLM_SETTINGS.async_max_concurrency=2`.
 - Async LLM controls are in `LLM_SETTINGS`: `async_max_concurrency`, `async_max_retries`, `async_backoff_base_seconds`, `async_backoff_max_seconds`, `async_jitter_seconds`.
-- Data-extraction output controls are in `LLM_SETTINGS`: `data_extraction_split_by_domain`, `data_extraction_domain_groups`, `data_extraction_response_format_mode`, `data_extraction_domain_max_tokens`, `data_extraction_evidence_mode`, and `data_extraction_full_text_max_words`.
+- Data-extraction output controls are in `LLM_SETTINGS`: `data_extraction_split_by_domain`, `data_extraction_domain_groups`, `data_extraction_response_format_mode`, `data_extraction_domain_max_tokens`, `data_extraction_evidence_mode`, `data_extraction_generate_normalized_text`, and `data_extraction_full_text_max_words`.
 - Stage toggles for async processing: `async_enable_full_text`, `async_enable_data_extraction`.
 - Async heartbeat log interval: `async_heartbeat_seconds` (default `30`).
 - Per-paper artifact controls are in `SCREENING_DEFAULTS`:

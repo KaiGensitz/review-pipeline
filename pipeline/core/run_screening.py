@@ -153,21 +153,31 @@ def _existing_qc_files(
 
 
 def _stage_prefixed(path: Path, target_stage: str) -> Path:
-    """Ensure a file path is placed under output/<stage>/ for consistency.
+    """Ensure a file path is placed under the active stage output folder for consistency.
 
     Args:
         path: Desired file path (possibly outside output/<stage>/).
         target_stage: Stage name for output placement.
 
     Returns:
-        Path under output/<stage>/ with the same filename.
+        Path under the active stage output folder with the same filename.
 
     Note: keeps all outputs stage-scoped.
     """
-    # If a path is already under output/<stage>/ keep it; otherwise, place it there.
+    # human readable hint: citation-searching runs use a configured stage root
+    # such as output/full_text_citationSearching rather than output/full_text.
+    stage_root = _stage_root(target_stage)
+    try:
+        if path.resolve().parent == stage_root.resolve():
+            return path
+    except Exception:
+        if path.parent == stage_root:
+            return path
+
+    # If a path is already under output/<stage>/ keep it for backward-compatible explicit overrides.
     if path.parent.name == target_stage:
         return path
-    return DEFAULT_STAGE_ROOT / target_stage / path.name
+    return stage_root / path.name
 
 
 def _extract_text(row: dict, keys: list[str]) -> str:
@@ -637,15 +647,19 @@ def run_pipeline(
     error_log_path = error_log.resolve()
 
     if stage in {"title_abstract", "full_text"}:
-        print("Eligibility results:", "successfully done" if elig_path.exists() else "see error log", elig_path)
-        print("Readable summary:", "successfully done" if text_path.exists() else "see error log", text_path)
+        print(
+            f"[output] eligibility_records status={'ok' if elig_path.exists() else 'see_error_log'} path={elig_path}"
+        )
+        print(f"[output] readable_summary status={'ok' if text_path.exists() else 'see_error_log'} path={text_path}")
     if stage in {"title_abstract", "full_text"}:
-        print("Chunk records:", "successfully done" if chunks_path.exists() else "see error log", chunks_path)
-    print("Resource summary:", "successfully done" if resource_log_resolved.exists() else "see error log", resource_log_resolved)
+        print(f"[output] chunk_records status={'ok' if chunks_path.exists() else 'see_error_log'} path={chunks_path}")
+    print(
+        f"[output] resource_summary status={'ok' if resource_log_resolved.exists() else 'see_error_log'} path={resource_log_resolved}"
+    )
 
     error_ids: set[str] = set()
     if error_log_path.exists() and error_log_path.stat().st_size > 0:
-        print("Errors occurred; see log:", error_log_path)
+        print(f"[error] run_errors status=present log={error_log_path}")
         try:
             with open(error_log_path, "r", encoding="utf-8") as handle:
                 for line in handle:
@@ -661,7 +675,7 @@ def run_pipeline(
         except Exception:
             error_ids = set()
     else:
-        print("No errors recorded")
+        print("[status] run_errors status=none")
 
     # Derive split eligibility paths for downstream merging
     split_paths: dict[str, str] = {}

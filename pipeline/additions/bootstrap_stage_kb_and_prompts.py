@@ -649,7 +649,7 @@ def _load_papers(label: str, folder: Path, max_pages: int | None) -> list[PaperR
 		pages = read_pdf_pages(str(pdf_path), max_pages=max_pages)
 		full_text = "\n".join(page for page in pages if page).strip()
 		if not full_text:
-			print(f"[warn] Skipping empty PDF extraction: {pdf_path}")
+			print(f"[warning] Skipping empty PDF extraction: {pdf_path}")
 			continue
 
 		lang_code = detect_language_code(full_text[:12000]) or "en"
@@ -664,7 +664,7 @@ def _load_papers(label: str, folder: Path, max_pages: int | None) -> list[PaperR
 			page_texts=pages,
 		)
 		if not chunks:
-			print(f"[warn] No chunks generated for: {pdf_path}")
+			print(f"[warning] No chunks generated for: {pdf_path}")
 			continue
 
 		papers.append(

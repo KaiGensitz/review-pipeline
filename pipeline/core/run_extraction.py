@@ -11,7 +11,13 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from config.user_orchestrator import LLM_SETTINGS, PATH_SETTINGS, require_setting
+from config.user_orchestrator import (
+    DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_ALIASES,
+    DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_LOW_PRIORITY_PATTERNS,
+    LLM_SETTINGS,
+    PATH_SETTINGS,
+    require_setting,
+)
 from pipeline.core.extraction_io import (
     STAGE,
     PaperItem,
@@ -21,7 +27,13 @@ from pipeline.core.extraction_io import (
     serialize_result,
     write_outputs,
 )
-from pipeline.core.extraction_schema import DynamicExtractionSchema, domain_groups_for_schema, parse_and_validate
+from pipeline.core.extraction_schema import (
+    DynamicExtractionSchema,
+    SchemaEvidenceHintBuilder,
+    SchemaEvidenceHintConfig,
+    domain_groups_for_schema,
+    parse_and_validate,
+)
 from pipeline.core.prompt_context import load_stage_prompt_template
 from pipeline.additions.export_extraction_tables import ExtractionAggregateWriter
 
@@ -44,7 +56,43 @@ def _truncate_to_budget(text: str, max_tokens: int) -> str:
 def _build_llm_input(paper: PaperItem, prompt_template: str, max_prompt_tokens: int) -> str:
     """human readable hint: insert paper evidence into the prompt while respecting the model context budget."""
 
-    evidence = _truncate_to_budget(format_evidence(paper), max_prompt_tokens)
+    return _build_llm_input_from_evidence(format_evidence(paper), prompt_template, max_prompt_tokens)
+
+
+def _build_llm_input_with_schema_hints(
+    paper: PaperItem,
+    prompt_template: str,
+    schema: DynamicExtractionSchema,
+    max_prompt_tokens: int,
+) -> str:
+    """human readable hint: prepend schema-guided snippets in the direct runner just like the main pipeline."""
+
+    evidence = format_evidence(paper)
+    full_text_marker = "[Full Normalized Text]\n"
+    if (
+        bool(LLM_SETTINGS.get("data_extraction_schema_evidence_hints", True))
+        and paper.normalized_text
+        and full_text_marker in evidence
+    ):
+        config = SchemaEvidenceHintConfig(
+            enabled=True,
+            snippets_per_variable=max(0, int(LLM_SETTINGS.get("data_extraction_evidence_hints_per_variable", 2) or 0)),
+            max_snippet_chars=max(120, int(LLM_SETTINGS.get("data_extraction_evidence_hint_max_chars", 420) or 420)),
+            max_total_chars=max(1000, int(LLM_SETTINGS.get("data_extraction_evidence_hints_max_total_chars", 18000) or 18000)),
+            context_lines=max(0, int(LLM_SETTINGS.get("data_extraction_evidence_hint_context_lines", 1) or 0)),
+            alias_map=DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_ALIASES,
+            low_priority_patterns=tuple(DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_LOW_PRIORITY_PATTERNS),
+        )
+        hints = SchemaEvidenceHintBuilder(schema.variables, config).build(paper.normalized_text)
+        if hints:
+            evidence = evidence.replace(full_text_marker, f"{hints}\n\n{full_text_marker}", 1)
+    return _build_llm_input_from_evidence(evidence, prompt_template, max_prompt_tokens)
+
+
+def _build_llm_input_from_evidence(evidence: str, prompt_template: str, max_prompt_tokens: int) -> str:
+    """human readable hint: finish prompt injection after evidence has been assembled."""
+
+    evidence = _truncate_to_budget(evidence, max_prompt_tokens)
     if "{data}" in prompt_template:
         return prompt_template.replace("{data}", evidence)
     return f"{prompt_template}\n\nEvidence:\n{evidence}"
@@ -102,7 +150,7 @@ async def _process_paper(
             append_error(error_log, {"paper_id": paper.paper_id, "error": error, "stage": STAGE})
             return serialize_result(paper, schema.default_payload(), run_id, raw_output="", error=error)
 
-        llm_input = _build_llm_input(paper, prompt_template, max_prompt_tokens)
+        llm_input = _build_llm_input_with_schema_hints(paper, prompt_template, schema, max_prompt_tokens)
         if bool(LLM_SETTINGS.get("data_extraction_split_by_domain", True)):
             merged_payload = schema.default_payload()
             raw_by_domain: dict[str, str] = {}
@@ -118,7 +166,7 @@ async def _process_paper(
                 group_label = "+".join(domains)
                 domain_schema = schema.for_domains(domains)
                 domain_prompt = domain_schema.inject_into_prompt(base_prompt_template)
-                domain_input = _build_llm_input(paper, domain_prompt, max_prompt_tokens)
+                domain_input = _build_llm_input_with_schema_hints(paper, domain_prompt, domain_schema, max_prompt_tokens)
                 response_format = None
                 if response_format_mode == "json_schema":
                     response_format = domain_schema.openai_response_format()

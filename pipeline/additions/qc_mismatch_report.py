@@ -193,8 +193,8 @@ def main() -> None:
     output_path = Path(args.out) if args.out else _default_output_path(alignment_path)
 
     count, out_path = build_mismatch_sheet(alignment_path, output_path, eligibility_path=eligibility_path)
-    print(f"Mismatch sheet written: {out_path}")
-    print(f"Mismatches captured: {count}")
+    print(f"[qc] mismatch_sheet status=written path={out_path}")
+    print(f"[qc] mismatches rows={count}")
 
 
 if __name__ == "__main__":

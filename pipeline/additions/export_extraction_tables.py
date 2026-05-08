@@ -16,6 +16,7 @@ from typing import Any
 from config.user_orchestrator import (
     DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS,
     DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES,
+    DATA_EXTRACTION_QUOTE_COLUMN_ALIASES,
     PATH_SETTINGS,
 )
 from pipeline.core.extraction_schema import DynamicExtractionSchema, ExtractionVariable
@@ -42,6 +43,11 @@ QUOTE_AUDIT_HEADERS = list(
         ["paper_id", "title", "domain", "variable", "consensus_column", "ai_value", "ai_quote"],
     )
 )
+QUOTE_AUDIT_DOMAIN_COLUMN = str(_admin_setting("quote_audit_domain_column", "domain"))
+QUOTE_AUDIT_VARIABLE_COLUMN = str(_admin_setting("quote_audit_variable_column", "variable"))
+QUOTE_AUDIT_CONSENSUS_COLUMN = str(_admin_setting("quote_audit_consensus_column", "consensus_column"))
+QUOTE_AUDIT_VALUE_COLUMN = str(_admin_setting("quote_audit_value_column", "ai_value"))
+QUOTE_AUDIT_QUOTE_COLUMN = str(_admin_setting("quote_audit_quote_column", "ai_quote"))
 
 
 def _normal_key(value: str) -> str:
@@ -93,6 +99,63 @@ def _read_jsonl_record(path: Path) -> dict[str, Any] | None:
     return record
 
 
+def _record_paper_id(record: dict[str, Any]) -> str:
+    """human readable hint: normalize paper IDs so retry folders replace stale main-run rows."""
+
+    return str(record.get("paper_id") or "").strip().lstrip("#")
+
+
+def _record_present_value_count(record: dict[str, Any]) -> int:
+    """human readable hint: prefer the most complete successful extraction when duplicate paper outputs exist."""
+
+    extracted = record.get("extracted_data")
+    if not isinstance(extracted, dict):
+        return 0
+    count = 0
+    for domain_payload in extracted.values():
+        if not isinstance(domain_payload, dict):
+            continue
+        for key, value in domain_payload.items():
+            if not str(key).endswith("_value"):
+                continue
+            displayed = _stringify(value).strip()
+            if displayed and displayed.casefold() != "not available":
+                count += 1
+    return count
+
+
+def _record_sort_key(record: dict[str, Any]) -> tuple[int, float]:
+    """human readable hint: sort duplicate paper records by completeness first, then newest sidecar time."""
+
+    folder = Path(str(record.get("_output_folder") or ""))
+    mtime = 0.0
+    results_path = folder / "data_extraction_results.jsonl"
+    if results_path.exists():
+        try:
+            mtime = results_path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+    return _record_present_value_count(record), mtime
+
+
+def _dedupe_extraction_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """human readable hint: keep one best record per paper ID so retries supersede stale failed outputs."""
+
+    selected: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for record in records:
+        paper_id = _record_paper_id(record)
+        if not paper_id:
+            continue
+        if paper_id not in selected:
+            selected[paper_id] = record
+            order.append(paper_id)
+            continue
+        if _record_sort_key(record) >= _record_sort_key(selected[paper_id]):
+            selected[paper_id] = record
+    return [selected[paper_id] for paper_id in order]
+
+
 def _load_extraction_records(output_dir: Path) -> list[dict[str, Any]]:
     """human readable hint: collect all canonical per-paper extraction JSONL records."""
 
@@ -103,18 +166,56 @@ def _load_extraction_records(output_dir: Path) -> list[dict[str, Any]]:
             continue
         record["_output_folder"] = str(path.parent)
         records.append(record)
-    return records
+    return _dedupe_extraction_records(records)
+
+
+def _schema_comparison_headers() -> list[str]:
+    """human readable hint: build a wide extraction table from the schema when no human layout exists."""
+
+    admin_headers = [
+        str(_admin_setting("paper_id_column", "paper_id")),
+        str(_admin_setting("study_id_column", "study_id")),
+        str(_admin_setting("title_column", "title")),
+        str(_admin_setting("reviewer_name_column", "reviewer_name")),
+        str(_admin_setting("authors_column", "authors")),
+        str(_admin_setting("publication_year_column", "publication_year")),
+    ]
+    headers: list[str] = []
+    for header in admin_headers:
+        if header and header not in headers:
+            headers.append(header)
+    try:
+        schema = DynamicExtractionSchema.from_kb()
+        for variable in schema.variables:
+            header = str(variable.covidence_column_name or "").strip()
+            if header and header not in headers:
+                headers.append(header)
+    except Exception:
+        for header in list(_admin_setting("comparison_default_headers", ["paper_id", "title"])):
+            if header and header not in headers:
+                headers.append(str(header))
+    return headers
 
 
 def _load_consensus_headers(consensus_path: Path) -> list[str]:
-    """human readable hint: reuse the human consensus CSV header order for direct AI-vs-human comparison."""
+    """human readable hint: reuse human consensus headers or fall back to schema-derived extraction columns."""
 
-    default_headers = list(_admin_setting("comparison_default_headers", ["paper_id", "title"]))
+    fallback_headers = _schema_comparison_headers()
     if not consensus_path.exists():
-        return default_headers
+        return fallback_headers
     with consensus_path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
-        return list(reader.fieldnames or default_headers)
+        headers = list(reader.fieldnames or [])
+    if not headers:
+        return fallback_headers
+
+    schema_header_keys = {_normal_key(header) for header in fallback_headers}
+    source_header_keys = {_normal_key(header) for header in headers}
+    value_overlap = len(schema_header_keys & source_header_keys)
+    # human readable hint: CSVs that only contain paper_id/title/abstract/stage are input manifests, not comparison layouts.
+    if value_overlap < 4:
+        return fallback_headers
+    return headers
 
 
 def _load_folder_metadata(paper_id: str, input_paper_dir: Path) -> dict[str, Any]:
@@ -203,6 +304,28 @@ def _resolve_consensus_column(variable: ExtractionVariable, headers: list[str]) 
     return ""
 
 
+def _resolve_quote_column(variable: ExtractionVariable, headers: list[str]) -> str:
+    """human readable hint: map optional user-configured wide-table quote columns to schema variables."""
+
+    config_key = f"{variable.domain}.{variable.variable_name}"
+    aliases = DATA_EXTRACTION_QUOTE_COLUMN_ALIASES.get(config_key, [])
+    if not isinstance(aliases, (list, tuple)):
+        return ""
+
+    exact = {header: header for header in headers}
+    normal = {_normal_key(header): header for header in headers}
+    for alias in aliases:
+        candidate = str(alias or "").strip()
+        if not candidate:
+            continue
+        if candidate in exact:
+            return exact[candidate]
+        key = _normal_key(candidate)
+        if key in normal:
+            return normal[key]
+    return ""
+
+
 def _put_if_header(row: dict[str, str], headers: list[str], desired_header: str, value: str) -> None:
     """human readable hint: fill a configured output header using case/punctuation tolerant matching."""
 
@@ -248,14 +371,20 @@ def build_consensus_comparison_rows(
         variable.value_path: _resolve_consensus_column(variable, headers)
         for variable in schema.variables
     }
+    variable_to_quote_header = {
+        variable.value_path: _resolve_quote_column(variable, headers)
+        for variable in schema.variables
+    }
     rows: list[dict[str, str]] = []
     for record in records:
         row = _paper_metadata_row(record, headers, input_paper_dir)
         for variable in schema.variables:
             header = variable_to_header[variable.value_path]
-            if not header:
-                continue
-            row[header] = _display_extracted_value(_value_from_record(record, variable), variable)
+            if header:
+                row[header] = _display_extracted_value(_value_from_record(record, variable), variable)
+            quote_header = variable_to_quote_header[variable.value_path]
+            if quote_header:
+                row[quote_header] = _quote_from_record(record, variable)
         rows.append(row)
     return rows, variable_to_header
 
@@ -280,11 +409,11 @@ def build_quote_audit_rows(
                 {
                     paper_id_column: paper_id,
                     title_column: title,
-                    "Domain": variable.domain,
-                    "Variable": variable.variable_name,
-                    "Consensus_Column": variable_to_header.get(variable.value_path, ""),
-                    "AI_Value": _display_extracted_value(_value_from_record(record, variable), variable),
-                    "AI_Quote": _quote_from_record(record, variable),
+                    QUOTE_AUDIT_DOMAIN_COLUMN: variable.domain,
+                    QUOTE_AUDIT_VARIABLE_COLUMN: variable.variable_name,
+                    QUOTE_AUDIT_CONSENSUS_COLUMN: variable_to_header.get(variable.value_path, ""),
+                    QUOTE_AUDIT_VALUE_COLUMN: _display_extracted_value(_value_from_record(record, variable), variable),
+                    QUOTE_AUDIT_QUOTE_COLUMN: _quote_from_record(record, variable),
                 }
             )
     return rows
@@ -309,6 +438,30 @@ def _append_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -
     with path.open("a", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writerows(rows)
+
+
+def _replace_csv_rows_for_paper_ids(
+    path: Path,
+    fieldnames: list[str],
+    paper_id_column: str,
+    paper_ids: set[str],
+    rows: list[dict[str, str]],
+) -> None:
+    """human readable hint: rewrite aggregate rows for retried papers instead of appending duplicates."""
+
+    if not paper_ids:
+        _append_csv(path, fieldnames, rows)
+        return
+    existing: list[dict[str, str]] = []
+    if path.exists():
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                row_id = str(row.get(paper_id_column) or "").strip().lstrip("#")
+                if row_id in paper_ids:
+                    continue
+                existing.append({header: str(row.get(header) or "") for header in fieldnames})
+    _write_csv(path, fieldnames, [*existing, *rows])
 
 
 class ExtractionAggregateWriter:
@@ -358,8 +511,23 @@ class ExtractionAggregateWriter:
             self.variable_to_header,
             self.input_paper_dir,
         )
-        _append_csv(self.comparison_path, self.headers, comparison_rows)
-        _append_csv(self.quote_path, QUOTE_AUDIT_HEADERS, quote_rows)
+        paper_id = _record_paper_id(record)
+        paper_ids = {paper_id} if paper_id else set()
+        paper_id_column = str(_admin_setting("paper_id_column", "paper_id"))
+        _replace_csv_rows_for_paper_ids(
+            self.comparison_path,
+            self.headers,
+            paper_id_column,
+            paper_ids,
+            comparison_rows,
+        )
+        _replace_csv_rows_for_paper_ids(
+            self.quote_path,
+            QUOTE_AUDIT_HEADERS,
+            paper_id_column,
+            paper_ids,
+            quote_rows,
+        )
 
 
 def export_tables(
@@ -415,9 +583,9 @@ def main() -> None:
         consensus_path=Path(args.consensus),
         input_paper_dir=Path(args.input_paper_dir),
     )
-    print("Exported data-extraction tables:")
+    print("[extraction] aggregate_tables status=exported")
     for path in paths:
-        print(f"- {path}")
+        print(f"[output] aggregate_table path={path}")
 
 
 if __name__ == "__main__":

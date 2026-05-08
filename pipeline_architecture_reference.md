@@ -69,10 +69,12 @@ Cross-reference: for an operator-facing 1-X runtime sequence (including exactly 
 
 Prompt/schema behavior:
 - For data extraction, the prompt is the conceptual research framework and should remain readable for scientists. Domain-wise runtime prompts parse `# STEPS`, copy only the active domain guidance, and insert the exact schema CSV contract before `# CONTEXT`; the conceptual response guide remains user-facing explanation and is not duplicated into domain calls.
-- The configured extraction schema CSV remains authoritative for JSON keys, Pydantic validation, missing-value defaults, and Covidence header mapping.
+- The configured extraction schema CSV remains authoritative for JSON keys, Pydantic validation, missing-value defaults, and consensus/export header mapping.
 - Prompt-to-domain matching uses schema text first and optional `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` from `config/user_orchestrator.py` when a study needs extra bridge terms.
 - Paper metadata uses generic internal keys (`paper_id`, `title`, `authors`, `publication_year`) and reads external header variants from `CSV_METADATA_COLUMN_ALIASES`.
 - Aggregate extraction output labels and the AI reviewer label are controlled by `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, not by hardcoded pipeline constants.
+- Schema-guided evidence hints use schema text plus optional `DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_ALIASES`; table-neighbor and low-priority hint behavior is configurable so review-topic vocabulary stays outside `pipeline/`.
+- Optional wide-table quote columns are filled through `DATA_EXTRACTION_QUOTE_COLUMN_ALIASES`; the long quote-audit file remains the complete per-variable quote export.
 - `data_extraction` generates `{variable_name}_value` and `{variable_name}_quote` for every row in the configured extraction schema CSV; missing values use `Not Available`, `false`, or `[]`, with quote `null`.
 - `data_extraction` is performed asynchronously with the user-editable `LLM_SETTINGS["async_max_concurrency"]` semaphore for LLM requests.
 - `data_extraction` defaults to grouped schema-domain requests (`data_extraction_split_by_domain=True`) so each response remains small enough to validate while `data_extraction_domain_groups` reduces repeated full-text calls. Each batch is capped with `data_extraction_domain_max_tokens`.
@@ -128,9 +130,9 @@ Prompt/schema behavior:
   - `knowledge-base/title_abstract_pos-neg_examples.csv`
   - `knowledge-base/full_text_pos-neg_examples.csv`
   - `knowledge-base/data_extraction_pos-neg_examples.csv`
-- Data extraction also requires the schema CSV configured by `DATA_EXTRACTION_SCHEMA_FILE` in `config/user_orchestrator.py` (default: `knowledge-base/data_extraction_schema.csv`); this schema KB defines variable names, types, allowed enum values, prompt instructions, and exact Covidence column mappings.
+- Data extraction also requires the schema CSV configured by `DATA_EXTRACTION_SCHEMA_FILE` in `config/user_orchestrator.py` (default: `knowledge-base/data_extraction_schema.csv`); this schema KB defines variable names, types, allowed enum values, prompt instructions, and exact consensus/export column mappings.
 - The current protocol tags in `STUDY_TAGS_INCLUDE`/`STUDY_TAGS_IGNORE` are marked as user-editable. They define review-specific validation labels, while the core pipeline keeps topic retrieval cues in prompts and KB examples rather than hardcoded Python regex defaults.
-- Review-topic words, prompt-domain aliases, export-header variants, and aggregate administrative column labels are user-editable config/prompt/schema inputs. Pipeline modules may keep generic publication concepts, but should not encode one review topic or one vendor's administrative headers.
+- Review-topic words, prompt-domain aliases, evidence-hint bridge terms, export-header variants, quote-column aliases, and aggregate administrative column labels are user-editable config/prompt/schema inputs. Pipeline modules may keep generic publication concepts, but should not encode one review topic or one vendor's administrative headers.
 - Optional full_text draft generation utility:
   - `python -m pipeline.additions.generate_cleaned_hybrid_kb_draft`
   - writes `knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv`
@@ -151,6 +153,7 @@ Prompt/schema behavior:
   - PABAK
   - Clopper-Pearson 95% confidence intervals
 - Data extraction validation maps each LLM `{variable_name}_value` to the KB `covidence_column_name`, calculates per-variable concordance and accuracy, and writes `extraction_error_audit.csv` with the LLM quote.
+- AI-first expert oversight packets are a separate review workflow: the AI extraction remains the primary output, and configured experts review assigned schema variables using the AI value, quote, and available manuscript context.
 
 ## Resource and Emissions Tracking
 

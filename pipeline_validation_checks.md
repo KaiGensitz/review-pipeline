@@ -46,10 +46,13 @@ This document lists implementation-level checks to verify run readiness and outp
 - Full-text retrieval now applies a final raw-chunk non-title rescue when adaptive selection still yields title-only evidence.
 - Topic keyword signals used by full-text ranking are now derived from the active prompt (`Intervention / Exposure` + `Outcome` include lists), not fixed to one review theme.
 - Prompt section names used for retrieval signals come from `PROMPT_SIGNAL_SECTION_ALIASES` in `config/user_orchestrator.py`; edit that block if a future prompt uses different include/exclude section labels.
-- Data-extraction schemas are derived from `DATA_EXTRACTION_SCHEMA_FILE` in `config/user_orchestrator.py` (default `knowledge-base/data_extraction_schema.csv`), including Covidence column mappings, not from review-topic-specific Python classes.
+- Data-extraction schemas are derived from `DATA_EXTRACTION_SCHEMA_FILE` in `config/user_orchestrator.py` (default `knowledge-base/data_extraction_schema.csv`), including consensus/export column mappings, not from review-topic-specific Python classes.
 - Data-extraction prompts should be human-readable conceptual frameworks. Do not add technical insertion markers; runtime prompts automatically insert the exact schema CSV contract before `# CONTEXT`.
 - Domain-specific prompt matching uses schema text plus optional `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` from `config/user_orchestrator.py`; review-topic words should stay there, in prompts, or in schema CSVs.
+- Schema-guided evidence hints use schema text plus optional `DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_ALIASES`, `DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_LOW_PRIORITY_PATTERNS`, and `LLM_SETTINGS["data_extraction_evidence_hint_context_lines"]`; review-specific hint terms should stay in config, not `pipeline/`.
 - Input export/admin headers should be checked in `CSV_METADATA_COLUMN_ALIASES` and `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, not in pipeline Python.
+- Wide quote columns in the consensus-style export should be checked in `DATA_EXTRACTION_QUOTE_COLUMN_ALIASES`; the full quote audit remains `data_extraction_all_papers_quote_audit.csv`.
+- AI-first expert oversight packets should read reviewer names and assigned schema variables from `DATA_EXTRACTION_EXPERT_REVIEWERS`; pipeline Python should not hardcode reviewer names or topic-specific review assignments.
 - With default grouped data extraction, verify each runtime prompt contains only the relevant conceptual guidance for the active domain batch plus that batch's exact `{variable_name}_value` / `{variable_name}_quote` keys from `DATA_EXTRACTION_SCHEMA_FILE`.
 - Verify `LLM_SETTINGS["data_extraction_domain_groups"]` contains only domain names present in the active schema CSV; missing schema domains are appended as singleton batches automatically.
 - If grouped/domain-wise extraction errors occur, inspect `data_extraction_domain_validation_failed` entries to identify the failing domain batch rather than rerunning the whole paper blindly.
@@ -166,8 +169,9 @@ Required inputs:
 - `input/*_included_csv_*.csv`
 - `knowledge-base/data_extraction_pos-neg_examples.csv` only matters for retrieval-based extraction (`data_extraction_evidence_mode="selected_chunks"`); in default `full_text` mode it is optional/fallback infrastructure
 - extraction schema/mapping KB: `DATA_EXTRACTION_SCHEMA_FILE` in `config/user_orchestrator.py`
-- Covidence gold-standard CSV: `input/data_extraction_schema.csv` (or explicit `--consensus`)
+- Human consensus/gold-standard CSV: `input/data_extraction_schema.csv` (or explicit `--consensus`)
 - external metadata/admin header mapping: `CSV_METADATA_COLUMN_ALIASES`, `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, and optional `DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES` in `config/user_orchestrator.py`
+- optional wide quote-column mapping: `DATA_EXTRACTION_QUOTE_COLUMN_ALIASES` in `config/user_orchestrator.py`
 
 Expected outputs:
 - per-paper in `output/data_extraction/<paper_folder>/`:
@@ -179,9 +183,11 @@ Expected outputs:
     - `data_extraction_all_papers_for_consensus_comparison.csv`
     - `data_extraction_all_papers_quote_audit.csv`
   - `python -m pipeline.additions.export_extraction_tables` can rebuild the two aggregate files from per-paper JSONL outputs.
+  - `python -m pipeline.additions.export_expert_review_packets export` can create expert oversight packets from a finished extraction output folder.
+  - `python -m pipeline.additions.export_expert_review_packets summarize` can summarize completed expert decisions into variable-level oversight metrics.
 
 Validation command:
-- `python -m pipeline.additions.stats_engine --consensus <Covidence_gold_standard.csv>`
+- `python -m pipeline.additions.stats_engine --consensus <human_gold_standard.csv>`
 - The validator reads the configured schema CSV, maps each LLM `{variable_name}_value` to the exact `covidence_column_name`, and compares with type-aware coercion.
 - Concordance excludes human `Not Available`/`n/a`; accuracy includes correctly identified missing values.
 - If a model returns malformed JSON for one domain, the merged payload keeps fallback missing values for that domain and logs the domain-specific validation error.

@@ -91,13 +91,13 @@ class CitationDiffAudit:
     novel_records_for_screening: int = 0
 
 
-class CovidenceCitationParser:
+class CitationCsvParser:
     """Parse a deduplicated citation CSV into generic screening input records.
 
-    The class name reflects the current upstream export workflow, but the
-    implementation is intentionally export-header agnostic. Header mappings are
-    read from user-editable metadata aliases, and every output row uses generic
-    pipeline keys such as ``paper_id``, ``title``, ``abstract``, and ``doi``.
+    The implementation is intentionally export-header agnostic. Header mappings
+    are read from user-editable metadata aliases, and every output row uses
+    generic pipeline keys such as ``paper_id``, ``title``, ``abstract``, and
+    ``doi``.
     """
 
     def __init__(self) -> None:
@@ -157,7 +157,7 @@ class CovidenceCitationParser:
 
         return {"baseline": str(baseline), "citation": str(citation)}
 
-    def ingest_covidence_csv(self, filepath: str) -> list[dict[str, Any]]:
+    def ingest_csv(self, filepath: str) -> list[dict[str, Any]]:
         """Read a citation CSV and standardize rows for screening.
 
         Args:
