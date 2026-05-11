@@ -60,9 +60,9 @@ Cross-reference: for an operator-facing 1-X runtime sequence (including exactly 
 - `title_abstract`: full `Title + Abstract` is injected directly into prompt `{data}` (no chunking/top-k filtering), eligibility JSONL outputs.
 - Citation-search CSV ingestion is isolated in `pipeline/core/citation_io.py`; it uses `CSV_METADATA_COLUMN_ALIASES` to locate IDs/DOIs/titles, diffs whole-stage citation exports against baseline database exports, and writes novel-record CSV/JSONL/log audit files without hardcoding export headers in pipeline code. When `CITATION_SEARCHING_SCREENING=True`, `main.py` runs this delta extraction first, skips QC sampling, and keeps outputs separate from normal stage glob runs with the `citation_searching` scope.
 - `full_text`: per-paper folder/PDF workflow, page-line chunking with relevance selection (`top_k`/threshold), eligibility JSONL outputs, and compact/full per-paper artifact persistence.
-- `data_extraction`: human-readable extraction prompt plus the configured extraction schema CSV, prompt-derived guidance, KB-derived dynamic schema validation, per-paper extraction JSONL/CSV outputs, evidence JSON. The default mode sends one request per configured schema-domain batch.
+- `data_extraction`: human-readable extraction prompt plus the configured extraction schema CSV, prompt-derived guidance, KB-derived dynamic schema validation, per-paper extraction JSONL/CSV outputs, evidence JSON. The default mode sends one request per configured schema-domain batch; optional hybrid rescue keeps full text primary and adds a separate schema-anchor semantic second opinion for configured variables/domains.
 - External CSV metadata headers and extraction aggregate administrative columns are resolved through user-editable aliases in `config/user_orchestrator.py`, keeping `pipeline/` Python generic across review topics and export systems.
-- Direct extraction runner: `pipeline/core/run_extraction.py` remains executable and delegates schema validation to `pipeline/core/extraction_schema.py` and file handling to `pipeline/core/extraction_io.py`.
+- Direct extraction runner: `pipeline/core/run_extraction.py` remains executable and delegates schema validation to `pipeline/core/extraction_schema.py`, file handling to `pipeline/core/extraction_io.py`, and optional semantic RAG selection to generic chunking/embedding machinery driven by schema CSV `semantic_anchors`.
 - Prompt-derived retrieval/schema signals are isolated in `pipeline/selection/prompt_signals.py`; `pipeline/core/pipeline.py` now consumes those helpers instead of carrying the parsing logic inline.
 - Retrieval tuning constants live in `pipeline/selection/retrieval_config.py`, screening response schemas live in `pipeline/core/screening_schema.py`, and prompt loading lives in `pipeline/core/prompt_context.py`.
 - Interactive workflow bookkeeping is split out of `main.py`: retry helpers in `pipeline/additions/retry_flow.py`, run indexes/summaries in `pipeline/additions/run_index.py`, and startup checks in `pipeline/additions/startup_checks.py`.
@@ -80,6 +80,7 @@ Prompt/schema behavior:
 - `data_extraction` defaults to grouped schema-domain requests (`data_extraction_split_by_domain=True`) so each response remains small enough to validate while `data_extraction_domain_groups` reduces repeated full-text calls. Each batch is capped with `data_extraction_domain_max_tokens`.
 - The extraction response-format transport is configurable. `prompt_only` avoids provider-side `json_schema` incompatibilities while still validating every response against the KB-derived Pydantic model after generation.
 - Data extraction evidence defaults to cached normalized full text (`full_text_normalized.txt`); selected chunks are retained for audit and fallback.
+- Optional hybrid rescue is controlled by `LLM_SETTINGS["data_extraction_hybrid_rescue_*"]`; it uses schema `semantic_anchors` and structural NEG examples only to retrieve rescue chunks, then writes separate audit artifacts for human review.
 - With `data_extraction_split_by_domain=True`, the saved `data_extraction_prompt_template_*.txt` snapshot stays close to the human prompt, while exact KB-injected batch prompts are checked through per-paper input traces.
 - Evidence-mode tradeoff:
   - `full_text`: best recall and quote coverage. In grouped domain-wise mode, full text is repeated for each configured schema batch, trading extra input tokens for much shorter and more reliable JSON responses. In this mode `data_extraction_pos-neg_examples.csv` has low direct impact.
@@ -144,6 +145,7 @@ Prompt/schema behavior:
   - for full_text draft use: `KB_FILE_OVERRIDES["full_text"] = FULL_TEXT_CLEANED_HYBRID_DRAFT`
 - Required KB columns: `label` (`POS`/`NEG`) and `text`.
 - Relevance selection uses embedding centroids (POS vs NEG) for `full_text` and for `data_extraction` only when extraction uses selected chunks; `title_abstract` and default full-text data extraction pass text directly.
+- When hybrid data-extraction rescue is enabled, embedding centroids are used as a targeted supplement after the primary full-text extraction; selected semantic values are not silently merged into the main aggregate table.
 
 ## Validation Engine Behavior
 

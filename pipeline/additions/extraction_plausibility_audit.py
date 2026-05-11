@@ -29,6 +29,7 @@ DEFAULT_CANDIDATE_OUTPUT_DIR = DEFAULT_OUTPUT_ROOT / "data_extraction"
 DEFAULT_BASELINE_OUTPUT_DIR = DEFAULT_OUTPUT_ROOT / "data_extraction_v11"
 CONSENSUS_FILENAME = "data_extraction_all_papers_for_consensus_comparison.csv"
 QUOTE_AUDIT_FILENAME = "data_extraction_all_papers_quote_audit.csv"
+HYBRID_RESCUE_AUDIT_FILENAME = "data_extraction_hybrid_rescue_audit.csv"
 
 
 def _admin_setting(key: str, default: Any) -> Any:
@@ -208,6 +209,39 @@ class QuoteAuditTable:
         return _clean_text(row.get(QUOTE_AUDIT_QUOTE_COLUMN))
 
 
+class HybridRescueAuditTable:
+    """human readable hint: expose optional semantic rescue changes inside plausibility reports."""
+
+    def __init__(self, output_dir: Path) -> None:
+        self.path = output_dir / HYBRID_RESCUE_AUDIT_FILENAME
+        self.rows, self.headers = _read_csv(self.path)
+        self.index = self._build_index()
+
+    def _build_index(self) -> dict[tuple[str, str], dict[str, str]]:
+        indexed: dict[tuple[str, str], dict[str, str]] = {}
+        for row in self.rows:
+            paper_id = _clean_text(row.get("paper_id")).lstrip("#")
+            variable = _clean_text(row.get("variable"))
+            if paper_id and variable:
+                indexed[(paper_id, variable)] = row
+        return indexed
+
+    def changed_rows(self) -> list[dict[str, str]]:
+        """human readable hint: list only rows where the semantic second opinion became the selected value."""
+
+        changed: list[dict[str, str]] = []
+        for row in self.rows:
+            if _clean_text(row.get("evidence_mode_used")) != "semantic_rescue":
+                continue
+            primary_value = _clean_text(row.get("primary_full_text_value"))
+            selected_value = _clean_text(row.get("selected_value"))
+            primary_quote = _clean_text(row.get("primary_full_text_quote"))
+            selected_quote = _clean_text(row.get("selected_quote"))
+            if primary_value != selected_value or primary_quote != selected_quote:
+                changed.append(row)
+        return changed
+
+
 @dataclass(frozen=True)
 class TraceEvidence:
     """human readable hint: summarize the trace evidence attached to a missing extracted field."""
@@ -364,6 +398,7 @@ class PlausibilityAuditor:
         baseline: ConsensusTable,
         schema_refs: list[SchemaVariableRef],
         candidate_quotes: QuoteAuditTable,
+        hybrid_rescue: HybridRescueAuditTable,
         trace_index: InputTraceIndex,
         version_diff_rows: list[dict[str, str]],
     ) -> None:
@@ -371,6 +406,7 @@ class PlausibilityAuditor:
         self.baseline = baseline
         self.schema_refs = schema_refs
         self.candidate_quotes = candidate_quotes
+        self.hybrid_rescue = hybrid_rescue
         self.trace_index = trace_index
         self.version_diff_rows = version_diff_rows
 
@@ -384,6 +420,7 @@ class PlausibilityAuditor:
         flags.extend(self._quote_flags())
         flags.extend(self._trace_evidence_flags())
         flags.extend(self._population_count_flags())
+        flags.extend(self._hybrid_rescue_flags())
         return sorted(flags, key=lambda row: (self._severity_rank(row["severity"]), row["paper_id"], row["domain"], row["variable"]))
 
     def _base_row(
@@ -656,6 +693,38 @@ class PlausibilityAuditor:
                     )
         return flags
 
+    def _hybrid_rescue_flags(self) -> list[dict[str, str]]:
+        """human readable hint: show reviewers when semantic rescue changed a primary full-text value."""
+
+        by_field = {ref.field_path: ref for ref in self.schema_refs}
+        flags: list[dict[str, str]] = []
+        for row in self.hybrid_rescue.changed_rows():
+            paper_id = _clean_text(row.get("paper_id")).lstrip("#")
+            variable = _clean_text(row.get("variable"))
+            ref = by_field.get(variable)
+            if not paper_id or ref is None:
+                continue
+            selected_value = _clean_text(row.get("selected_value"))
+            selected_quote = _clean_text(row.get("selected_quote"))
+            flags.append(
+                self._base_row(
+                    severity="review",
+                    check="hybrid_rescue_changed_primary_value",
+                    paper_id=paper_id,
+                    ref=ref,
+                    value=selected_value,
+                    quote=selected_quote,
+                    details=(
+                        "Hybrid rescue selected semantic evidence over the primary full-text value. "
+                        f"Reason: {_clean_text(row.get('selection_reason'))}. "
+                        f"Primary value: {_short(row.get('primary_full_text_value'))}. "
+                        f"Semantic rescue value: {_short(row.get('semantic_rescue_value'))}."
+                    ),
+                    candidate_value=selected_value,
+                )
+            )
+        return flags
+
     def _candidate_value(self, paper_id: str, ref: SchemaVariableRef) -> str:
         """human readable hint: use quote-audit values first because they cover every schema variable."""
 
@@ -800,6 +869,7 @@ class AuditReportWriter:
                 "## Suggested Human QC Use",
                 "- Start with high-severity present-to-missing and denominator flags.",
                 "- Use the trace and normalized-text paths in the flags CSV to verify whether the candidate value, baseline value, or neither is evidence-backed.",
+                "- If `hybrid_rescue_changed_primary_value` appears, compare the primary full-text quote and semantic rescue quote before accepting the selected value.",
                 "- Use the full version diff CSV for wording-only or interpretation changes that were not promoted to plausibility flags.",
                 "",
                 "## Generic Plausibility Checks Worth Keeping",
@@ -838,12 +908,14 @@ class ExtractionPlausibilityAuditRunner:
         refs = SchemaColumnResolver(schema, candidate).refs
         candidate_quotes = QuoteAuditTable(self.candidate_output_dir)
         baseline_quotes = QuoteAuditTable(self.baseline_output_dir)
+        hybrid_rescue = HybridRescueAuditTable(self.candidate_output_dir)
         diff_rows = VersionComparator(candidate, baseline, refs, candidate_quotes, baseline_quotes).rows()
         flags = PlausibilityAuditor(
             candidate=candidate,
             baseline=baseline,
             schema_refs=refs,
             candidate_quotes=candidate_quotes,
+            hybrid_rescue=hybrid_rescue,
             trace_index=InputTraceIndex(self.candidate_output_dir),
             version_diff_rows=diff_rows,
         ).flags()

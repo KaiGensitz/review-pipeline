@@ -400,7 +400,10 @@ def _run_validation() -> bool:
         _PROMPT_STATE["validation_ran"] = False
         return False
 
-    print("[qc] Running validation using auto-detected CSVs in input/. If files are missing, a warning will appear.")
+    print(
+        "[qc] Running validation using an explicit or auto-detected human gold-standard CSV. "
+        "If no gold-standard file exists, a warning will appear."
+    )
     result = subprocess.run([sys.executable, "-m", "pipeline.additions.stats_engine"], check=False)
     if result.returncode != 0:
         _PROMPT_STATE["all_yes"] = False
@@ -408,7 +411,9 @@ def _run_validation() -> bool:
         return False
 
     artifact_after_validation = _last_artifact_dict()
-    _auto_generate_qc_mismatch_csv(CURRENT_STAGE, artifact_after_validation)
+    # human readable hint: extraction validation writes its own error audit; alignment CSVs belong to screening stages.
+    if CURRENT_STAGE != "data_extraction":
+        _auto_generate_qc_mismatch_csv(CURRENT_STAGE, artifact_after_validation)
 
     _PROMPT_STATE["validation_ran"] = True
     return True

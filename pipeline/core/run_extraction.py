@@ -6,8 +6,10 @@ import asyncio
 import json
 import os
 from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from threading import Lock
 
 from openai import AsyncOpenAI
 
@@ -36,9 +38,188 @@ from pipeline.core.extraction_schema import (
 )
 from pipeline.core.prompt_context import load_stage_prompt_template
 from pipeline.additions.export_extraction_tables import ExtractionAggregateWriter
+from pipeline.core.metadata_aliases import read_metadata_value
+from pipeline.selection.chunking import chunk_fulltext_sentences
+from pipeline.selection.selector import EmbeddingBackend, LabeledExample, RelevanceSelector, load_labeled_examples
 
 
 TOKENS_PER_WORD = 1.3
+
+
+@dataclass(frozen=True)
+class ExtractionEvidenceBundle:
+    """human readable hint: one LLM evidence payload plus metadata about how it was assembled."""
+
+    text: str
+    source_text_for_hints: str = ""
+    schema_hints_enabled: bool = True
+    mode: str = "full_text"
+
+
+class SchemaSemanticAnchorFactory:
+    """human readable hint: build POS retrieval targets from the active schema CSV only."""
+
+    def __init__(self, schema: DynamicExtractionSchema) -> None:
+        self.schema = schema
+
+    def build_positive_examples(self) -> list[LabeledExample]:
+        examples: list[LabeledExample] = []
+        for variable in self.schema.variables:
+            for anchor in variable.semantic_anchors:
+                text = str(anchor or "").strip()
+                if text:
+                    examples.append({"label": "POS", "text": text})
+        if not examples:
+            raise ValueError(
+                "Semantic data-extraction RAG is enabled, but DATA_EXTRACTION_SCHEMA_FILE has no semantic_anchors."
+            )
+        return examples
+
+
+class StructuralNegativeExampleFactory:
+    """human readable hint: optionally add user-supplied structural noise examples from the stage KB."""
+
+    def __init__(self, kb_path: Path | None) -> None:
+        self.kb_path = kb_path
+
+    def build_negative_examples(self) -> list[LabeledExample]:
+        if not self.kb_path or not self.kb_path.exists():
+            return []
+        try:
+            examples = load_labeled_examples(str(self.kb_path))
+        except Exception:
+            return []
+        return [{"label": "NEG", "text": ex["text"]} for ex in examples if ex["label"] == "NEG"]
+
+
+class SemanticExtractionEvidenceAssembler:
+    """human readable hint: create embedding-ranked extraction evidence from schema-owned semantic anchors."""
+
+    def __init__(
+        self,
+        schema: DynamicExtractionSchema,
+        selector: RelevanceSelector | None,
+        top_k: int,
+        score_threshold: float | None,
+        language: str,
+    ) -> None:
+        self.schema = schema
+        self.selector = selector
+        self.top_k = max(1, int(top_k))
+        self.score_threshold = score_threshold
+        self.language = language
+        self._selector_lock = Lock()
+
+    @classmethod
+    def from_settings(cls, schema: DynamicExtractionSchema) -> "SemanticExtractionEvidenceAssembler":
+        """human readable hint: keep all semantic retrieval knobs in user-editable settings."""
+
+        enabled = bool(LLM_SETTINGS.get("data_extraction_semantic_rag_enabled", False))
+        if not enabled:
+            return cls(schema=schema, selector=None, top_k=0, score_threshold=None, language="en")
+
+        positive_examples = SchemaSemanticAnchorFactory(schema).build_positive_examples()
+        negative_examples = StructuralNegativeExampleFactory(_stage_kb_path()).build_negative_examples()
+        examples = positive_examples + negative_examples
+        selector = RelevanceSelector(
+            embedder=EmbeddingBackend(),
+            examples=examples,
+            always_include_kinds=("title",),
+        )
+        raw_threshold = LLM_SETTINGS.get("data_extraction_semantic_score_threshold")
+        score_threshold = None if raw_threshold in {None, ""} else float(raw_threshold)
+        return cls(
+            schema=schema,
+            selector=selector,
+            top_k=int(LLM_SETTINGS.get("data_extraction_semantic_top_k", 24) or 24),
+            score_threshold=score_threshold,
+            language=_chunking_language(),
+        )
+
+    @property
+    def enabled(self) -> bool:
+        return self.selector is not None
+
+    def build(self, paper: PaperItem) -> ExtractionEvidenceBundle:
+        """human readable hint: route each paper through semantic RAG or the legacy full evidence formatter."""
+
+        if not self.enabled:
+            return ExtractionEvidenceBundle(
+                text=format_evidence(paper),
+                source_text_for_hints=paper.normalized_text,
+                schema_hints_enabled=True,
+                mode="full_text",
+            )
+
+        chunks = self._build_chunks(paper)
+        if not chunks:
+            return ExtractionEvidenceBundle(text=format_evidence(paper), mode="full_text_fallback")
+
+        assert self.selector is not None
+        with self._selector_lock:
+            selected, _scores, _usage = self.selector.select(
+                chunks=chunks,
+                top_k=self.top_k,
+                score_threshold=self.score_threshold,
+            )
+        return ExtractionEvidenceBundle(
+            text=self._format_selected_chunks(paper, selected),
+            source_text_for_hints="",
+            schema_hints_enabled=False,
+            mode="semantic_rag",
+        )
+
+    def _build_chunks(self, paper: PaperItem) -> list[dict]:
+        # human readable hint: title is metadata, while normalized and supplemental evidence are semantically ranked.
+        chunks: list[dict] = []
+        title = read_metadata_value(paper.metadata, "title")
+        if title:
+            chunks.append(
+                {
+                    "paper_id": paper.paper_id,
+                    "chunk_id": f"{paper.paper_id}::title::0000",
+                    "text": f"Title: {title}",
+                    "kind": "title",
+                }
+            )
+        if paper.normalized_text:
+            chunks.extend(
+                chunk_fulltext_sentences(
+                    paper_id=paper.paper_id,
+                    title=title,
+                    full_text=paper.normalized_text,
+                    language=self.language,
+                )
+            )
+        if paper.supplemental_cited_evidence:
+            supplemental_chunks = chunk_fulltext_sentences(
+                paper_id=f"{paper.paper_id}::supplemental",
+                title=title,
+                full_text=paper.supplemental_cited_evidence,
+                language=self.language,
+            )
+            for chunk in supplemental_chunks:
+                item = dict(chunk)
+                item["kind"] = "supplemental_cited_evidence"
+                chunks.append(item)
+        return chunks
+
+    @staticmethod
+    def _format_selected_chunks(paper: PaperItem, selected: list[dict]) -> str:
+        parts = [f"Paper ID: {paper.paper_id}"]
+        title = read_metadata_value(paper.metadata, "title")
+        if title:
+            parts.append(f"Title: {title}")
+        parts.append(
+            "[Semantic Retrieval Evidence]\n"
+            "The extraction model may quote only from the chunks below and any title metadata shown above."
+        )
+        for idx, chunk in enumerate(selected, start=1):
+            score = float(chunk.get("score", 0.0) or 0.0)
+            kind = str(chunk.get("kind") or "chunk")
+            location = _chunk_location(chunk)
+            parts.append(f"[Chunk {idx} | kind={kind} | score={score:.4f}{location}]\n{chunk.get('text', '')}")
+        return "\n\n".join(parts)
 
 
 def _truncate_to_budget(text: str, max_tokens: int) -> str:
@@ -53,6 +234,45 @@ def _truncate_to_budget(text: str, max_tokens: int) -> str:
     return " ".join(words[:max_words])
 
 
+def _stage_kb_path() -> Path | None:
+    """human readable hint: resolve the active stage KB without hardcoding a protocol file name."""
+
+    configured_path = PATH_SETTINGS.get("knowledge_base_file")
+    return Path(configured_path) if configured_path else None
+
+
+def _chunking_language() -> str:
+    """human readable hint: use the configured data language when it is concrete; fall back to English for schema anchors."""
+
+    from config.user_orchestrator import EMBEDDING_SETTINGS
+
+    value = str(EMBEDDING_SETTINGS.get("data_language", "en") or "en").strip().lower()
+    if value in {"auto", "auto_first"}:
+        return "en"
+    return value or "en"
+
+
+def _chunk_location(chunk: dict) -> str:
+    """human readable hint: render generic chunk provenance when page or line metadata survived parsing."""
+
+    page_start = chunk.get("page_start")
+    page_end = chunk.get("page_end")
+    line_start = chunk.get("line_start")
+    line_end = chunk.get("line_end")
+    parts: list[str] = []
+    if page_start:
+        page_text = f"page={page_start}"
+        if page_end and page_end != page_start:
+            page_text += f"-{page_end}"
+        parts.append(page_text)
+    if line_start:
+        line_text = f"line={line_start}"
+        if line_end and line_end != line_start:
+            line_text += f"-{line_end}"
+        parts.append(line_text)
+    return " | " + " | ".join(parts) if parts else ""
+
+
 def _build_llm_input(paper: PaperItem, prompt_template: str, max_prompt_tokens: int) -> str:
     """human readable hint: insert paper evidence into the prompt while respecting the model context budget."""
 
@@ -60,18 +280,20 @@ def _build_llm_input(paper: PaperItem, prompt_template: str, max_prompt_tokens: 
 
 
 def _build_llm_input_with_schema_hints(
-    paper: PaperItem,
+    evidence_bundle: ExtractionEvidenceBundle,
     prompt_template: str,
     schema: DynamicExtractionSchema,
     max_prompt_tokens: int,
 ) -> str:
     """human readable hint: prepend schema-guided snippets in the direct runner just like the main pipeline."""
 
-    evidence = format_evidence(paper)
+    evidence = evidence_bundle.text
     full_text_marker = "[Full Normalized Text]\n"
     if (
+        evidence_bundle.schema_hints_enabled
+        and
         bool(LLM_SETTINGS.get("data_extraction_schema_evidence_hints", True))
-        and paper.normalized_text
+        and evidence_bundle.source_text_for_hints
         and full_text_marker in evidence
     ):
         config = SchemaEvidenceHintConfig(
@@ -83,7 +305,7 @@ def _build_llm_input_with_schema_hints(
             alias_map=DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_ALIASES,
             low_priority_patterns=tuple(DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_LOW_PRIORITY_PATTERNS),
         )
-        hints = SchemaEvidenceHintBuilder(schema.variables, config).build(paper.normalized_text)
+        hints = SchemaEvidenceHintBuilder(schema.variables, config).build(evidence_bundle.source_text_for_hints)
         if hints:
             evidence = evidence.replace(full_text_marker, f"{hints}\n\n{full_text_marker}", 1)
     return _build_llm_input_from_evidence(evidence, prompt_template, max_prompt_tokens)
@@ -141,16 +363,19 @@ async def _process_paper(
     temperature: float,
     top_p: float,
     error_log: Path,
+    evidence_assembler: SemanticExtractionEvidenceAssembler,
 ) -> dict[str, Any]:
     """human readable hint: process one paper with bounded concurrency and dynamic schema validation."""
 
     async with semaphore:
-        if not paper.normalized_text and not paper.selected_chunks:
+        if not paper.normalized_text and not paper.selected_chunks and not paper.supplemental_cited_evidence:
             error = "no_text_available"
             append_error(error_log, {"paper_id": paper.paper_id, "error": error, "stage": STAGE})
             return serialize_result(paper, schema.default_payload(), run_id, raw_output="", error=error)
 
-        llm_input = _build_llm_input_with_schema_hints(paper, prompt_template, schema, max_prompt_tokens)
+        # human readable hint: semantic retrieval runs before prompt injection so the LLM never receives hidden full text.
+        evidence_bundle = evidence_assembler.build(paper)
+        llm_input = _build_llm_input_with_schema_hints(evidence_bundle, prompt_template, schema, max_prompt_tokens)
         if bool(LLM_SETTINGS.get("data_extraction_split_by_domain", True)):
             merged_payload = schema.default_payload()
             raw_by_domain: dict[str, str] = {}
@@ -166,7 +391,12 @@ async def _process_paper(
                 group_label = "+".join(domains)
                 domain_schema = schema.for_domains(domains)
                 domain_prompt = domain_schema.inject_into_prompt(base_prompt_template)
-                domain_input = _build_llm_input_with_schema_hints(paper, domain_prompt, domain_schema, max_prompt_tokens)
+                domain_input = _build_llm_input_with_schema_hints(
+                    evidence_bundle,
+                    domain_prompt,
+                    domain_schema,
+                    max_prompt_tokens,
+                )
                 response_format = None
                 if response_format_mode == "json_schema":
                     response_format = domain_schema.openai_response_format()
@@ -203,7 +433,11 @@ async def _process_paper(
 
             extracted_data = schema.validate_payload(merged_payload)
             merged_raw = json.dumps(
-                {"domain_errors": errors_by_domain, "raw_domain_outputs": raw_by_domain},
+                {
+                    "evidence_mode": evidence_bundle.mode,
+                    "domain_errors": errors_by_domain,
+                    "raw_domain_outputs": raw_by_domain,
+                },
                 ensure_ascii=False,
             )
             error = "; ".join(f"{domain}: {message}" for domain, message in errors_by_domain.items()) or None
@@ -231,6 +465,7 @@ async def run_extraction() -> None:
     schema = DynamicExtractionSchema.from_kb()
     base_prompt_template = load_stage_prompt_template(STAGE)
     prompt_template = schema.inject_into_prompt(base_prompt_template)
+    evidence_assembler = SemanticExtractionEvidenceAssembler.from_settings(schema)
 
     csv_dir = Path(PATH_SETTINGS.get("csv_dir") or Path.cwd() / "input")
     output_root = Path(PATH_SETTINGS.get("output_root", Path.cwd() / "output")) / STAGE
@@ -275,6 +510,7 @@ async def run_extraction() -> None:
             temperature=temperature,
             top_p=top_p,
             error_log=error_log,
+            evidence_assembler=evidence_assembler,
         )
         for paper in papers
     ]

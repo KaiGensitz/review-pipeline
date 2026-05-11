@@ -57,6 +57,10 @@ class ExtractionVariable:
     allowed_options: tuple[str, ...]
     instruction: str
     covidence_column_name: str
+    semantic_anchors: tuple[str, ...] = ()
+    human_reviewer_instruction: str = ""
+    evidence_profile: str = ""
+    do_not_infer_from: str = ""
 
     @property
     def value_key(self) -> str:
@@ -212,10 +216,16 @@ class SchemaEvidenceHintBuilder:
             terms = self.terms_for_variable(variable)
             if not terms:
                 continue
+            # human readable hint: let the schema request deeper evidence for table/detail-sensitive fields without hardcoded variables.
+            variable_max_snippets = self.config.snippets_per_variable
+            if "table_sensitive" in variable.evidence_profile.casefold():
+                variable_max_snippets += 2
+            elif "complete_summary" in variable.evidence_profile.casefold() or "detail_sensitive" in variable.evidence_profile.casefold():
+                variable_max_snippets += 1
             snippets = self.find_snippets(
                 normalized_text=text,
                 terms=terms,
-                max_snippets=self.config.snippets_per_variable,
+                max_snippets=variable_max_snippets,
                 max_chars=self.config.max_snippet_chars,
             )
             if not snippets:
@@ -271,6 +281,8 @@ class SchemaEvidenceHintBuilder:
                 variable.variable_name.replace("_", " "),
                 variable.covidence_column_name,
                 variable.instruction,
+                variable.human_reviewer_instruction,
+                variable.evidence_profile,
             ]
         )
         for token in re.findall(r"[A-Za-z][A-Za-z0-9+\-]{2,}", raw_text.casefold()):
@@ -279,7 +291,7 @@ class SchemaEvidenceHintBuilder:
                 continue
             if normalized not in terms:
                 terms.append(normalized)
-        return terms[:14]
+        return terms[:24]
 
     def find_snippets(
         self,
@@ -802,6 +814,10 @@ def load_extraction_variables(kb_path: Path) -> list[ExtractionVariable]:
             instruction = str(row.get("instruction") or "").strip()
             covidence_column_name = str(row.get("covidence_column_name") or "").strip()
             allowed_options = tuple(_split_allowed_options(row.get("allowed_options", "")))
+            semantic_anchors = tuple(_split_semantic_anchors(row.get("semantic_anchors", "")))
+            human_reviewer_instruction = str(row.get("human_reviewer_instruction") or "").strip()
+            evidence_profile = str(row.get("evidence_profile") or "").strip()
+            do_not_infer_from = str(row.get("do_not_infer_from") or "").strip()
 
             key = (domain, variable_name)
             if key in seen:
@@ -825,6 +841,10 @@ def load_extraction_variables(kb_path: Path) -> list[ExtractionVariable]:
                     allowed_options=allowed_options,
                     instruction=instruction,
                     covidence_column_name=covidence_column_name,
+                    semantic_anchors=semantic_anchors,
+                    human_reviewer_instruction=human_reviewer_instruction,
+                    evidence_profile=evidence_profile,
+                    do_not_infer_from=do_not_infer_from,
                 )
             )
     return variables
@@ -918,9 +938,17 @@ def format_instruction_block(variables: tuple[ExtractionVariable, ...], response
         if variable.variable_type == "enum":
             allowed_values = _enum_options_with_missing(variable)
             allowed = f" Allowed values: {', '.join(allowed_values)}."
+        extras: list[str] = []
+        if variable.human_reviewer_instruction:
+            extras.append(f"Human reviewer guidance: {variable.human_reviewer_instruction}")
+        if variable.evidence_profile:
+            extras.append(f"Evidence profile: {variable.evidence_profile}")
+        if variable.do_not_infer_from:
+            extras.append(f"Do not infer from: {variable.do_not_infer_from}")
+        extra_text = " " + " ".join(extras) if extras else ""
         lines.append(
             f"- [{variable.domain}] {variable.variable_name}: {variable.instruction}"
-            f" Consensus/export column: {variable.covidence_column_name}.{allowed}"
+            f" Consensus/export column: {variable.covidence_column_name}.{allowed}{extra_text}"
         )
 
     lines.extend(
@@ -1184,6 +1212,26 @@ def _split_allowed_options(value: str | None) -> list[str]:
     if not value:
         return []
     parts = re.split(r"\s*(?:\||;|,)\s*", str(value))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        cleaned = part.strip()
+        if not cleaned or cleaned.casefold() in seen:
+            continue
+        seen.add(cleaned.casefold())
+        deduped.append(cleaned)
+    return deduped
+
+
+def _split_semantic_anchors(value: str | None) -> list[str]:
+    """human readable hint: parse optional schema-owned semantic retrieval targets."""
+
+    if not value:
+        return []
+    normalized = str(value).replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        return []
+    parts = re.split(r"\n+|\s*\|\|\s*", normalized)
     deduped: list[str] = []
     seen: set[str] = set()
     for part in parts:

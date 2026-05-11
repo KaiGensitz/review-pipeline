@@ -73,6 +73,13 @@ from pipeline.core.metadata_aliases import (
     read_metadata_value,
 )
 from pipeline.core.extraction_io import SupplementalCitedEvidenceLoader
+from pipeline.core.extraction_hybrid_rescue import (
+    HybridRescueConfig,
+    HybridRescuePlanner,
+    HybridRescueRunWriter,
+    HybridRescueSelector,
+    HybridSemanticEvidenceBuilder,
+)
 from config.user_orchestrator import (
     CURRENT_STAGE,
     CITATION_SEARCHING_STAGE_RULES,
@@ -424,11 +431,29 @@ class PaperScreeningPipeline:
         self._stage_csv_cache: dict[bool, list[Path]] = {}
         self._extraction_schema: DynamicExtractionSchema | None = None
         self._extraction_aggregate_writer: ExtractionAggregateWriter | None = None
+        self._hybrid_rescue_config: HybridRescueConfig | None = None
+        self._hybrid_rescue_planner: HybridRescuePlanner | None = None
+        self._hybrid_rescue_evidence_builder: HybridSemanticEvidenceBuilder | None = None
+        self._hybrid_rescue_selector: HybridRescueSelector | None = None
+        self._hybrid_rescue_writer: HybridRescueRunWriter | None = None
         self._base_prompt_template = load_stage_prompt_template(self.stage)
         self.prompt_template = self._base_prompt_template
         if self.stage == "data_extraction":
             # human readable hint: data extraction fields, JSON schema, and prompt instructions come from the CSV KB.
             self._extraction_schema = DynamicExtractionSchema.from_kb()
+            # human readable hint: hybrid rescue is optional; when enabled, it is configured outside pipeline code.
+            self._hybrid_rescue_config = HybridRescueConfig.from_settings(self.language_setting)
+            if self._hybrid_rescue_config.enabled:
+                self._hybrid_rescue_planner = HybridRescuePlanner(
+                    self._extraction_schema,
+                    self._hybrid_rescue_config,
+                )
+                self._hybrid_rescue_evidence_builder = HybridSemanticEvidenceBuilder(
+                    self._extraction_schema,
+                    self._hybrid_rescue_config,
+                )
+                self._hybrid_rescue_selector = HybridRescueSelector(self._hybrid_rescue_planner)
+                self._hybrid_rescue_writer = HybridRescueRunWriter(self.stage_output_dir)
             # human readable hint: when extraction runs domain-by-domain, the
             # saved prompt-template snapshot should stay close to the
             # scientist-edited prompt. Exact domain-specific runtime prompts
@@ -2696,6 +2721,12 @@ class PaperScreeningPipeline:
 
         if self.stage == "data_extraction":
             extraction_payload = await asyncio.to_thread(self._build_extraction_payload, paper, llm_decision)
+            if extraction_payload is not None:
+                await self._maybe_run_data_extraction_hybrid_rescue_async(
+                    paper=paper,
+                    extraction_payload=extraction_payload,
+                    primary_context=llm_input,
+                )
             await asyncio.to_thread(self._write_data_extraction_metadata, paper, selected, llm_decision, extraction_payload)
 
         token_stats = {
@@ -5517,6 +5548,128 @@ class PaperScreeningPipeline:
         target["response_tokens"] = target.get("response_tokens", 0) + response_value
         target["total_tokens"] = target.get("total_tokens", 0) + total_value
 
+    async def _maybe_run_data_extraction_hybrid_rescue_async(
+        self,
+        *,
+        paper: PaperRecord,
+        extraction_payload: dict[str, Any],
+        primary_context: str,
+    ) -> None:
+        """human readable hint: run optional semantic rescue after primary full-text extraction."""
+
+        if (
+            self._extraction_schema is None
+            or self._hybrid_rescue_config is None
+            or not self._hybrid_rescue_config.enabled
+            or self._hybrid_rescue_planner is None
+            or self._hybrid_rescue_evidence_builder is None
+            or self._hybrid_rescue_selector is None
+        ):
+            return
+
+        primary_payload = extraction_payload.get("extracted_data")
+        if not isinstance(primary_payload, dict):
+            return
+
+        target_variables = self._hybrid_rescue_planner.target_variables(primary_payload)
+        if not target_variables:
+            return
+
+        decisions = []
+        variables_by_domain: dict[str, list] = {}
+        for variable in target_variables:
+            variables_by_domain.setdefault(variable.domain, []).append(variable)
+
+        response_format_mode = str(
+            LLM_SETTINGS.get("data_extraction_response_format_mode", "prompt_only") or "prompt_only"
+        ).strip().lower()
+        domain_max_tokens = max(256, int(LLM_SETTINGS.get("data_extraction_domain_max_tokens", 3000) or 3000))
+
+        # human readable hint: rescue calls stay domain-scoped so each second opinion is small and auditable.
+        for domain, variables in variables_by_domain.items():
+            try:
+                rescue_context = await asyncio.to_thread(
+                    self._hybrid_rescue_evidence_builder.build_context,
+                    paper_id=paper.paper_id,
+                    title=paper.title,
+                    primary_context=primary_context,
+                    variables=tuple(variables),
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                self._log_error(
+                    paper.paper_id,
+                    f"data extraction hybrid rescue evidence build failed for domain={domain}: {exc}",
+                    error_type="data_extraction_hybrid_rescue_evidence_failed",
+                )
+                continue
+
+            if not rescue_context:
+                continue
+
+            domain_schema = self._extraction_schema.for_domains((domain,))
+            domain_prompt = domain_schema.inject_into_prompt(self._base_prompt_template)
+            response_format_override: dict | None = None
+            use_schema_response_format = response_format_mode == "json_schema"
+            if response_format_mode == "json_object":
+                response_format_override = {"type": "json_object"}
+
+            raw_text, _usage = await self._call_llm_async(
+                rescue_context,
+                prompt_template=domain_prompt,
+                extraction_schema=domain_schema,
+                response_format_override=response_format_override,
+                use_extraction_response_format=use_schema_response_format,
+                max_tokens=domain_max_tokens,
+                system_prompt="",
+            )
+            if not raw_text or (isinstance(raw_text, str) and raw_text.startswith("LLM error")):
+                self._log_error(
+                    paper.paper_id,
+                    f"data extraction hybrid rescue LLM failed for domain={domain}: {raw_text or 'empty_response'}",
+                    error_type="data_extraction_hybrid_rescue_llm_failed",
+                )
+                continue
+
+            rescue_payload, validation_error = parse_and_validate(raw_text, domain_schema)
+            if validation_error:
+                self._log_error(
+                    paper.paper_id,
+                    f"data extraction hybrid rescue validation failed for domain={domain}: {validation_error}",
+                    error_type="data_extraction_hybrid_rescue_validation_failed",
+                )
+                continue
+
+            for variable in variables:
+                decisions.append(
+                    self._hybrid_rescue_selector.decide(
+                        paper_id=paper.paper_id,
+                        variable=variable,
+                        primary_payload=primary_payload,
+                        rescue_payload=rescue_payload,
+                    )
+                )
+
+        if not decisions:
+            return
+
+        extraction_payload["hybrid_rescue"] = [
+            {
+                "paper_id": decision.paper_id,
+                "variable": decision.variable,
+                "primary_full_text_value": decision.primary_full_text_value,
+                "primary_full_text_quote": decision.primary_full_text_quote,
+                "semantic_rescue_value": decision.semantic_rescue_value,
+                "semantic_rescue_quote": decision.semantic_rescue_quote,
+                "selected_value": decision.selected_value,
+                "selected_quote": decision.selected_quote,
+                "evidence_mode_used": decision.evidence_mode_used,
+                "selection_reason": decision.selection_reason,
+            }
+            for decision in decisions
+        ]
+        if self._hybrid_rescue_writer is not None:
+            await asyncio.to_thread(self._hybrid_rescue_writer.add_decisions, decisions)
+
     async def _call_data_extraction_domains_async(
         self,
         context: str,
@@ -6651,6 +6804,20 @@ class PaperScreeningPipeline:
 
     def _start_data_extraction_aggregate_writer(self) -> None:
         """human readable hint: create live aggregate extraction CSVs before the first paper is screened."""
+
+        if self._hybrid_rescue_writer is not None:
+            # human readable hint: hybrid audit files mirror the live aggregate tables and reset for QC-only runs.
+            try:
+                if bool(self.qc_only):
+                    self._hybrid_rescue_writer.reset()
+                else:
+                    self._hybrid_rescue_writer.write()
+            except Exception as exc:  # pylint: disable=broad-except
+                self._log_error(
+                    "run",
+                    f"data extraction hybrid rescue audit initialization failed: {exc}",
+                    error_type="data_extraction_hybrid_rescue_audit_init_failed",
+                )
 
         try:
             self._extraction_aggregate_writer = ExtractionAggregateWriter(

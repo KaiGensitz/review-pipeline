@@ -150,16 +150,17 @@ Use this section when you need to know exactly when parsing, embeddings, LLM cal
 ## Stage 3: Data Extraction
 
 1. Export included CSV to `input/` (`*_included_csv_*.csv`).
-2. Confirm the evidence mode in `LLM_SETTINGS["data_extraction_evidence_mode"]`.
+2. Confirm the evidence mode in `LLM_SETTINGS["data_extraction_evidence_mode"]` for `main.py`, and confirm `data_extraction_semantic_rag_enabled` / `data_extraction_semantic_top_k` when running `python -m pipeline.core.run_extraction`.
 	- `full_text` (default): pass cached normalized full text to each domain-wise extraction call. Pros: best recall and quote coverage. Cons: high token use. `data_extraction_pos-neg_examples.csv` is mostly optional/fallback infrastructure.
 	- `selected_chunks`: pass retrieval-selected evidence chunks only. Pros: much cheaper and faster. Cons: can miss fields if retrieval misses evidence. `data_extraction_pos-neg_examples.csv` becomes important and should contain curated POS/NEG extraction snippets.
+	- Optional hybrid rescue: set `data_extraction_hybrid_rescue_enabled=True` only after QC justification. Full text remains primary; semantic retrieval produces auditable second-opinion rows for configured variables/domains.
 3. Prepare the schema CSV referenced by `DATA_EXTRACTION_SCHEMA_FILE`; each row maps a dynamic LLM variable to an exact consensus/export header in `covidence_column_name`.
 4. Confirm `CSV_METADATA_COLUMN_ALIASES` can read the included CSV's paper ID/title/year columns and `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS` matches the aggregate comparison/audit headers you want.
 5. Edit `config/prompt_script_data_extraction.txt` as the human-readable conceptual framework. Do not add technical schema placeholders; the pipeline inserts the active CSV contract automatically before `# CONTEXT`.
 6. If a prompt section does not map cleanly to a schema domain, add bridge terms in `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES`.
 7. Ensure `input/per_paper_full_text/` exists from prior stage.
 8. Run `main.py` to build `input/per_paper_data_extraction/`.
-9. Run QC-only extraction, then human QC extraction, then validation. Extraction fields are read from the schema KB, not from hardcoded prompt JSON.
+9. Run QC-only extraction, then human QC extraction, then validation. Extraction fields are read from the schema KB, not from hardcoded prompt JSON. If hybrid rescue is enabled, inspect `data_extraction_hybrid_rescue_audit.csv` before accepting any semantic rescue-selected value.
 10. For AI-first expert oversight, generate review packets from the finished extraction output folder:
 	- `python -m pipeline.additions.export_expert_review_packets export`
 	- Experts fill `expert_decision`, corrected fields, error type/effect, and notes in their assigned packet.
@@ -175,7 +176,7 @@ Use this section when you need to know exactly when parsing, embeddings, LLM cal
 - Citation-search title/abstract run: set `CURRENT_STAGE="title_abstract"` and `CITATION_SEARCHING_SCREENING=True`, then run `.venv\Scripts\python main.py`
 - Citation-search full-text run: set `CURRENT_STAGE="full_text"` and `CITATION_SEARCHING_SCREENING=True`, then run `.venv\Scripts\python main.py`
 - Manual validation (optional): `python -m pipeline.additions.stats_engine`
-- Manual direct data extraction (optional): `python -m pipeline.core.run_extraction`
+- Manual direct data extraction (optional): `python -m pipeline.core.run_extraction`; when semantic RAG is enabled, this command ranks chunks against schema-owned `semantic_anchors` before sending evidence to the LLM.
 - Manual reproducibility trace (optional): `python -m pipeline.additions.input_trace --paper-id <ID> --stage <stage>`
 - Manual backup (optional): `python backup_to_github.py`
 
@@ -246,6 +247,7 @@ Screening stages:
 Data extraction:
 - extraction accuracy report
 - extraction discrepancies CSV
+- human gold-standard builder outputs, when binary reviewer sheets are used: wide consensus CSV, long cell-level audit, automatic column mapping, and README
 
 ## Resource and Audit Outputs
 

@@ -18,7 +18,7 @@ LLM_MODEL = "gpt-oss-120b"  # screening model name on your endpoint; working for
 EMBED_MODEL = "qwen3-embedding-0.6b"  # embedding model name on your endpoint; working for sure: "qwen3-embedding-0.6b" (17.04.2026)
 CSV_DIR = REPO_ROOT / "input"  # where you drop Covidence exports
 QC_ENABLED = True  # False = skip QC sampling and go straight to full screening
-QC_SAMPLE_RATE = 0.1  # 0.0–1.0; 0.10 ~10% QC sample
+QC_SAMPLE_RATE = 0.05  # 0.0–1.0; 0.10 ~10% QC sample
 CITATION_SEARCHING_SCREENING = False  # True = use citation-search CSV patterns and skip QC sampling
 
 # USER-EDITABLE STUDY TAGS.
@@ -101,6 +101,37 @@ CITATION_SEARCHING_STAGE_RULES = {
 # QC is usually required: the run creates a QC sample, asks before QC-only screening,
 # and only proceeds to full screening after you confirm validation results.
 # Set QC_ENABLED=False to skip QC sampling entirely.
+
+# Human reviewer timing (per stage)
+# - reviewers: optional self-reported time on the quality control set. Enter total_minutes per person (rough guess is fine).
+# - tip: hours × 60 = minutes (e.g., 2 hours ≈ 120 minutes). If you do not track time, leave 0 so the tool will skip time-savings and note that no human minutes were provided.
+# - you can add or delete reviewer rows per stage: each entry refers to one person. The pipeline only reads reviewers for the active CURRENT_STAGE, ignores zero-minute entries, and averages the remaining minutes-per-paper to estimate human time and time-savings via the pipeline.
+HUMAN_TIME_CONFIG = {
+	"title_abstract": {
+		"reviewers": [
+			{"id": "human_1", "total_minutes": 50}, # Marc for 223 articles (Email 12.02.2026): 1h 50 min = 110 min
+			{"id": "human_2", "total_minutes": 110}, # Shawan for 223 articles (Slack 19.02.2026): 4h = 240 min
+			{"id": "human_3", "total_minutes": 0},
+			{"id": "human_4", "total_minutes": 0},
+		],
+	},
+	"full_text": {
+		"reviewers": [
+			{"id": "human_1", "total_minutes": 270}, # Reviewer 1 for 50 articles (Email 09.04.2026): 4.5 h = 270 min
+			{"id": "human_2", "total_minutes": 300}, # Reviewer 2 for 50 articles (Slack): 5 h = 300 min
+			{"id": "human_3", "total_minutes": 0},
+			{"id": "human_4", "total_minutes": 0},
+		],
+	},
+	"data_extraction": {
+		"reviewers": [
+			{"id": "human_1", "total_minutes": 75}, # Reviewer 1 for 2 articles (Email 08.05.2026): ca. 75 Min
+			{"id": "human_2", "total_minutes": 155}, # Reviewer 2 for 2 articles (Email 08.05.2026): ca. 40 min per paper for reading, 15 min per paper for controlling, and ca 45 min extra for in-depth review of 1 article = 155 min
+			{"id": "human_3", "total_minutes": 0},
+			{"id": "human_4", "total_minutes": 0},
+		],
+	},
+}
 
 # ---------------------------------------------------------------------------
 # Further settings which can (usually) stay as they are
@@ -185,6 +216,39 @@ DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES = {
 	"outcomes.reported": ["outcomes_reported"],
 }
 
+# USER-EDITABLE DATA-EXTRACTION VALIDATION VALUE ALIASES.
+# human readable hint: groups of semantically equivalent validation values; stats_engine uses these only after human ground truth has been built.
+DATA_EXTRACTION_VALIDATION_VALUE_ALIASES = {
+	"context.evidence_source": [
+		["peer-reviewed", "peer reviewed", "peer-reviewed journal article", "journal article", "original article", "original investigation"],
+		["conference paper", "conference proceeding", "proceedings paper"],
+		["pre-print", "preprint"],
+	],
+	"synthesis.key_findings": [
+		["keine ergebnisse vorhanden", "keine finalen ergebnisse", "not yet available", "no final outcome findings", "protocol"],
+	],
+	"concepts.inclusivity_considerations": [
+		["nicht gesondert ausgewertet", "not separately evaluated", "not separately analysed", "not separately analyzed"],
+	],
+}
+
+# USER-EDITABLE DATA-EXTRACTION VALIDATION MATCH SETTINGS.
+# human readable hint: reviewer gold-standard prose and AI prose may be factually congruent without identical wording.
+DATA_EXTRACTION_VALIDATION_MATCH_SETTINGS = {
+	"quote_aware_match_in_metrics": True,
+	"quote_aware_compare_ai_quote": True,
+	"quote_aware_compare_reviewer_note": True,
+	"count_fuzzy_matches_in_metrics": False,
+	"quote_aware_free_text_token_overlap_threshold": 0.42,
+	"quote_aware_list_token_overlap_threshold": 0.35,
+	"quote_aware_short_text_token_overlap_threshold": 0.50,
+	"free_text_token_overlap_threshold": 0.80,
+	"list_token_overlap_threshold": 0.80,
+	"short_text_token_overlap_threshold": 0.80,
+	"minimum_token_count_for_fuzzy": 2,
+	"numeric_relative_tolerance": 0.02,
+}
+
 # USER-EDITABLE DATA-EXTRACTION QUOTE EXPORT ALIASES.
 # human readable hint: optional wide-table quote columns are human layout choices.
 # The long quote-audit table always contains every schema variable quote; these aliases fill selected quote columns in consensus-style exports.
@@ -199,8 +263,8 @@ DATA_EXTRACTION_QUOTE_COLUMN_ALIASES = {
 # human readable hint: these terms help the generic snippet selector find review-relevant evidence in long normalized PDFs.
 # Keep review-topic vocabulary here, in prompts, or in the schema CSV rather than in pipeline/ Python files.
 DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_ALIASES = {
-	"population.mean_age": ["age", "aged", "ages", "years", "year-old", "eligibility", "inclusion", "criteria"],
-	"population.gender_overall": ["gender", "sex", "female", "male", "women", "men"],
+	"population.mean_age": ["age", "aged", "ages", "years", "year-old", "age group", "age groups", "18-25", "26-35", "36-45", "eligibility", "inclusion", "criteria", "baseline characteristics", "participant characteristics"],
+	"population.gender_overall": ["gender", "sex", "female", "male", "women", "men", "baseline characteristics", "participant characteristics", "demographic", "demographics"],
 	"population.sample_size": [
 		"sample size",
 		"target sample",
@@ -220,7 +284,7 @@ DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_ALIASES = {
 		"recruited",
 		"recruitment",
 	],
-	"population.ethnicity_overall": ["ethnicity", "ethnic", "race", "racial"],
+	"population.ethnicity_overall": ["ethnicity", "ethnic", "race", "racial", "hispanic", "latino", "not hispanic", "declined", "unknown", "baseline characteristics", "participant characteristics", "demographic", "demographics"],
 	"population.country_overall": ["country", "countries", "site", "clinic", "recruitment", "residing"],
 	"context.setting": ["country", "countries", "setting", "site", "clinic", "recruitment", "residing", "location"],
 	"context.evidence_source": [
@@ -242,7 +306,7 @@ DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_ALIASES = {
 	"study_details.funding_sources": ["funding", "funded", "grant", "support", "sponsor"],
 	"study_details.conflicts_of_interest": ["conflict", "interest", "competing", "disclosure"],
 	"concepts.AI_model": ["model", "algorithm", "agent", "system", "decision", "recommendation"],
-	"concepts.AI_transparency": ["transparent", "transparency", "explain", "explainable", "black-box"],
+	"concepts.AI_transparency": ["transparent", "transparency", "explain", "explainable", "black-box", "feedback", "expected", "performance", "health belief", "rationale", "decision rule"],
 	"concepts.ethical_considerations": ["ethics", "ethical", "approval", "consent", "privacy", "safety"],
 	"concepts.sustainability_considerations": [
 		"sustainability",
@@ -263,6 +327,11 @@ DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_ALIASES = {
 	"synthesis.limitations": ["limitation", "limitations", "future", "caution"],
 	"concepts.development_process": ["development", "design", "iterative", "prototype", "testing"],
 	"concepts.sensing_modalities": ["sensor", "sensors", "sensing", "wearable", "device", "monitor"],
+	"study_details.study_design": ["feasibility", "usability", "pilot", "protocol", "trial design", "study design", "mixed methods", "randomized", "randomised"],
+	"concepts.smartphone_usage": ["android", "ios", "app", "mobile app", "chatbot", "schedule", "badges", "profile", "coaching", "reminders"],
+	"concepts.human_AI_interaction": ["chat", "chatbot", "interface", "avatar", "goal setting", "audio feedback", "leaderboard", "self-monitoring", "recommendation"],
+	"context.data_collection_method": ["questionnaire", "questionnaires", "interview", "interviews", "redcap", "survey", "app use", "app logs"],
+	"synthesis.implications": ["future", "recommend", "recommendations", "incorporate", "personalization", "multimodal", "adaptive", "feedback", "gamification", "persuasive", "cultural diversity", "music personalization"],
 }
 
 # USER-EDITABLE DATA-EXTRACTION EVIDENCE-HINT LOW-PRIORITY PATTERNS.
@@ -455,14 +524,38 @@ LLM_SETTINGS = {
 	"data_extraction_domain_groups": [["study_details"], ["population"], ["outcomes"], ["context"], ["concepts"], ["synthesis"]],  # optional schema-domain batches; population and context stay separate because they are evidence-location-sensitive
 	"data_extraction_response_format_mode": "prompt_only",  # prompt_only avoids broken json_schema handling on some GPUSstack models
 	"data_extraction_domain_max_tokens": 5000,  # per-domain output cap; quote-heavy domains need room to finish valid JSON
+	"data_extraction_semantic_rag_enabled": False,  # True = direct run_extraction ranks chunks by schema semantic_anchors before prompting
+	"data_extraction_semantic_top_k": 28,  # number of semantic chunks sent to the LLM in direct run_extraction; study protocol proposes top_k = 10 for screening; data extraction schema contains 35 unique variables
+	"data_extraction_semantic_score_threshold": 0.005,  # optional minimum semantic score; None keeps top_k regardless of absolute score
+	"data_extraction_hybrid_rescue_enabled": False,  # True = keep full_text primary, then run semantic second-opinion rescue for configured variables/domains
+	"data_extraction_hybrid_rescue_top_k": 28,  # semantic chunks used only for the rescue/supplement layer, not as primary extraction evidence
+	"data_extraction_hybrid_rescue_score_threshold": 0.005,  # optional rescue threshold; keep aligned with calibrated semantic tests unless QC suggests otherwise
+	"data_extraction_hybrid_rescue_variables": [
+		"concepts.AI_model",
+		"concepts.AI_transparency",
+		"concepts.sensing_modalities",
+		"concepts.behavioral_strategies",
+		"concepts.development_process",
+		"concepts.ethical_considerations",
+		"concepts.inclusivity_considerations",
+		"concepts.sustainability_considerations",
+	],  # user-editable detail-sensitive fields for semantic second opinion
+	"data_extraction_hybrid_rescue_domains": ["context", "synthesis"],  # user-editable domains where a semantic second opinion is useful even when the primary value is present
+	"data_extraction_hybrid_full_text_preferred_variables": [
+		"population.sample_size",
+		"population.mean_age",
+		"population.gender_overall",
+		"population.ethnicity_overall",
+		"population.health_status",
+	],  # table-sensitive fields keep full-text table evidence unless semantic quote support is clearly stronger
 	"data_extraction_evidence_mode": "full_text",  # full_text = use cached normalized full text; selected_chunks = use retrieval slice
 	"data_extraction_generate_normalized_text": True,  # True = preflight-create full_text_normalized.txt + data_extraction chunk artifacts from PDFs when missing
 	"data_extraction_full_text_max_words": 0,  # 0 = no word cap; set a number only if full texts exceed model context
 	"data_extraction_schema_evidence_hints": True,  # True = prepend compact schema-derived evidence snippets before full normalized text
-	"data_extraction_evidence_hints_per_variable": 3,  # snippets per schema variable; table-heavy extraction needs enough hints to surface demographic rows
-	"data_extraction_evidence_hint_max_chars": 420,  # max characters per snippet
-	"data_extraction_evidence_hints_max_total_chars": 18000,  # total cap for the evidence-hints block
-	"data_extraction_evidence_hint_context_lines": 2,  # neighboring normalized-text lines kept with matches so table labels and values stay together
+	"data_extraction_evidence_hints_per_variable": 4,  # snippets per schema variable; table-heavy extraction needs enough hints to surface demographic rows
+	"data_extraction_evidence_hint_max_chars": 520,  # max characters per snippet
+	"data_extraction_evidence_hints_max_total_chars": 24000,  # total cap for the evidence-hints block
+	"data_extraction_evidence_hint_context_lines": 3,  # neighboring normalized-text lines kept with matches so table labels and values stay together
 	"temperature": 0.0,  # randomness; lower = more stable decisions, higher = more variable
 	"top_p": 1.0,  # keep at 1.0 with temperature=0.0 for stable decoding behavior
 	"seed": 42,  # reproducibility seed (set an integer number like 42 to stabilize provider-side sampling)
@@ -568,37 +661,6 @@ PATH_SETTINGS = {
 	"eligibility_criteria_file": str(REPO_ROOT / "knowledge-base" / "eligibility_criteria.txt"),  # optional shared criteria text used only when prompts include {eligibility_criteria}
 	# Root folder for outputs; files will be placed under output/<stage>/...
 	"output_root": str(REPO_ROOT / "output"),  # base output folder for all stages
-}
-
-# Human reviewer timing (per stage)
-# - reviewers: optional self-reported time on the quality control set. Enter total_minutes per person (rough guess is fine).
-# - tip: hours × 60 = minutes (e.g., 2 hours ≈ 120 minutes). If you do not track time, leave 0 so the tool will skip time-savings and note that no human minutes were provided.
-# - you can add or delete reviewer rows per stage: each entry refers to one person. The pipeline only reads reviewers for the active CURRENT_STAGE, ignores zero-minute entries, and averages the remaining minutes-per-paper to estimate human time and time-savings via the pipeline.
-HUMAN_TIME_CONFIG = {
-	"title_abstract": {
-		"reviewers": [
-			{"id": "human_1", "total_minutes": 50}, # Marc for 223 articles (Email 12.02.2026): 1h 50 min = 110 min
-			{"id": "human_2", "total_minutes": 110}, # Shawan for 223 articles (Slack 19.02.2026): 4h = 240 min
-			{"id": "human_3", "total_minutes": 0},
-			{"id": "human_4", "total_minutes": 0},
-		],
-	},
-	"full_text": {
-		"reviewers": [
-			{"id": "human_1", "total_minutes": 270}, # Reviewer 1 for 50 articles (Email 09.04.2026): 4.5 h = 270 min
-			{"id": "human_2", "total_minutes": 300}, # Reviewer 2 for 50 articles (Slack): 5 h = 300 min
-			{"id": "human_3", "total_minutes": 0},
-			{"id": "human_4", "total_minutes": 0},
-		],
-	},
-	"data_extraction": {
-		"reviewers": [
-			{"id": "human_1", "total_minutes": 0},
-			{"id": "human_2", "total_minutes": 0},
-			{"id": "human_3", "total_minutes": 0},
-			{"id": "human_4", "total_minutes": 0},
-		],
-	},
 }
 
 

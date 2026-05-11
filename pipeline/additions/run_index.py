@@ -16,6 +16,7 @@ from config.user_orchestrator import CITATION_SEARCHING_SCREENING, CITATION_SEAR
 from pipeline.additions.emissions_merge import (
     merge_emissions_with_run_column as _merge_emissions_with_run_column_csvsafe,
 )
+from pipeline.core.metadata_aliases import metadata_aliases
 
 def _stage_root(stage: str) -> Path:
     """human readable hint: keep citation-searching index files beside citation-searching outputs."""
@@ -83,8 +84,90 @@ def _latest_qc_sample_csv(stage: str) -> Path | None:
     matches = sorted(stage_root.glob(f"{stage}_qc_sample_batch_*.csv"))
     return max(matches, key=lambda p: p.stat().st_mtime) if matches else None
 
+def _normalize_qc_paper_id(value: object) -> str:
+    """human readable hint: compare '#22', '22', and '22.0' as the same persisted paper id."""
+
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return ""
+    text = text.lstrip("#")
+    if re.fullmatch(r"\d+\.0", text):
+        text = text[:-2]
+    return text
+
+def _read_qc_sample_ids(stage: str) -> set[str]:
+    """human readable hint: load the persisted QC sample IDs without invoking the expensive pipeline."""
+
+    qc_csv = _latest_qc_sample_csv(stage)
+    if not qc_csv or not qc_csv.exists():
+        return set()
+    ids: set[str] = set()
+    try:
+        with qc_csv.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            paper_id_aliases = metadata_aliases("paper_id")
+            for row in reader:
+                raw = next((row.get(alias) for alias in paper_id_aliases if row.get(alias)), "")
+                pid = _normalize_qc_paper_id(raw)
+                if pid:
+                    ids.add(pid)
+    except Exception:
+        return set()
+    return ids
+
+def _data_extraction_result_ids(stage: str) -> set[str]:
+    """human readable hint: data_extraction has per-paper result JSONL files rather than eligibility JSONL."""
+
+    stage_root = _stage_root(stage)
+    ids: set[str] = set()
+    for result_path in stage_root.glob("*/data_extraction_results.jsonl"):
+        if not result_path.is_file() or result_path.stat().st_size <= 0:
+            continue
+        try:
+            with result_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    payload = json.loads(line)
+                    if payload.get("meta"):
+                        continue
+                    pid = _normalize_qc_paper_id(payload.get("paper_id"))
+                    if pid:
+                        ids.add(pid)
+                        break
+        except Exception:
+            fallback = _normalize_qc_paper_id(result_path.parent.name.split("_", 1)[0])
+            if fallback:
+                ids.add(fallback)
+    return ids
+
+def _data_extraction_qc_screened_already(stage: str) -> bool:
+    """human readable hint: skip rerunning data_extraction QC only when every QC paper has a result file."""
+
+    qc_ids = _read_qc_sample_ids(stage)
+    if not qc_ids:
+        return False
+    result_ids = _data_extraction_result_ids(stage)
+    return qc_ids.issubset(result_ids)
+
 def _artifact_from_latest_base_outputs(stage: str, run_label: str) -> dict[str, object] | None:
     """human readable hint: synthesize a minimal run artifact from latest persisted base outputs."""
+
+    if stage == "data_extraction" and run_label == "qc_sample" and _data_extraction_qc_screened_already(stage):
+        artifact: dict[str, object] = {
+            "success": True,
+            "run_label": run_label,
+            "stage": stage,
+            "data_extraction_result_ids": sorted(_data_extraction_result_ids(stage)),
+        }
+        qc_csv = _latest_qc_sample_csv(stage)
+        if qc_csv and qc_csv.exists():
+            artifact["qc_sample_path"] = str(qc_csv)
+        base = _latest_base_outputs(stage, run_label)
+        resource_path = base.get("resource")
+        if isinstance(resource_path, Path) and resource_path.exists():
+            artifact["resource_log_path"] = str(resource_path)
+        return artifact
 
     base = _latest_base_outputs(stage, run_label)
     eligibility = base.get("eligibility")
@@ -801,6 +884,9 @@ def _auto_generate_qc_mismatch_csv(stage: str, artifact: dict[str, object] | Non
 
 def _qc_screened_already(stage: str, run_label: str = "qc_sample") -> bool:
     """Detect whether a QC sample for this stage was already screened."""
+
+    if stage == "data_extraction" and run_label == "qc_sample":
+        return _data_extraction_qc_screened_already(stage)
 
     scoped = _latest_base_outputs(stage, run_label).get("eligibility")
     if scoped and scoped.exists():

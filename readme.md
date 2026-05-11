@@ -163,7 +163,8 @@ Behavior notes:
   - [config/prompt_script_data_extraction.txt](config/prompt_script_data_extraction.txt) is the human-readable conceptual framework. It should not contain technical insertion markers; the pipeline automatically inserts the active schema CSV contract before `# CONTEXT` at runtime.
   - with `data_extraction_split_by_domain=True`, `data_extraction_domain_groups` can group compatible schema domains into fewer calls; use input traces to inspect the exact schema-injected runtime prompt
   - direct async command remains available: `python -m pipeline.core.run_extraction`
-  - `data_extraction_pos-neg_examples.csv` mainly matters when `LLM_SETTINGS["data_extraction_evidence_mode"]="selected_chunks"`; with the default `full_text` mode, the LLM receives cached normalized full text, so extraction quality is driven mostly by `data_extraction_schema.csv` and `prompt_script_data_extraction.txt`
+  - the direct extraction runner can use semantic RAG when `LLM_SETTINGS["data_extraction_semantic_rag_enabled"]=True`; retrieval targets come from `semantic_anchors` in `data_extraction_schema.csv`, while `data_extraction_pos-neg_examples.csv` supplies structural NEG noise rather than prompt rules
+  - the main pipeline can optionally use `LLM_SETTINGS["data_extraction_hybrid_rescue_enabled"]=True` to keep full text as primary evidence and run semantic rescue only for configured variables/domains, writing separate hybrid audit files for reviewer adjudication
 
 Eligibility criteria can be centrally stored in [knowledge-base/eligibility_criteria.txt](knowledge-base/eligibility_criteria.txt).
 - The file is injected only when a stage prompt contains `{eligibility_criteria}`.
@@ -280,6 +281,9 @@ Data extraction run-level exports for review and audit:
 - `python -m pipeline.additions.export_expert_review_packets summarize` summarizes completed expert oversight decisions by schema variable.
 - `data_extraction_all_papers_for_consensus_comparison.csv`: one AI row per paper in the same header layout as `input/data_extraction_schema.csv`
 - `data_extraction_all_papers_quote_audit.csv`: long audit table with value plus supporting quote for every variable
+- `data_extraction_hybrid_rescue_audit.csv`: optional primary full-text versus semantic rescue comparison for configured fields
+- `data_extraction_hybrid_selected_values.csv`: optional selected value/quote rows from the hybrid decision layer
+- `data_extraction_hybrid_summary.md`: optional count summary of retained primary values and semantic rescue selections
 
 Data-extraction validation additionally writes run-level exports:
 - `data_extraction_extraction_accuracy_report.txt`
@@ -290,9 +294,13 @@ Data-extraction schema and validation mapping:
 - The configured extraction schema CSV defines `domain`, `variable_name`, `variable_type`, `allowed_options`, `instruction`, and `covidence_column_name`.
 - The LLM output uses `{variable_name}_value` and `{variable_name}_quote` under each domain.
 - Validation maps each LLM value field to the exact consensus/export header named in `covidence_column_name`.
+- `python -m pipeline.additions.human_gold_standard_builder --source <review_sheet.csv> --output-dir <audit_dir>` converts binary human review sheets into a wide `stats_engine` consensus CSV and a long adjudication audit. Companion columns ending in `__human_score` let reviewed 0/1 judgements drive the match decision; cells without those companions still use type-aware exact comparison.
+- Archived data-extraction folders can be validated with `python -m pipeline.additions.stats_engine --consensus <human_gold_standard.csv> --ai-output-dir <output/data_extraction_v*>`.
+- Add `--use-human-score-columns` only when the human binary scores were assigned to the same AI run being validated; omit it when validating a newer run against curated gold values.
 - `LLM_SETTINGS["data_extraction_split_by_domain"]` defaults to `True`; this validates smaller schema-domain batches instead of one fragile all-fields JSON response. `data_extraction_domain_groups` can combine compatible domains into fewer calls, and `data_extraction_domain_max_tokens` caps each batch response.
 - `LLM_SETTINGS["data_extraction_response_format_mode"]` defaults to `prompt_only` for GPUSstack compatibility; use `json_schema` only with a backend proven to enforce OpenAI Structured Outputs.
-- `LLM_SETTINGS["data_extraction_evidence_mode"]` defaults to `full_text`, so extraction uses cached `full_text_normalized.txt` instead of only the selected screening chunks.
+- `LLM_SETTINGS["data_extraction_evidence_mode"]` defaults to `full_text` for the main pipeline path, so extraction uses cached `full_text_normalized.txt` instead of only the selected screening chunks. The direct runner `python -m pipeline.core.run_extraction` can additionally constrain prompts through schema-anchor semantic RAG.
+- `LLM_SETTINGS["data_extraction_hybrid_rescue_enabled"]` is optional and defaults to `False`; when enabled, semantic retrieval is a targeted second opinion for configured variables/domains and does not silently replace the primary full-text aggregate output.
 - `LLM_SETTINGS["data_extraction_generate_normalized_text"]` defaults to `True`, so data extraction runs a full-text evidence preflight for all included papers before QC sampling narrows the screening set.
 
 Data-extraction evidence modes:
@@ -327,7 +335,7 @@ Data-extraction evidence modes:
 - Keep `LLM_SETTINGS["max_tokens"]` lower than `context_window_total_tokens`; effective prompt budget is computed as `context_window_total_tokens - max_tokens`.
 - Endpoint-safe optimization profile defaults are now set to: `SCREENING_DEFAULTS.top_k=10`, `EMBEDDING_SETTINGS.chunk_size=20`, `LLM_SETTINGS.async_max_concurrency=2`.
 - Async LLM controls are in `LLM_SETTINGS`: `async_max_concurrency`, `async_max_retries`, `async_backoff_base_seconds`, `async_backoff_max_seconds`, `async_jitter_seconds`.
-- Data-extraction output controls are in `LLM_SETTINGS`: `data_extraction_split_by_domain`, `data_extraction_domain_groups`, `data_extraction_response_format_mode`, `data_extraction_domain_max_tokens`, `data_extraction_evidence_mode`, `data_extraction_generate_normalized_text`, and `data_extraction_full_text_max_words`.
+- Data-extraction output controls are in `LLM_SETTINGS`: `data_extraction_split_by_domain`, `data_extraction_domain_groups`, `data_extraction_response_format_mode`, `data_extraction_domain_max_tokens`, `data_extraction_semantic_rag_enabled`, `data_extraction_semantic_top_k`, `data_extraction_semantic_score_threshold`, `data_extraction_evidence_mode`, `data_extraction_generate_normalized_text`, and `data_extraction_full_text_max_words`.
 - Stage toggles for async processing: `async_enable_full_text`, `async_enable_data_extraction`.
 - Async heartbeat log interval: `async_heartbeat_seconds` (default `30`).
 - Per-paper artifact controls are in `SCREENING_DEFAULTS`:

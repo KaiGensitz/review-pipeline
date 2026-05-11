@@ -57,7 +57,8 @@ This document lists implementation-level checks to verify run readiness and outp
 - Verify `LLM_SETTINGS["data_extraction_domain_groups"]` contains only domain names present in the active schema CSV; missing schema domains are appended as singleton batches automatically.
 - If grouped/domain-wise extraction errors occur, inspect `data_extraction_domain_validation_failed` entries to identify the failing domain batch rather than rerunning the whole paper blindly.
 - For GPUSstack `gpt-oss-120b`, keep `LLM_SETTINGS["data_extraction_response_format_mode"]="prompt_only"` unless a small live test proves that `json_schema` is enforced correctly.
-- Data extraction should use `LLM_SETTINGS["data_extraction_evidence_mode"]="full_text"` when the objective is extraction from the complete normalized PDF rather than a small retrieval slice.
+- Main-pipeline data extraction should use `LLM_SETTINGS["data_extraction_evidence_mode"]="full_text"` when the objective is extraction from the complete normalized PDF rather than a small retrieval slice. Direct `python -m pipeline.core.run_extraction` can instead use semantic RAG with `data_extraction_semantic_rag_enabled=True`, where targets are read from the schema CSV `semantic_anchors` column.
+- Optional hybrid rescue should be enabled only after QC justification. `data_extraction_hybrid_rescue_enabled=True` keeps full text primary, reads rescue targets from schema `semantic_anchors`, and writes separate hybrid audit files so reviewers can inspect any semantic rescue override.
 - Full-text retrieval now uses hybrid PDF extraction quality controls (pdfplumber + PyPDF fallback, repeated header/footer cleanup).
 - Per-paper full_text artifacts depend on `SCREENING_DEFAULTS["artifact_mode"]`:
   - `compact` (default): writes `full_text_artifact.json` and `full_text_normalized.txt`
@@ -167,7 +168,7 @@ Validation command:
 
 Required inputs:
 - `input/*_included_csv_*.csv`
-- `knowledge-base/data_extraction_pos-neg_examples.csv` only matters for retrieval-based extraction (`data_extraction_evidence_mode="selected_chunks"`); in default `full_text` mode it is optional/fallback infrastructure
+- `knowledge-base/data_extraction_pos-neg_examples.csv` now supplies embedding examples for retrieval-based extraction; POS rows describe relevant protocol intersections and NEG rows describe structural noise, while field-specific semantic targets live in `data_extraction_schema.csv`.
 - extraction schema/mapping KB: `DATA_EXTRACTION_SCHEMA_FILE` in `config/user_orchestrator.py`
 - Human consensus/gold-standard CSV: `input/data_extraction_schema.csv` (or explicit `--consensus`)
 - external metadata/admin header mapping: `CSV_METADATA_COLUMN_ALIASES`, `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, and optional `DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES` in `config/user_orchestrator.py`
@@ -182,13 +183,17 @@ Expected outputs:
   - live aggregate files, created at data-extraction run start and appended paper-by-paper:
     - `data_extraction_all_papers_for_consensus_comparison.csv`
     - `data_extraction_all_papers_quote_audit.csv`
+    - optional when hybrid rescue is enabled: `data_extraction_hybrid_rescue_audit.csv`, `data_extraction_hybrid_selected_values.csv`, and `data_extraction_hybrid_summary.md`
   - `python -m pipeline.additions.export_extraction_tables` can rebuild the two aggregate files from per-paper JSONL outputs.
   - `python -m pipeline.additions.export_expert_review_packets export` can create expert oversight packets from a finished extraction output folder.
   - `python -m pipeline.additions.export_expert_review_packets summarize` can summarize completed expert decisions into variable-level oversight metrics.
 
 Validation command:
-- `python -m pipeline.additions.stats_engine --consensus <human_gold_standard.csv>`
+- `python -m pipeline.additions.stats_engine --consensus <human_gold_standard.csv> --ai-output-dir <data_extraction_output_dir>`
 - The validator reads the configured schema CSV, maps each LLM `{variable_name}_value` to the exact `covidence_column_name`, and compares with type-aware coercion.
+- Human binary review sheets can first be converted with `python -m pipeline.additions.human_gold_standard_builder --source <review_sheet.csv> --output-dir <audit_dir>`.
+- If validating the same AI run that humans scored, add `--use-human-score-columns`; companion columns named `<covidence_column_name>__human_score` then become the cell-level match decision.
+- If validating a later AI run, omit `--use-human-score-columns` and use manually adjudicated gold values instead.
 - Concordance excludes human `Not Available`/`n/a`; accuracy includes correctly identified missing values.
 - If a model returns malformed JSON for one domain, the merged payload keeps fallback missing values for that domain and logs the domain-specific validation error.
 - Evidence mode check:

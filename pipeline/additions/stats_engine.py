@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import re
+import unicodedata
 from numbers import Real
 from pathlib import Path
 from typing import Any, Optional, Tuple
@@ -28,6 +29,9 @@ from statsmodels.stats.proportion import proportion_confint
 from config.user_orchestrator import (
     CURRENT_STAGE,
     DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS,
+    DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES,
+    DATA_EXTRACTION_VALIDATION_MATCH_SETTINGS,
+    DATA_EXTRACTION_VALIDATION_VALUE_ALIASES,
     STUDY_TAGS_IGNORE,
     STUDY_TAGS_INCLUDE,
 )
@@ -45,6 +49,7 @@ INPUT_DIR = ROOT / "input"
 STAGE_OUTPUT_DIR = OUTPUT_DIR
 EXTRACTION_AI_PATH = OUTPUT_DIR / f"{CURRENT_STAGE}_results.jsonl"
 EXTRACTION_HUMAN_PATH = ROOT / "input" / "data_extraction_schema.csv"
+EXTRACTION_HUMAN_BINARY_SOURCE_NAME = "data_extraction_human_review_qc_sample_binary_scoring.csv"
 LOGGER = logging.getLogger(__name__)
 
 
@@ -64,6 +69,29 @@ VALIDATION_AI_QUOTE_COLUMN = str(_admin_setting("quote_audit_quote_column", "ai_
 VALIDATION_HUMAN_VALUE_COLUMN = "human_value"
 VALIDATION_ERROR_TYPE_COLUMN = "error_type"
 VALIDATION_ERROR_EFFECT_COLUMN = "error_effect"
+EXTRACTION_HUMAN_SCORE_SUFFIX = "__human_score"
+EXTRACTION_HUMAN_EVALUABLE_SUFFIX = "__human_evaluable"
+VALIDATION_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "in",
+    "is",
+    "of",
+    "or",
+    "the",
+    "to",
+    "was",
+    "were",
+    "with",
+}
 
 EXCLUSION_TAGS = [t.lower() for t in STUDY_TAGS_INCLUDE]
 IGNORE_TAGS = {t.lower() for t in STUDY_TAGS_IGNORE}
@@ -764,19 +792,23 @@ def validate_screening(stage: str, args) -> None:
     print(f"[output] validation_matrix path={_stage_file('validation_matrix.png', suffix).relative_to(ROOT)}")
 
 
-def _load_ai_extraction_records() -> list[dict]:
-    """Load extraction outputs from per-paper JSONL files."""
+def _load_ai_extraction_records(ai_output_dir: Optional[Path] = None) -> list[dict]:
+    """Load extraction outputs from run-level or per-paper JSONL files."""
 
     records: list[dict] = []
-    if EXTRACTION_AI_PATH.exists():
+    root = Path(ai_output_dir) if ai_output_dir else OUTPUT_DIR
+    run_level_path = root / f"{CURRENT_STAGE}_results.jsonl"
+    if run_level_path.exists():
+        ai_files = [run_level_path]
+    elif ai_output_dir is None and EXTRACTION_AI_PATH.exists():
         ai_files = [EXTRACTION_AI_PATH]
     else:
-        ai_files = sorted(OUTPUT_DIR.glob("*/data_extraction_results.jsonl"))
+        ai_files = sorted(root.glob("*/data_extraction_results.jsonl"))
 
     if not ai_files:
         raise FileNotFoundError(
             "Missing AI extraction files. Expected per-paper files at "
-            "output/data_extraction/<paper>/data_extraction_results.jsonl"
+            f"{root}/<paper>/data_extraction_results.jsonl"
         )
 
     for path in ai_files:
@@ -832,6 +864,241 @@ def _normalization_key(value: Any, variable: ExtractionVariable) -> Any:
         parsed = _normalize_number(value, integer=False)
         return parsed if parsed is not None else _normalize_scalar(value)
     return _normalize_scalar(value)
+
+
+def _validation_setting(key: str, default: float | int) -> float:
+    """human readable hint: read generic validation thresholds from user-editable config."""
+
+    if isinstance(DATA_EXTRACTION_VALIDATION_MATCH_SETTINGS, dict):
+        try:
+            return float(DATA_EXTRACTION_VALIDATION_MATCH_SETTINGS.get(key, default))
+        except Exception:
+            return float(default)
+    return float(default)
+
+
+def _validation_bool_setting(key: str, default: bool) -> bool:
+    """human readable hint: keep optional fuzzy validation behavior explicit and user-editable."""
+
+    if isinstance(DATA_EXTRACTION_VALIDATION_MATCH_SETTINGS, dict):
+        value = DATA_EXTRACTION_VALIDATION_MATCH_SETTINGS.get(key, default)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().casefold() in {"1", "true", "yes", "y"}
+    return default
+
+
+def _validation_review_note_column_name(consensus_column_name: str) -> str:
+    """human readable hint: companion note columns preserve reviewer correction text for quote-aware validation."""
+
+    return f"{consensus_column_name}__human_note"
+
+
+def _validation_text(value: Any) -> str:
+    """human readable hint: normalize prose before factual-congruence matching."""
+
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple, set)):
+        value = " ".join(str(item) for item in value)
+    text = unicodedata.normalize("NFKD", str(value))
+    # human readable hint: normalize typography before ASCII folding so semantically identical model names still match.
+    text = text.translate(
+        str.maketrans(
+            {
+                "\u00a0": " ",
+                "\u2010": "-",
+                "\u2011": "-",
+                "\u2012": "-",
+                "\u2013": "-",
+                "\u2014": "-",
+                "\u2015": "-",
+                "\u2212": "-",
+                "\u2043": "-",
+                "\u2215": "/",
+                "\u2044": "/",
+                "\u2018": "'",
+                "\u2019": "'",
+                "\u201a": "'",
+                "\u201b": "'",
+                "\u201c": '"',
+                "\u201d": '"',
+                "\u201e": '"',
+                "\u201f": '"',
+            }
+        )
+    )
+    text = text.encode("ascii", "ignore").decode("ascii")
+    text = text.casefold()
+    text = text.replace("_", " ")
+    text = re.sub(r"[\[\]{}'\"`|;:,()/<>]+", " ", text)
+    text = re.sub(r"[^a-z0-9.+%_-]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _validation_tokens(value: Any) -> set[str]:
+    """human readable hint: derive compact content tokens from prose, lists, and table fragments."""
+
+    text = _validation_text(value)
+    tokens = set()
+    for token in re.findall(r"[a-z0-9][a-z0-9.+%_-]*", text):
+        normalized = token.strip("-_")
+        if len(normalized) < 2 or normalized in VALIDATION_STOPWORDS or normalized == "not":
+            continue
+        tokens.add(normalized)
+    return tokens
+
+
+def _validation_numbers(value: Any) -> list[float]:
+    """human readable hint: extract comparable numeric evidence such as percentages, ages, and sample sizes."""
+
+    numbers: list[float] = []
+    for match in re.findall(r"(?<![a-z])\d+(?:\.\d+)?", _validation_text(value)):
+        try:
+            numbers.append(float(match))
+        except ValueError:
+            continue
+    return numbers
+
+
+def _numbers_overlap(human_value: Any, ai_value: Any) -> bool:
+    """human readable hint: allow small rounding differences in reviewer and AI numeric expressions."""
+
+    tolerance = _validation_setting("numeric_relative_tolerance", 0.05)
+    human_numbers = _validation_numbers(human_value)
+    ai_numbers = _validation_numbers(ai_value)
+    for human_number in human_numbers:
+        for ai_number in ai_numbers:
+            absolute_tolerance = max(0.5, abs(human_number) * tolerance)
+            if abs(human_number - ai_number) <= absolute_tolerance:
+                return True
+    return False
+
+
+def _token_overlap_ratio(human_value: Any, ai_value: Any) -> float:
+    """human readable hint: measure whether AI wording covers the reviewer-derived fact pattern."""
+
+    human_tokens = _validation_tokens(human_value)
+    ai_tokens = _validation_tokens(ai_value)
+    if not human_tokens or not ai_tokens:
+        return 0.0
+    return len(human_tokens & ai_tokens) / max(1, min(len(human_tokens), len(ai_tokens)))
+
+
+def _factual_text_match(human_value: Any, ai_value: Any, variable: ExtractionVariable) -> bool:
+    """human readable hint: accept factual prose overlap when exact string equality is too brittle."""
+
+    human_tokens = _validation_tokens(human_value)
+    ai_tokens = _validation_tokens(ai_value)
+    min_tokens = int(_validation_setting("minimum_token_count_for_fuzzy", 2))
+    if len(human_tokens) < min_tokens or len(ai_tokens) < min_tokens:
+        return False
+    overlap = _token_overlap_ratio(human_value, ai_value)
+    if variable.variable_type == "list":
+        threshold = _validation_setting("list_token_overlap_threshold", 0.35)
+    elif min(len(human_tokens), len(ai_tokens)) <= 4:
+        threshold = _validation_setting("short_text_token_overlap_threshold", 0.50)
+    else:
+        threshold = _validation_setting("free_text_token_overlap_threshold", 0.42)
+    if overlap >= threshold:
+        return True
+    return _numbers_overlap(human_value, ai_value) and overlap >= max(0.25, threshold - 0.15)
+
+
+def _validation_alias_match(human_value: Any, ai_value: Any, variable: ExtractionVariable) -> bool:
+    """human readable hint: apply user-editable semantic equivalence groups after plain normalization."""
+
+    if not isinstance(DATA_EXTRACTION_VALIDATION_VALUE_ALIASES, dict):
+        return False
+    alias_key = f"{variable.domain}.{variable.variable_name}"
+    groups = list(DATA_EXTRACTION_VALIDATION_VALUE_ALIASES.get(alias_key, ()) or [])
+    groups.extend(DATA_EXTRACTION_VALIDATION_VALUE_ALIASES.get("*", ()) or [])
+    human_text = _validation_text(human_value)
+    ai_text = _validation_text(ai_value)
+    if not human_text or not ai_text:
+        return False
+    for group in groups or ():
+        terms = [_validation_text(term) for term in group or () if _validation_text(term)]
+        human_hit = any(term in human_text or human_text in term for term in terms)
+        ai_hit = any(term in ai_text or ai_text in term for term in terms)
+        if human_hit and ai_hit:
+            return True
+    return False
+
+
+def _extraction_values_match(human_value: Any, ai_value: Any, variable: ExtractionVariable) -> bool:
+    """human readable hint: compare AI output against reviewer-derived ground truth."""
+
+    if _normalization_key(human_value, variable) == _normalization_key(ai_value, variable):
+        return True
+    if _validation_alias_match(human_value, ai_value, variable):
+        return True
+    if variable.variable_type in {"integer", "float", "boolean", "enum"}:
+        return False
+    if not _validation_bool_setting("count_fuzzy_matches_in_metrics", False):
+        return False
+    return _factual_text_match(human_value, ai_value, variable)
+
+
+def _quote_aware_text_match(human_value: Any, ai_value: Any, variable: ExtractionVariable) -> tuple[bool, str]:
+    """human readable hint: compare prose facts for quote-aware validation without changing strict metrics."""
+
+    human_missing = _is_extraction_missing(human_value, variable)
+    ai_missing = _is_extraction_missing(ai_value, variable)
+    if human_missing or ai_missing:
+        return (human_missing and ai_missing, "both_missing" if human_missing and ai_missing else "missing_mismatch")
+    if _extraction_values_match(human_value, ai_value, variable):
+        return True, "strict_or_alias"
+    human_text = _validation_text(human_value)
+    ai_text = _validation_text(ai_value)
+    if human_text and human_text == ai_text:
+        return True, "punctuation_spacing_normalized"
+    if human_text and ai_text:
+        shorter, longer = sorted((human_text, ai_text), key=len)
+        if len(shorter) >= 3 and re.search(rf"(?<![a-z0-9]){re.escape(shorter)}(?![a-z0-9])", longer):
+            return True, "short_exact_containment"
+    human_tokens = _validation_tokens(human_value)
+    ai_tokens = _validation_tokens(ai_value)
+    min_tokens = int(_validation_setting("minimum_token_count_for_fuzzy", 2))
+    if len(human_tokens) < min_tokens or len(ai_tokens) < min_tokens:
+        return False, "too_few_tokens"
+    overlap = _token_overlap_ratio(human_value, ai_value)
+    if variable.variable_type == "list":
+        threshold = _validation_setting("quote_aware_list_token_overlap_threshold", 0.35)
+    elif min(len(human_tokens), len(ai_tokens)) <= 4:
+        threshold = _validation_setting("quote_aware_short_text_token_overlap_threshold", 0.50)
+    else:
+        threshold = _validation_setting("quote_aware_free_text_token_overlap_threshold", 0.42)
+    if overlap >= threshold:
+        return True, f"token_overlap_{overlap:.2f}"
+    if _numbers_overlap(human_value, ai_value) and overlap >= max(0.25, threshold - 0.15):
+        return True, f"numeric_plus_overlap_{overlap:.2f}"
+    return False, f"overlap_{overlap:.2f}"
+
+
+def _quote_aware_extraction_match(
+    human_value: Any,
+    ai_value: Any,
+    ai_quote: str,
+    reviewer_note: Any,
+    variable: ExtractionVariable,
+) -> tuple[bool, str]:
+    """human readable hint: validate values using AI quotes and reviewer correction notes when configured."""
+
+    comparisons: list[tuple[str, Any, Any]] = [("value_vs_truth", human_value, ai_value)]
+    if _validation_bool_setting("quote_aware_compare_ai_quote", True):
+        comparisons.append(("ai_quote_vs_truth", human_value, ai_quote))
+    if reviewer_note and _validation_bool_setting("quote_aware_compare_reviewer_note", True):
+        comparisons.append(("value_vs_reviewer_note", reviewer_note, ai_value))
+        if _validation_bool_setting("quote_aware_compare_ai_quote", True):
+            comparisons.append(("ai_quote_vs_reviewer_note", reviewer_note, ai_quote))
+
+    reasons: list[str] = []
+    for label, left, right in comparisons:
+        matched, reason = _quote_aware_text_match(left, right, variable)
+        if matched:
+            reasons.append(f"{label}:{reason}")
+    return bool(reasons), "; ".join(reasons)
 
 
 def _missing_key(variable: ExtractionVariable) -> Any:
@@ -901,6 +1168,114 @@ def _normalize_bool(value: Any) -> bool:
     return text in {"true", "1", "yes", "y", "present", "reported", "explicit"}
 
 
+def _human_score_column_name(consensus_column_name: str) -> str:
+    """human readable hint: companion columns can carry human 0/1 judgements without changing schema columns."""
+
+    return f"{consensus_column_name}{EXTRACTION_HUMAN_SCORE_SUFFIX}"
+
+
+def _parse_human_cell_score(value: Any) -> Optional[bool]:
+    """human readable hint: accept common binary reviewer score encodings for data-extraction cells."""
+
+    if value is None:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().casefold()
+    if not text:
+        return None
+    if text in {"1", "true", "yes", "y", "correct", "match", "stimmt"}:
+        return True
+    if text in {"0", "false", "no", "n", "incorrect", "mismatch", "stimmt nicht"}:
+        return False
+    return None
+
+
+def _human_score_columns_present(human_wide: pd.DataFrame, variables: tuple[ExtractionVariable, ...]) -> bool:
+    """human readable hint: detect reviewer 0/1 judgement columns in generated human gold-standard tables."""
+
+    for variable in variables:
+        if _human_score_column_name(variable.covidence_column_name) in human_wide.columns:
+            return True
+    return False
+
+
+def _latest_binary_review_source() -> Path | None:
+    """human readable hint: the editable reviewer scoring sheet in input/ is the source of truth when present."""
+
+    exact_path = INPUT_DIR / EXTRACTION_HUMAN_BINARY_SOURCE_NAME
+    if exact_path.exists():
+        return exact_path
+    candidates = sorted(
+        INPUT_DIR.glob("data_extraction_human_review_qc_sample_binary_scoring*.csv"),
+        key=lambda path: path.stat().st_mtime,
+    )
+    return candidates[-1] if candidates else None
+
+
+def _build_gold_standard_frame_from_binary_source(source_path: Path, schema_path: Path) -> pd.DataFrame:
+    """human readable hint: convert the editable binary reviewer sheet in memory for validation."""
+
+    from pipeline.additions.human_gold_standard_builder import HumanGoldStandardBuilder
+
+    build = HumanGoldStandardBuilder(
+        source_path=source_path,
+        schema_path=schema_path,
+        output_dir=OUTPUT_DIR,
+    ).build()
+    return pd.DataFrame(build["wide_rows"])
+
+
+def _resolve_extraction_human_path(consensus_path: Optional[str], schema_path: Path | None = None) -> Path:
+    """human readable hint: resolve explicit legacy consensus files only."""
+
+    if consensus_path:
+        return Path(consensus_path)
+    raise FileNotFoundError(
+        f"Missing editable human review source at {INPUT_DIR / EXTRACTION_HUMAN_BINARY_SOURCE_NAME}"
+    )
+
+
+def _load_extraction_human_wide(
+    consensus_path: Optional[str],
+    schema_path: Path,
+) -> tuple[pd.DataFrame, str]:
+    """human readable hint: load human truth from input CSV in memory; do not write derived gold files."""
+
+    if consensus_path:
+        path = Path(consensus_path)
+        return pd.read_csv(path), str(path)
+
+    binary_source = _latest_binary_review_source()
+    if binary_source:
+        return _build_gold_standard_frame_from_binary_source(binary_source, schema_path), str(binary_source)
+
+    path = _resolve_extraction_human_path(consensus_path, schema_path)
+    return pd.read_csv(path), str(path)
+
+
+def _apply_human_export_aliases(human_wide: pd.DataFrame, variables: tuple[ExtractionVariable, ...]) -> pd.DataFrame:
+    """human readable hint: user-configured header aliases adapt old reviewer templates to the active schema."""
+
+    if not isinstance(DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES, dict):
+        return human_wide
+    human_wide = human_wide.copy()
+    for variable in variables:
+        target = variable.covidence_column_name
+        if target in human_wide.columns:
+            continue
+        alias_key = f"{variable.domain}.{variable.variable_name}"
+        aliases = DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES.get(alias_key, ())
+        for alias in aliases or ():
+            alias_name = str(alias or "").strip()
+            if alias_name and alias_name in human_wide.columns:
+                human_wide[target] = human_wide[alias_name]
+                break
+    return human_wide
+
+
 def _normalize_number(value: Any, *, integer: bool) -> int | float | None:
     """human readable hint: compare numeric human-export and JSON values even when one side is text."""
 
@@ -913,16 +1288,20 @@ def _normalize_number(value: Any, *, integer: bool) -> int | float | None:
     return int(number) if integer and number.is_integer() else number
 
 
-def validate_extraction(consensus_path: Optional[str] = None) -> None:
+def validate_extraction(
+    consensus_path: Optional[str] = None,
+    ai_output_dir: Optional[str] = None,
+    use_human_score_columns: bool = False,
+) -> None:
     """Validate extraction outputs against human gold-standard columns mapped by the KB."""
 
     schema = DynamicExtractionSchema.from_kb()
-    human_path = Path(consensus_path) if consensus_path else EXTRACTION_HUMAN_PATH
-    if not human_path.exists():
-        raise FileNotFoundError(f"Missing human gold-standard file at {human_path}")
+    ai_root = Path(ai_output_dir) if ai_output_dir else OUTPUT_DIR
 
     # human readable hint: load the human export once and normalize the paper identifier for AI-human matching.
-    human_wide = _clean_cols(pd.read_csv(human_path))
+    human_wide, human_source_label = _load_extraction_human_wide(consensus_path, schema.kb_path)
+    human_wide = _clean_cols(human_wide)
+    human_wide = _apply_human_export_aliases(human_wide, schema.variables)
     human_wide["paper_id"] = _normalize_id_column(human_wide)
     missing_columns = [
         variable.covidence_column_name
@@ -933,10 +1312,13 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
         raise KeyError(
             "Human export is missing KB-mapped column(s): " + ", ".join(sorted(set(missing_columns)))
         )
+    # human readable hint: generated human gold-standard sheets carry reviewer-derived values; score columns are audit unless explicitly requested.
+    effective_use_human_score_columns = use_human_score_columns
+    quote_aware_metrics = _validation_bool_setting("quote_aware_match_in_metrics", True)
 
     # human readable hint: index AI JSONL records by normalized paper ID and keep the LLM quote beside each value.
     ai_by_id: dict[str, dict[str, Any]] = {}
-    for payload in _load_ai_extraction_records():
+    for payload in _load_ai_extraction_records(ai_root):
         pid = _normalize_paper_id_value(payload.get("paper_id", ""))
         if not pid:
             continue
@@ -950,12 +1332,34 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
         extracted = ai_payload.get("extracted_data", {}) if isinstance(ai_payload, dict) else {}
 
         for variable in schema.variables:
+            evaluable_col = f"{variable.covidence_column_name}{EXTRACTION_HUMAN_EVALUABLE_SUFFIX}"
+            if evaluable_col in human_wide.columns and str(human_row.get(evaluable_col, "")).strip().casefold() == "false":
+                continue
             human_value = human_row.get(variable.covidence_column_name)
             ai_value = _value_from_extracted_data(extracted, variable)
             ai_quote = _quote_from_extracted_data(extracted, variable)
+            reviewer_note_col = _validation_review_note_column_name(variable.covidence_column_name)
+            reviewer_note = human_row.get(reviewer_note_col, "") if reviewer_note_col in human_wide.columns else ""
             human_missing = _is_extraction_missing(human_value, variable)
             ai_missing = _is_extraction_missing(ai_value, variable)
-            match = _normalization_key(human_value, variable) == _normalization_key(ai_value, variable)
+            score_col = _human_score_column_name(variable.covidence_column_name)
+            human_score = (
+                _parse_human_cell_score(human_row.get(score_col))
+                if effective_use_human_score_columns and score_col in human_wide.columns
+                else None
+            )
+            strict_match = _extraction_values_match(human_value, ai_value, variable)
+            quote_aware_match, quote_aware_reason = _quote_aware_extraction_match(
+                human_value,
+                ai_value,
+                ai_quote,
+                reviewer_note,
+                variable,
+            )
+            match = human_score if human_score is not None else (quote_aware_match if quote_aware_metrics else strict_match)
+            match_source = "human_binary_score" if human_score is not None else (
+                "quote_aware_value_or_quote" if quote_aware_metrics else "normalized_exact_value"
+            )
 
             rows.append(
                 {
@@ -966,7 +1370,12 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
                     "human_missing": human_missing,
                     "ai_missing": ai_missing,
                     "match": match,
+                    "strict_match": strict_match,
+                    "quote_aware_match": quote_aware_match,
+                    "match_source": match_source,
+                    "quote_aware_reason": quote_aware_reason,
                     "human_value": "" if human_value is None else str(human_value),
+                    "reviewer_note": "" if reviewer_note is None else str(reviewer_note),
                     "ai_value": "" if ai_value is None else str(ai_value),
                     "ai_quote": ai_quote,
                 }
@@ -978,8 +1387,12 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
                         VALIDATION_PAPER_ID_COLUMN: paper_id,
                         VALIDATION_VARIABLE_COLUMN: variable.variable_name,
                         VALIDATION_HUMAN_VALUE_COLUMN: "" if human_value is None else str(human_value),
+                        "reviewer_note": "" if reviewer_note is None else str(reviewer_note),
                         VALIDATION_AI_VALUE_COLUMN: "" if ai_value is None else str(ai_value),
                         VALIDATION_AI_QUOTE_COLUMN: ai_quote,
+                        "strict_match": str(strict_match).lower(),
+                        "quote_aware_match": str(quote_aware_match).lower(),
+                        "quote_aware_reason": quote_aware_reason,
                         VALIDATION_ERROR_TYPE_COLUMN: "",
                         VALIDATION_ERROR_EFFECT_COLUMN: "",
                     }
@@ -994,12 +1407,21 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
     for variable in schema.variables:
         subset = comparison[comparison["variable"] == variable.variable_name]
         present_subset = subset[subset["human_present"]]
+        variable_paper_n = int(subset["paper_id"].nunique())
+        variable_present_paper_n = int(present_subset["paper_id"].nunique())
         concordance_n = int(len(present_subset))
         concordance_matches = int(present_subset["match"].sum()) if concordance_n else 0
+        strict_concordance_matches = int(present_subset["strict_match"].sum()) if concordance_n else 0
         accuracy_n = int(len(subset))
         accuracy_matches = int(subset["match"].sum()) if accuracy_n else 0
+        strict_accuracy_matches = int(subset["strict_match"].sum()) if accuracy_n else 0
         concordance = concordance_matches / concordance_n if concordance_n else math.nan
         accuracy = accuracy_matches / accuracy_n if accuracy_n else math.nan
+        strict_concordance = strict_concordance_matches / concordance_n if concordance_n else math.nan
+        strict_accuracy = strict_accuracy_matches / accuracy_n if accuracy_n else math.nan
+        quote_aware_rescued = int(
+            ((subset["strict_match"] == False) & (subset["quote_aware_match"] == True)).sum()  # noqa: E712
+        )
 
         if (not math.isnan(concordance) and concordance < 0.80) or (
             not math.isnan(accuracy) and accuracy < 0.90
@@ -1015,36 +1437,60 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
             {
                 VALIDATION_VARIABLE_COLUMN: variable.variable_name,
                 VALIDATION_CONSENSUS_COLUMN: variable.covidence_column_name,
+                "N_Papers": variable_paper_n,
+                "N_Papers_Human_Present": variable_present_paper_n,
                 "Concordance_Matches": concordance_matches,
                 "Concordance_Total_Human_Present": concordance_n,
                 "Concordance": concordance,
                 "Accuracy_Matches": accuracy_matches,
                 "Accuracy_Total_All_Parsed": accuracy_n,
                 "Accuracy": accuracy,
+                "Strict_Concordance_Matches": strict_concordance_matches,
+                "Strict_Concordance": strict_concordance,
+                "Strict_Accuracy_Matches": strict_accuracy_matches,
+                "Strict_Accuracy": strict_accuracy,
+                "Quote_Aware_Rescued": quote_aware_rescued,
             }
         )
 
     per_variable = pd.DataFrame(metric_rows)
     overall_present = comparison[comparison["human_present"]]
+    overall_paper_n = int(comparison["paper_id"].nunique())
+    overall_present_paper_n = int(overall_present["paper_id"].nunique())
     overall_concordance = (
         float(overall_present["match"].sum()) / float(len(overall_present)) if len(overall_present) else math.nan
     )
     overall_accuracy = float(comparison["match"].sum()) / float(len(comparison)) if len(comparison) else math.nan
+    strict_overall_concordance = (
+        float(overall_present["strict_match"].sum()) / float(len(overall_present)) if len(overall_present) else math.nan
+    )
+    strict_overall_accuracy = (
+        float(comparison["strict_match"].sum()) / float(len(comparison)) if len(comparison) else math.nan
+    )
+    quote_aware_rescued_total = int(
+        ((comparison["strict_match"] == False) & (comparison["quote_aware_match"] == True)).sum()  # noqa: E712
+    )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     metrics_path = _stage_file("extraction_accuracy_report.csv")
     audit_path = OUTPUT_DIR / "extraction_error_audit.csv"
+    cell_audit_path = _stage_file("extraction_validation_cell_audit.csv")
     report_path = _stage_file("extraction_accuracy_report.txt")
 
     per_variable.to_csv(metrics_path, index=False, encoding="utf-8")
+    comparison.to_csv(cell_audit_path, index=False, encoding="utf-8")
     pd.DataFrame(
         audit_rows,
         columns=[
             VALIDATION_PAPER_ID_COLUMN,
             VALIDATION_VARIABLE_COLUMN,
             VALIDATION_HUMAN_VALUE_COLUMN,
+            "reviewer_note",
             VALIDATION_AI_VALUE_COLUMN,
             VALIDATION_AI_QUOTE_COLUMN,
+            "strict_match",
+            "quote_aware_match",
+            "quote_aware_reason",
             VALIDATION_ERROR_TYPE_COLUMN,
             VALIDATION_ERROR_EFFECT_COLUMN,
         ],
@@ -1053,9 +1499,25 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
     lines = [
         "Extraction validation report (AI vs human gold standard)",
         f"Schema KB: {schema.kb_path}",
-        f"Human file: {human_path}",
+        f"Human source: {human_source_label}",
+        f"AI output dir: {ai_root}",
+        f"Human score companion columns used: {effective_use_human_score_columns}",
+        f"Quote-aware validation used for metrics: {quote_aware_metrics}",
         f"Variables parsed from KB: {len(schema.variables)}",
+        f"n_papers: {overall_paper_n}",
+        f"n_papers with human-present values: {overall_present_paper_n}",
         f"Total variable-paper comparisons: {len(comparison)}",
+        (
+            f"Strict value-only concordance lower bound: {strict_overall_concordance*100:.2f}%"
+            if not math.isnan(strict_overall_concordance)
+            else "Strict value-only concordance lower bound: n/a"
+        ),
+        (
+            f"Strict value-only accuracy lower bound: {strict_overall_accuracy*100:.2f}%"
+            if not math.isnan(strict_overall_accuracy)
+            else "Strict value-only accuracy lower bound: n/a"
+        ),
+        f"Quote-aware rescued comparisons: {quote_aware_rescued_total}",
         (
             f"Overall concordance: {overall_concordance*100:.2f}%"
             if not math.isnan(overall_concordance)
@@ -1074,6 +1536,8 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
         accuracy = row["Accuracy"]
         lines.append(
             f"- {row[VALIDATION_VARIABLE_COLUMN]} -> {row[VALIDATION_CONSENSUS_COLUMN]}: "
+            f"n_papers={int(row['N_Papers'])}, "
+            f"n_papers_human_present={int(row['N_Papers_Human_Present'])}, "
             f"concordance={'n/a' if math.isnan(concordance) else f'{concordance:.3f}'}, "
             f"accuracy={'n/a' if math.isnan(accuracy) else f'{accuracy:.3f}'}"
         )
@@ -1082,6 +1546,7 @@ def validate_extraction(consensus_path: Optional[str] = None) -> None:
     print("[validation] stage=data_extraction status=completed")
     print(f"[output] extraction_validation_report path={report_path.relative_to(ROOT)}")
     print(f"[output] extraction_accuracy_csv path={metrics_path.relative_to(ROOT)}")
+    print(f"[output] extraction_validation_cell_audit path={cell_audit_path.relative_to(ROOT)}")
     print(f"[output] extraction_error_audit path={audit_path.relative_to(ROOT)}")
 
 
@@ -1094,6 +1559,12 @@ def _parse_args():
     parser.add_argument("--included", help="Path to *_included_csv_* (full_text stage)")
     parser.add_argument("--excluded", help="Path to *_excluded_csv_* (full_text stage)")
     parser.add_argument("--consensus", help="Path to human gold-standard CSV for data_extraction")
+    parser.add_argument("--ai-output-dir", help="Path to data_extraction output folder with per-paper JSONL files")
+    parser.add_argument(
+        "--use-human-score-columns",
+        action="store_true",
+        help="Use <covidence_column_name>__human_score companion columns as match decisions.",
+    )
     return parser.parse_args()
 
 
@@ -1110,7 +1581,7 @@ class ValidationEngine:
 
         args = args or _parse_args()
         if self.stage == "data_extraction":
-            validate_extraction(args.consensus)
+            validate_extraction(args.consensus, args.ai_output_dir, args.use_human_score_columns)
             return
 
         validate_screening(self.stage, args)

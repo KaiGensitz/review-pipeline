@@ -73,6 +73,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: Data extraction preflights every included per-paper folder before QC sampling, creating `full_text_normalized.txt`, `full_text_artifact.json`, `data_extraction_artifact.json`, and `data_extraction_selected_chunks.jsonl` when needed.
 - Human readable hint: `DATA_EXTRACTION_SUPPLEMENTAL_CITED_EVIDENCE` controls optional per-paper cited-source evidence folders; supplied `.txt`, `.md`, or `.pdf` protocol/development/source evidence is appended to data-extraction prompts with source labels and also appears in input traces.
 - Human readable hint: With `data_extraction_evidence_mode="full_text"`, `DATA_EXTRACTION_SCHEMA_FILE` is the strongest extraction contract; `knowledge-base/data_extraction_pos-neg_examples.csv` still helps retrieval/ranking and becomes especially important when extraction uses `selected_chunks`.
+- Human readable hint: `data_extraction_hybrid_rescue_enabled` keeps full-text extraction as the primary path and optionally adds a schema-anchor semantic second opinion for user-configured variables/domains, writing separate hybrid audit files instead of silently replacing the main extraction.
 - Human readable hint: Data-extraction schema instructions include generic demographic safeguards for denominator consistency, full-cohort-over-subgroup preference for overall fields, same-table population sweeps, per-arm protocol sample-size arithmetic, repeated-row age/gender table counting, and separate race/ethnicity preservation.
 - Human readable hint: The `context.evidence_source` schema variable now means publication/source legitimacy type, such as peer-reviewed journal article, conference proceeding, preprint, trial registration, thesis/dissertation, report, or other grey literature, not an article-internal section name.
 - Human readable hint: Data extraction defaults to `data_extraction_split_by_domain=True` with optional `data_extraction_domain_groups`; population and context are kept as focused batches because they depend on table, recruitment, and location evidence.
@@ -147,6 +148,19 @@ This appendix provides function-level explanations for scripts and classes in th
 
 #### _artifact_from_latest_base_outputs(stage, run_label)
 - Human readable hint: synthesize a minimal artifact when existing outputs already exist on disk.
+- Human readable hint: data_extraction QC reuse is based on completed per-paper `data_extraction_results.jsonl` files, because this stage does not write eligibility JSONL outputs.
+
+#### _normalize_qc_paper_id(value)
+- Human readable hint: normalize paper identifiers from QC sample CSVs and result files so `#22`, `22`, and `22.0` compare as the same paper.
+
+#### _read_qc_sample_ids(stage)
+- Human readable hint: read the latest stage QC sample CSV through configured metadata aliases instead of hardcoded export headers.
+
+#### _data_extraction_result_ids(stage)
+- Human readable hint: collect completed data_extraction paper IDs from per-paper result JSONL files.
+
+#### _data_extraction_qc_screened_already(stage)
+- Human readable hint: decide whether a data_extraction QC sample can be reused by checking that every QC paper already has a result file.
 
 #### _update_index_from_artifact(stage, artifact, attempt_index)
 - Human readable hint: refresh the eligibility index rows for all decision splits from a run artifact.
@@ -383,6 +397,10 @@ This appendix provides function-level explanations for scripts and classes in th
 
 ### Class ValidationEngine
 - Human readable hint: one-class validation orchestrator for screening and extraction stages.
+- Human readable hint: data-extraction validation reads reviewer binary scoring directly from `input/data_extraction_human_review_qc_sample_binary_scoring.csv` when no explicit consensus file is supplied, keeping generated gold-standard side files out of the normal workflow.
+- Human readable hint: validation text normalization standardizes Unicode punctuation such as nonbreaking hyphens, dash variants, smart quotes, and nonbreaking spaces before exact/alias/fuzzy comparison, so typographic variants such as `GPT‑4` and `GPT-4` do not create false mismatches.
+- Human readable hint: data-extraction reports include `n_papers`, per-variable paper counts, strict value-only lower-bound metrics, and quote-aware metrics that can compare AI values and AI quotes against reviewer-derived values and reviewer notes/corrections.
+- Human readable hint: quote-aware validation is controlled by `DATA_EXTRACTION_VALIDATION_MATCH_SETTINGS`; language/equivalence bridges such as German reviewer notes versus English AI wording belong in user-editable `DATA_EXTRACTION_VALIDATION_VALUE_ALIASES`, not in `pipeline/` code.
 - __init__ parameters: stage
 #### ValidationEngine.__init__(stage)
 - Human readable hint: __init__ stores the active stage used to route validation.
@@ -480,8 +498,41 @@ This appendix provides function-level explanations for scripts and classes in th
 #### _normalization_key(value, variable)
 - Human readable hint: coerce AI and human-export values into comparable typed values using the KB variable type.
 
-#### validate_extraction(consensus_path)
+#### _human_score_column_name(consensus_column_name)
+- Human readable hint: companion columns can carry human 0/1 judgements without changing schema columns.
+
+#### _parse_human_cell_score(value)
+- Human readable hint: accept common binary reviewer score encodings for data-extraction cells.
+
+#### _validation_alias_match(human_value, ai_value, variable)
+- Human readable hint: apply user-editable semantic equivalence groups from `DATA_EXTRACTION_VALIDATION_VALUE_ALIASES` after plain normalization.
+
+#### _validation_bool_setting(key, default)
+- Human readable hint: keep optional fuzzy validation behavior explicit and user-editable; fuzzy similarity is disabled for primary metric counting by default.
+
+#### _extraction_values_match(human_value, ai_value, variable)
+- Human readable hint: compare AI output against reviewer-derived ground truth, including configured validation aliases.
+
+#### _factual_text_match(human_value, ai_value, variable)
+- Human readable hint: optional exploratory helper for reviewer-derived prose fields; it is not used for primary accuracy/concordance unless `count_fuzzy_matches_in_metrics=True`.
+
+#### _human_score_columns_present(human_wide, variables)
+- Human readable hint: detect generated reviewer 0/1 score columns for explicit legacy validation mode; default validation uses reviewer-derived ground truth values instead.
+
+#### _latest_binary_review_source()
+- Human readable hint: prefer `input/data_extraction_human_review_qc_sample_binary_scoring.csv` as the editable source of truth for data-extraction validation.
+
+#### _build_gold_standard_frame_from_binary_source(source_path, schema_path)
+- Human readable hint: convert the editable binary reviewer sheet into an in-memory validation table without writing derived gold-standard files.
+
+#### _load_extraction_human_wide(consensus_path, schema_path)
+- Human readable hint: default validation reads the editable input scoring CSV directly; explicit consensus files are only legacy/special-case inputs.
+
+#### validate_extraction(consensus_path, ai_output_dir)
 - Human readable hint: validate extraction outputs against a human gold-standard CSV by mapping each KB `variable_name` to its exact `covidence_column_name`.
+- Optional `ai_output_dir` validates archived data-extraction runs without moving files into the active output folder.
+- If the editable binary scoring CSV is present, it is converted into reviewer-derived ground truth first: accepted AI values for score `1`, quote-row corrections for score `0`, and non-evaluable cells skipped.
+- The optional `--use-human-score-columns` mode remains available for legacy binary-score validation, but default validation compares current AI output against human ground-truth values.
 - Concordance is exact matches among human-present values divided by human-present values, excluding `Not Available` and `n/a`.
 - Accuracy is exact matches plus correctly identified missing values divided by all variable-paper comparisons parsed from the KB.
 - Variables below concordance `<0.80` or accuracy `<0.90` log a critical `Prompt Refinement Triggered` warning.
@@ -492,6 +543,35 @@ This appendix provides function-level explanations for scripts and classes in th
 
 #### run_validation()
 - Human readable hint: Compatibility wrapper for direct execution.
+
+## pipeline/additions/human_gold_standard_builder.py
+
+### Class SchemaVariable
+- Human readable hint: minimal schema row needed to shape a validation-ready human table.
+### Class ReviewedPaperBlock
+- Human readable hint: one AI row plus its following human 0/1 score and note rows.
+### Class ReviewSheetReader
+- Human readable hint: parse a reviewer sheet without hardcoding study-specific variables.
+### Class SchemaColumnMatcher
+- Human readable hint: map schema variables to reviewer-sheet columns by generic normalized labels.
+### Class HumanGoldStandardBuilder
+- Human readable hint: convert binary reviewer judgements into stats-engine consensus inputs.
+- Human readable hint: the editable `input/data_extraction_human_review_qc_sample_binary_scoring.csv` remains the source of truth; normal validation converts it in memory and does not write derived gold-standard files.
+
+### Script-level functions
+- Human readable hint: compatibility wrappers or helper functions used by the primary class.
+
+#### parse_args()
+- Human readable hint: CLI keeps source files user-supplied instead of hardcoded in pipeline code.
+
+#### HumanGoldStandardBuilder._find_reviewed_blocks(headers, rows)
+- Human readable hint: detect reviewed paper blocks from cleaned paper-id cells followed by `0/1` score and `quote` rows, while still supporting older `Reviewer: paper_id` labels.
+
+#### HumanGoldStandardBuilder._parse_paper_id_cell(paper_id_cell)
+- Human readable hint: parse both cleaned `22` and older `Marc: 22` paper-id cells into a paper ID and optional reviewer hint.
+
+#### main()
+- Human readable hint: command-line entrypoint for repeatable human-gold generation.
 
 ## pipeline/additions/generate_cleaned_hybrid_kb_draft.py
 
@@ -734,6 +814,9 @@ This appendix provides function-level explanations for scripts and classes in th
 #### PaperScreeningPipeline._call_data_extraction_domains_async(context, paper_id)
 - Human readable hint: run data extraction as one smaller Structured Outputs request per configured KB domain group, send only domain-scoped evidence hints for that call, then merge validated domain payloads.
 
+#### PaperScreeningPipeline._maybe_run_data_extraction_hybrid_rescue_async(paper, extraction_payload, primary_context)
+- Human readable hint: after primary full-text data extraction succeeds, optionally build schema-anchor semantic evidence for configured variables/domains, call the same domain-scoped validator, and write auditable primary-vs-rescue decisions without changing the primary aggregate table.
+
 #### PaperScreeningPipeline._get_openai_client(base_url)
 - Human readable hint: Create a configured OpenAI API client.
 
@@ -784,6 +867,23 @@ This appendix provides function-level explanations for scripts and classes in th
 
 #### PaperScreeningPipeline._build_extraction_payload(paper, llm_decision)
 - Human readable hint: validate data-extraction JSON strictly against the KB-generated schema; the older prompt-field fallback path has been removed.
+
+## pipeline/core/extraction_hybrid_rescue.py
+
+### Class HybridRescueConfig
+- Human readable hint: reads optional hybrid rescue settings from `LLM_SETTINGS`, including rescue Top-K, threshold, target variables/domains, and full-text-preferred variables.
+
+### Class HybridRescuePlanner
+- Human readable hint: selects variables for semantic second opinion from schema variables and user-editable config; no topic terms or field aliases are embedded in pipeline code.
+
+### Class HybridSemanticEvidenceBuilder
+- Human readable hint: chunks normalized evidence, uses `semantic_anchors` from the active schema CSV plus structural NEG examples from the configured stage KB, and formats only top-ranked chunks for rescue prompts.
+
+### Class HybridRescueSelector
+- Human readable hint: keeps the primary full-text value unless semantic rescue has explicit quote support and the primary value is missing, quote-less, or clearly weaker under generic selection rules.
+
+### Class HybridRescueRunWriter
+- Human readable hint: writes `data_extraction_hybrid_rescue_audit.csv`, `data_extraction_hybrid_selected_values.csv`, and `data_extraction_hybrid_summary.md` incrementally during a run.
 
 ## pipeline/core/prompt_context.py
 
@@ -884,8 +984,20 @@ This appendix provides function-level explanations for scripts and classes in th
 
 ## pipeline/core/run_extraction.py
 
+### Class ExtractionEvidenceBundle
+- Human readable hint: carries one direct-run extraction evidence payload, including whether schema evidence hints still apply and whether the source is full text or semantic retrieval.
+
+### Class SchemaSemanticAnchorFactory
+- Human readable hint: builds POS embedding targets only from `semantic_anchors` in the active `DATA_EXTRACTION_SCHEMA_FILE`; no review-topic anchors live in pipeline Python.
+
+### Class StructuralNegativeExampleFactory
+- Human readable hint: loads optional NEG structural-noise examples from the active stage KB so embedding retrieval can down-rank boilerplate without using prompt-rule negatives.
+
+### Class SemanticExtractionEvidenceAssembler
+- Human readable hint: chunks normalized and supplemental evidence, scores chunks with `EmbeddingBackend` and `RelevanceSelector`, and formats only top-ranked chunks for the direct data-extraction prompt.
+
 ### Script-level functions
-- Human readable hint: async data-extraction entrypoint that keeps direct execution (`python -m pipeline.core.run_extraction`) while delegating schema and file handling to smaller modules.
+- Human readable hint: async data-extraction entrypoint that keeps direct execution (`python -m pipeline.core.run_extraction`) while delegating schema, semantic chunk selection, and file handling to smaller modules.
 
 #### _truncate_to_budget(text, max_tokens)
 - Human readable hint: trim evidence text using a lightweight token estimate before sending it to the model.
@@ -897,10 +1009,10 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: send one extraction prompt with the KB-generated OpenAI `response_format` and return the raw JSON text.
 
 #### _process_paper(...)
-- Human readable hint: process one paper with bounded concurrency, CSV-schema validation, fallback output, and append-only errors; grouped mode uses the same schema in smaller configured batches.
+- Human readable hint: process one paper with bounded concurrency, semantic evidence assembly, CSV-schema validation, fallback output, and append-only errors; grouped mode reuses the same constrained chunk evidence across configured domain batches.
 
 #### run_extraction()
-- Human readable hint: direct async runner for prepared `input/per_paper_data_extraction/` folders.
+- Human readable hint: direct async runner for prepared `input/per_paper_data_extraction/` folders; when `data_extraction_semantic_rag_enabled=True`, it embeds chunks against schema-owned semantic anchors before calling the LLM.
 
 ## pipeline/additions/export_extraction_tables.py
 
@@ -938,7 +1050,8 @@ This appendix provides function-level explanations for scripts and classes in th
 ## pipeline/core/extraction_schema.py
 
 ### Class ExtractionVariable
-- Human readable hint: one row from `knowledge-base/data_extraction_schema.csv`, including the human consensus/export column used for validation.
+- Human readable hint: one row from `knowledge-base/data_extraction_schema.csv`, including the human consensus/export column used for validation, semantic anchors used by embedding retrieval, and the default user-editable extraction guidance fields.
+- Human readable hint: active data-extraction schemas should include `human_reviewer_instruction`, `evidence_profile`, and `do_not_infer_from`; these columns are rendered into the LLM field instructions and used as schema-derived evidence-hint terms. The parser tolerates older schemas without them for compatibility, but the project default is to keep them in the KB rather than in `pipeline/` code.
 
 ### Class SchemaEvidenceHintConfig
 - Human readable hint: stores user-tunable limits for the compact schema-guided evidence map inserted before long normalized text.
@@ -951,7 +1064,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: combines two sources at runtime: the prompt provides the human-readable research framework, while the schema CSV provides the exact machine contract, default missing-data payload, and optional OpenAI Structured Outputs schema.
 
 #### DynamicExtractionSchema.from_kb(kb_path)
-- Human readable hint: read the configured extraction schema CSV, validate required columns, and build the grouped extraction model.
+- Human readable hint: read the configured extraction schema CSV, validate required columns, preserve semantic anchors and reviewer guidance metadata when present, and build the grouped extraction model.
 
 #### DynamicExtractionSchema.from_prompt(prompt_text)
 - Human readable hint: compatibility shim; extraction schemas now come from the CSV KB, not from prompt JSON.
@@ -985,7 +1098,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: resolve the user-configured extraction schema path from `config/user_orchestrator.py`, falling back to `knowledge-base/data_extraction_schema.csv`.
 
 #### load_extraction_variables(kb_path)
-- Human readable hint: parse required KB columns: `domain`, `variable_name`, `variable_type`, `allowed_options`, `instruction`, and `covidence_column_name`.
+- Human readable hint: parse required KB columns: `domain`, `variable_name`, `variable_type`, `allowed_options`, `instruction`, and `covidence_column_name`, plus default project guidance columns `semantic_anchors`, `human_reviewer_instruction`, `evidence_profile`, and `do_not_infer_from` when available.
 
 #### format_domain_overview(variables)
 - Human readable hint: create the prompt-visible domain list from the active schema CSV so users can see the extraction plan.
