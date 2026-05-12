@@ -1246,6 +1246,8 @@ def _load_extraction_human_wide(
 
     if consensus_path:
         path = Path(consensus_path)
+        if path.name.startswith("data_extraction_human_review_qc_sample_binary_scoring"):
+            return _build_gold_standard_frame_from_binary_source(path, schema_path), str(path)
         return pd.read_csv(path), str(path)
 
     binary_source = _latest_binary_review_source()
@@ -1303,6 +1305,17 @@ def validate_extraction(
     human_wide = _clean_cols(human_wide)
     human_wide = _apply_human_export_aliases(human_wide, schema.variables)
     human_wide["paper_id"] = _normalize_id_column(human_wide)
+    # human readable hint: data-extraction validation is scoped to the human-reviewed QC batch only.
+    qc_ids = _load_qc_sample_ids(None)
+    if qc_ids:
+        scoped_human = human_wide[human_wide["paper_id"].isin(qc_ids)].copy()
+        if not scoped_human.empty:
+            human_wide = scoped_human
+        else:
+            print(
+                "[qc] Data-extraction QC-ID filtering produced zero overlap; "
+                "validation will use human-reviewed rows from the source file."
+            )
     missing_columns = [
         variable.covidence_column_name
         for variable in schema.variables
@@ -1501,6 +1514,7 @@ def validate_extraction(
         f"Schema KB: {schema.kb_path}",
         f"Human source: {human_source_label}",
         f"AI output dir: {ai_root}",
+        "Validation scope: human-reviewed QC sample rows only",
         f"Human score companion columns used: {effective_use_human_score_columns}",
         f"Quote-aware validation used for metrics: {quote_aware_metrics}",
         f"Variables parsed from KB: {len(schema.variables)}",

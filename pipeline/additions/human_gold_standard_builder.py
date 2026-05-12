@@ -161,6 +161,38 @@ class SchemaColumnMatcher:
 class HumanGoldStandardBuilder:
     """human readable hint: convert binary reviewer judgements into stats-engine consensus inputs."""
 
+    GENERIC_REVIEW_COMMENT_PATTERNS = (
+        r"\bmissing\b",
+        r"\bnot\s+(?:complete|completely|fully)\b",
+        r"\bincomplete\b",
+        r"\bminor\b",
+        r"\bnegligible\b",
+        r"\btoo\s+generic\b",
+        r"\brepeats?\b.*\b(?:aim|objective|goal)s?\b",
+        r"\bdoes\s+not\s+match\b",
+        r"\bno\s+direct\s+quote\b",
+        r"\bnot\s+separately\s+(?:analysed|analyzed|reported|evaluated)\b",
+        r"\bnot\s+reported\s+separately\b",
+        r"\bfragment\b",
+        r"\bunclear\b",
+        r"\bfehlt\b",
+        r"\bfehlen\b",
+        r"\bnicht\s+(?:komplett|vollständig|gesondert)\b",
+        r"\bvernachlässig",
+        r"\bungenauigkeit\b",
+        r"\bwiederholt\b.*\b(?:ziel|ziele)\b",
+        r"\bstimmt\s+nicht\b",
+    )
+    MANUSCRIPT_EVIDENCE_PATTERNS = (
+        r"\b(?:page|p\.|pp\.|seite|s\.)\s*\d+",
+        r"\b(?:table|tab\.|figure|fig\.|section|methods?|results?|discussion|abstract)\b",
+        r"[\"“”„]",
+        r"\bdoi\b",
+        r"\bn\s*=\s*\d+",
+        r"\b\d+(?:\.\d+)?\s*%",
+        r"\b\d+\s*/\s*\d+\b",
+    )
+
     def __init__(self, source_path: Path, schema_path: Path, output_dir: Path) -> None:
         self.source_path = source_path
         self.schema_path = schema_path
@@ -367,12 +399,41 @@ class HumanGoldStandardBuilder:
         if human_score == "1":
             return source_value, "true", "reviewer_accepted_source_value"
         if human_score == "0":
-            if human_note:
+            if human_note and HumanGoldStandardBuilder._note_can_serve_as_ground_truth(human_note):
                 return human_note, "true", "reviewer_quote_correction"
+            if human_note:
+                return "", "false", "reviewer_comment_without_extractable_ground_truth"
             return "", "false", "reviewer_rejected_without_correction"
-        if human_note:
+        if human_note and HumanGoldStandardBuilder._note_can_serve_as_ground_truth(human_note):
             return human_note, "true", "reviewer_quote_without_binary_score"
+        if human_note:
+            return "", "false", "reviewer_comment_without_extractable_ground_truth"
         return "", "false", "not_human_reviewed"
+
+    @staticmethod
+    def _note_can_serve_as_ground_truth(note: str) -> bool:
+        """human readable hint: keep manuscript-derived corrections but ignore reviewer meta-comments."""
+
+        text = re.sub(r"\s+", " ", str(note or "").strip())
+        if not text:
+            return False
+        lowered = text.casefold()
+        token_count = len(re.findall(r"\w+", lowered))
+        has_evidence_signal = any(
+            re.search(pattern, lowered, flags=re.IGNORECASE)
+            for pattern in HumanGoldStandardBuilder.MANUSCRIPT_EVIDENCE_PATTERNS
+        )
+        has_generic_comment = any(
+            re.search(pattern, lowered, flags=re.IGNORECASE)
+            for pattern in HumanGoldStandardBuilder.GENERIC_REVIEW_COMMENT_PATTERNS
+        )
+        if has_generic_comment and not has_evidence_signal:
+            return False
+        if re.match(r"^(?:and|or|und|oder)\b", lowered) and not has_evidence_signal:
+            return False
+        if token_count <= 1 and not has_evidence_signal:
+            return False
+        return True
 
     @staticmethod
     def _best_plain_header(headers: list[str], label: str) -> int | None:

@@ -142,7 +142,15 @@ def _existing_qc_files(
 
     Note: QC sample reuse ensures the same list is validated.
     """
-    qc_tag = "qc_sample" if run_label == "qc_sample" else run_label
+    # human readable hint: remaining runs must reuse the validated QC batch, not look for a remaining-batch file.
+    if run_label == "qc_sample":
+        qc_tag = "qc_sample"
+    elif run_label.endswith("_remaining_sample"):
+        qc_tag = f"{run_label[: -len('_remaining_sample')]}_qc_sample"
+    elif run_label == "remaining_sample":
+        qc_tag = "qc_sample"
+    else:
+        qc_tag = run_label
     matches = sorted(stage_root.glob(f"{stage_prefix}{qc_tag}_batch_*.csv"))
     if not matches:
         return None, None

@@ -1,10 +1,23 @@
-# Data Extraction Validation Justification
+# Pipeline Validation Justification
 
-Living methodological note for manuscript preparation. This file records the rationale for the data-extraction validation approach and should be updated whenever the validation logic, human-review source, schema definitions, or adjudication procedure changes.
+Living methodological note for manuscript preparation. This file records the rationale for the pipeline validation approach, with emphasis on AI-assisted data extraction. It should be updated whenever the validation logic, human-review source, schema definitions, QC/remaining-sample procedure, or adjudication procedure changes.
 
 ## Current Manuscript Draft Paragraph
 
-For AI-assisted data extraction, we will follow the validation approach described by Gartlehner and colleagues. Included full texts will be assessed by the machine-to-machine pipeline using normalized full-text evidence as the primary extraction source. Human-extracted data from a four-paper validation subset, corresponding to approximately 5% of the 94 included papers, will serve as the gold standard. The extraction schema will define each variable, expected value type, and consensus-column mapping. Concordance will be defined as the proportion of data items factually congruent between the pipeline and human reviewers among human-present items, whereas accuracy will additionally account for correctly identified unavailable data. Human reviewer judgements will be converted into structured validation inputs in memory and compared with pipeline outputs using schema-aware validation. Error types, including missed data, misallocated data, unsupported values, and fabricated data, as well as their potential impact, will be classified by human reviewers. Minimum performance thresholds are set at concordance >0.80 and accuracy >0.90 for key extraction domains. Failure to meet these thresholds will trigger targeted refinement of the schema or prompt for the affected variable before extraction of the remaining records.
+For AI-assisted data extraction, we will follow the validation approach described by Gartlehner and colleagues. Included full texts will be assessed by the machine-to-machine pipeline using normalized full-text evidence as the primary extraction source. Human-extracted data from a four-paper QC validation subset, corresponding to approximately 5% of the 94 included papers, will serve as the validation gold standard. The extraction schema will define each variable, expected value type, and consensus-column mapping. Concordance will be defined as the proportion of data items factually congruent between the pipeline and human reviewers among human-present items, whereas accuracy will additionally account for correctly identified unavailable data. Human reviewer judgements will be converted into structured validation inputs in memory and compared with pipeline outputs using schema-aware and quote-aware validation. Generic reviewer comments are not treated as extractable gold-standard values unless they contain direct manuscript quotes or clear manuscript-derived replacement information. Error types, including missed data, misallocated data, unsupported values, and fabricated data, as well as their potential impact, will be classified by human reviewers where needed. Minimum performance thresholds are set at concordance >0.80 and accuracy >0.90 for key extraction domains. Failure to meet these thresholds in the QC subset will trigger targeted refinement of the schema or prompt before extraction of the non-QC records.
+
+## Current Implemented Procedure
+
+Date: 2026-05-11.
+
+The active pipeline now implements four safeguards that define the current validation procedure:
+
+- The QC subset is the validation subset. Validation is intentionally restricted to the human-reviewed QC papers and is not rerun as a formal accuracy/concordance estimate on the non-reviewed remaining sample.
+- The remaining-sample run reuses the persisted QC batch IDs and excludes those papers from post-QC processing. This avoids wasting resources by re-extracting papers that have already been screened for QC.
+- The editable source of truth remains `input/data_extraction_human_review_qc_sample_binary_scoring.csv`. The stats engine can read this file directly and convert it in memory; persistent derived gold-standard CSV files are not required for normal validation.
+- Reviewer note rows are used as gold-standard replacements only when they contain direct manuscript quotes, manuscript location signals, numeric/table evidence, or clear manuscript-derived replacement values. Generic comments such as "not complete", "negligible", "not separately analysed", or comments about the reviewer judgement are excluded from metric denominators instead of being treated as expected extracted values.
+
+The current implementation also strengthens extraction guidance for the variables that remained most error-prone in QC: study design, conflicts of interest, ethnicity/race detail, smartphone delivery, AI transparency, inclusivity, development process, setting, implications, and limitations.
 
 ## Source of Truth
 
@@ -17,8 +30,11 @@ This file contains one AI output row per reviewed paper, followed by a binary re
 The validation engine converts the human scoring CSV in memory:
 
 - score `1`: the reviewed value in the AI row is accepted as human ground truth;
-- score `0`: the reviewer quote/correction row is used as the human ground truth when present;
+- score `0`: the reviewer quote/correction row is used as the human ground truth only when it contains direct manuscript-derived replacement information;
+- score `0` plus a generic reviewer comment: the cell is marked non-evaluable for formal metrics;
 - missing or non-evaluable cells are excluded from cell-level comparisons.
+
+This distinction is necessary because some human-review rows contain reviewer meta-comments rather than replacement extraction values. Treating those comments as gold-standard content would understate pipeline performance and create invalid comparisons.
 
 ## Concordance and Accuracy
 
