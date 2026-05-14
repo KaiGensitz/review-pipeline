@@ -17,14 +17,14 @@ import re
 import unicodedata
 from numbers import Real
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, cast
 
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 from statsmodels.stats.proportion import proportion_confint
 
-# human readable hint: proportion_confint supplies exact (Clopper-Pearson) binomial CIs (Seabold, S., & Perktold, J., 2010).
+# human readable hint: proportion_confint supports exact (Clopper-Pearson) and Wilson binomial CIs.
 
 from config.user_orchestrator import (
     CURRENT_STAGE,
@@ -531,6 +531,25 @@ def _prop_ci(k: float, n: float, alpha: float = 0.05) -> Tuple[float, float]:
     if n_val == 0:
         return (math.nan, math.nan)
     lower, upper = proportion_confint(count=k_val, nobs=n_val, alpha=alpha, method="beta")
+    return float(lower), float(upper) # type: ignore
+
+
+def _prop_ci_wilson(k: float, n: float, alpha: float = 0.05) -> Tuple[float, float]:
+    """human readable hint: Wilson CI for binomial proportions."""
+
+    if (
+        not isinstance(k, Real)
+        or isinstance(k, bool)
+        or not isinstance(n, Real)
+        or isinstance(n, bool)
+    ):
+        raise TypeError("k and n must be real scalar numbers")
+
+    k_val = float(k)
+    n_val = float(n)
+    if n_val == 0:
+        return (math.nan, math.nan)
+    lower, upper = proportion_confint(count=k_val, nobs=n_val, alpha=alpha, method="wilson")
     return float(lower), float(upper) # type: ignore
 
 
@@ -1225,7 +1244,8 @@ def _build_gold_standard_frame_from_binary_source(source_path: Path, schema_path
         schema_path=schema_path,
         output_dir=OUTPUT_DIR,
     ).build()
-    return pd.DataFrame(build["wide_rows"])
+    wide_rows = cast(list[dict[str, str]], build["wide_rows"])
+    return pd.DataFrame(wide_rows)
 
 
 def _resolve_extraction_human_path(consensus_path: Optional[str], schema_path: Path | None = None) -> Path:
@@ -1432,6 +1452,8 @@ def validate_extraction(
         accuracy = accuracy_matches / accuracy_n if accuracy_n else math.nan
         strict_concordance = strict_concordance_matches / concordance_n if concordance_n else math.nan
         strict_accuracy = strict_accuracy_matches / accuracy_n if accuracy_n else math.nan
+        concordance_ci = _prop_ci_wilson(concordance_matches, concordance_n)
+        accuracy_ci = _prop_ci_wilson(accuracy_matches, accuracy_n)
         quote_aware_rescued = int(
             ((subset["strict_match"] == False) & (subset["quote_aware_match"] == True)).sum()  # noqa: E712
         )
@@ -1455,9 +1477,13 @@ def validate_extraction(
                 "Concordance_Matches": concordance_matches,
                 "Concordance_Total_Human_Present": concordance_n,
                 "Concordance": concordance,
+                "Concordance_CI_Lower": concordance_ci[0],
+                "Concordance_CI_Upper": concordance_ci[1],
                 "Accuracy_Matches": accuracy_matches,
                 "Accuracy_Total_All_Parsed": accuracy_n,
                 "Accuracy": accuracy,
+                "Accuracy_CI_Lower": accuracy_ci[0],
+                "Accuracy_CI_Upper": accuracy_ci[1],
                 "Strict_Concordance_Matches": strict_concordance_matches,
                 "Strict_Concordance": strict_concordance,
                 "Strict_Accuracy_Matches": strict_accuracy_matches,
@@ -1474,6 +1500,8 @@ def validate_extraction(
         float(overall_present["match"].sum()) / float(len(overall_present)) if len(overall_present) else math.nan
     )
     overall_accuracy = float(comparison["match"].sum()) / float(len(comparison)) if len(comparison) else math.nan
+    overall_concordance_ci = _prop_ci_wilson(int(overall_present["match"].sum()), int(len(overall_present)))
+    overall_accuracy_ci = _prop_ci_wilson(int(comparison["match"].sum()), int(len(comparison)))
     strict_overall_concordance = (
         float(overall_present["strict_match"].sum()) / float(len(overall_present)) if len(overall_present) else math.nan
     )
@@ -1533,14 +1561,16 @@ def validate_extraction(
         ),
         f"Quote-aware rescued comparisons: {quote_aware_rescued_total}",
         (
-            f"Overall concordance: {overall_concordance*100:.2f}%"
+            f"Overall concordance (Wilson 95% CI): {overall_concordance*100:.2f}% "
+            f"(95% CI {overall_concordance_ci[0]*100:.2f}-{overall_concordance_ci[1]*100:.2f}%)"
             if not math.isnan(overall_concordance)
-            else "Overall concordance: n/a"
+            else "Overall concordance (Wilson 95% CI): n/a"
         ),
         (
-            f"Overall accuracy: {overall_accuracy*100:.2f}%"
+            f"Overall accuracy (Wilson 95% CI): {overall_accuracy*100:.2f}% "
+            f"(95% CI {overall_accuracy_ci[0]*100:.2f}-{overall_accuracy_ci[1]*100:.2f}%)"
             if not math.isnan(overall_accuracy)
-            else "Overall accuracy: n/a"
+            else "Overall accuracy (Wilson 95% CI): n/a"
         ),
         "",
         "Per-variable thresholds: Concordance >= 0.80 and Accuracy >= 0.90.",

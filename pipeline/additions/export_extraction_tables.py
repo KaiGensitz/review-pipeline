@@ -19,6 +19,7 @@ from config.user_orchestrator import (
     DATA_EXTRACTION_QUOTE_COLUMN_ALIASES,
     PATH_SETTINGS,
 )
+from pipeline.core.extraction_io import PerPaperFileIndex
 from pipeline.core.extraction_schema import DynamicExtractionSchema, ExtractionVariable
 from pipeline.core.metadata_aliases import read_metadata_value
 
@@ -225,8 +226,12 @@ def _load_folder_metadata(paper_id: str, input_paper_dir: Path) -> dict[str, Any
     for folder in sorted(input_paper_dir.glob(f"{clean_id}_*")):
         if not folder.is_dir():
             continue
-        for name in ("data_extraction_artifact.json", "full_text_artifact.json"):
-            artifact = folder / name
+        # human readable hint: prefer ID-prefixed per-paper artifacts while reading legacy names as fallback.
+        file_index = PerPaperFileIndex(folder, paper_id=clean_id)
+        artifact_candidates: list[Path] = []
+        for stage_name in ("data_extraction", "full_text"):
+            artifact_candidates.extend(file_index.artifact_candidates(stage_name, paper_id=clean_id))
+        for artifact in artifact_candidates:
             if not artifact.exists():
                 continue
             try:

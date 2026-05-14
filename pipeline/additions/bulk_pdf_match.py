@@ -17,6 +17,7 @@ from datetime import datetime
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from pipeline.core.extraction_io import PerPaperFileIndex
 from pipeline.core.metadata_aliases import read_metadata_value
 
 
@@ -89,10 +90,11 @@ def _load_targets(target_root: Path, overwrite: bool) -> list[FolderTarget]:
         try:
             import json
 
-            artifact_candidates = [
-                folder / "full_text_artifact.json",
-                folder / "data_extraction_artifact.json",
-            ]
+            # human readable hint: matcher metadata follows the canonical ID-prefixed artifact names first.
+            file_index = PerPaperFileIndex(folder)
+            artifact_candidates: list[Path] = []
+            for stage_name in ("full_text", "data_extraction"):
+                artifact_candidates.extend(file_index.artifact_candidates(stage_name))
             for artifact_path in artifact_candidates:
                 if not artifact_path.exists():
                     continue
@@ -356,7 +358,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--target-folders",
         default="input/per_paper_full_text",
-        help="Directory containing per-paper folders with full_text_artifact.json metadata.",
+        help="Directory containing per-paper folders with <paper_id>_full_text_artifact.json metadata.",
     )
     parser.add_argument(
         "--apply",

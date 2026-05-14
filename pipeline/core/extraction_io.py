@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,160 @@ from pipeline.selection.pdf_parser import extract_markdown_from_pdf_with_level
 
 
 STAGE = "data_extraction"
+
+
+@dataclass
+class PerPaperFileIndex:
+    """human readable hint: one cached view of a per-paper folder's canonical and legacy filenames."""
+
+    folder: Path
+    paper_id: str | None = None
+
+    def __post_init__(self) -> None:
+        self.folder = Path(self.folder)
+        self.paper_id = self.sanitize_paper_id(self.paper_id or self.paper_id_hint(self.folder))
+        self.refresh()
+
+    def refresh(self) -> None:
+        """human readable hint: refresh the cached filename map after a write or rename."""
+
+        try:
+            files = [path for path in self.folder.iterdir() if path.is_file()]
+        except Exception:
+            files = []
+        self._files_by_name = {path.name: path for path in files}
+
+    @staticmethod
+    def sanitize_paper_id(paper_id: str | None) -> str:
+        """human readable hint: keep paper IDs usable in filenames without encoding export-vendor facts."""
+
+        safe = "".join(ch for ch in str(paper_id or "").lstrip("#") if ch.isalnum() or ch in {"_", "-"})
+        return safe or "paper"
+
+    @classmethod
+    def paper_id_hint(cls, folder: Path) -> str:
+        """human readable hint: infer the ID from the generic <ID>_ folder naming convention."""
+
+        raw_name = Path(folder).name
+        if "_" in raw_name:
+            raw_name = raw_name.split("_", 1)[0]
+        return cls.sanitize_paper_id(raw_name)
+
+    @classmethod
+    def prefixed_filename(cls, paper_id: str | None, name: str) -> str:
+        """human readable hint: apply the <paper_id>_ artifact prefix exactly once."""
+
+        resolved_id = cls.sanitize_paper_id(paper_id)
+        prefix = f"{resolved_id}_"
+        return name if str(name).startswith(prefix) else f"{prefix}{name}"
+
+    @classmethod
+    def legacy_prefixed_filename(cls, paper_id: str | None, name: str) -> str:
+        """human readable hint: read the old hash-prefixed cache shape without creating it."""
+
+        resolved_id = cls.sanitize_paper_id(paper_id)
+        prefix = f"#{resolved_id}_"
+        return name if str(name).startswith(prefix) else f"{prefix}{name}"
+
+    @classmethod
+    def canonical_pdf_filename(cls, paper_id: str | None) -> str:
+        """human readable hint: name the paper PDF by its ID once, without artifact suffixes."""
+
+        return f"{cls.sanitize_paper_id(paper_id)}.pdf"
+
+    def candidates(self, name: str, paper_id: str | None = None) -> list[Path]:
+        """human readable hint: return canonical prefixed path first, then legacy fallback."""
+
+        resolved_id = self.sanitize_paper_id(paper_id or self.paper_id)
+        prefixed = self.folder / self.prefixed_filename(resolved_id, name)
+        hash_prefixed = self.folder / self.legacy_prefixed_filename(resolved_id, name)
+        legacy = self.folder / name
+        candidates = [prefixed, hash_prefixed, legacy]
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = candidate.name
+            if key in seen:
+                continue
+            unique.append(candidate)
+            seen.add(key)
+        return unique
+
+    def first_existing(self, name: str, paper_id: str | None = None) -> Path | None:
+        """human readable hint: find an existing canonical-or-legacy file without rescanning the folder."""
+
+        for candidate in self.candidates(name, paper_id=paper_id):
+            if candidate.name in self._files_by_name or candidate.exists():
+                return candidate
+        return None
+
+    def ensure_prefixed_path(self, name: str, paper_id: str | None = None) -> Path:
+        """human readable hint: migrate a legacy filename only when no canonical file exists."""
+
+        candidates = self.candidates(name, paper_id=paper_id)
+        prefixed_path = candidates[0]
+        legacy_path = next(
+            (
+                candidate
+                for candidate in candidates[1:]
+                if candidate.name in self._files_by_name or candidate.exists()
+            ),
+            None,
+        )
+        if prefixed_path.name in self._files_by_name or prefixed_path.exists():
+            return prefixed_path
+        if not legacy_path or (legacy_path.name not in self._files_by_name and not legacy_path.exists()):
+            return prefixed_path
+        try:
+            if sys.platform == "win32":
+                Path("\\\\?\\" + str(legacy_path)).replace(Path("\\\\?\\" + str(prefixed_path)))
+            else:
+                legacy_path.replace(prefixed_path)
+            self.refresh()
+            return prefixed_path
+        except Exception:
+            return legacy_path
+
+    def artifact_candidates(self, stage: str, paper_id: str | None = None) -> list[Path]:
+        """human readable hint: return candidate compact artifact names for one stage."""
+
+        return self.candidates(f"{stage}_artifact.json", paper_id=paper_id)
+
+    def selected_chunk_candidates(self, stage: str, paper_id: str | None = None) -> list[Path]:
+        """human readable hint: return candidate selected-chunk sidecars for one stage."""
+
+        return self.candidates(f"{stage}_selected_chunks.jsonl", paper_id=paper_id)
+
+    def pdf_candidates(self, paper_id: str | None = None) -> list[Path]:
+        """human readable hint: prefer the single ID-named PDF without rescanning per check."""
+
+        resolved_id = self.sanitize_paper_id(paper_id or self.paper_id)
+        pdfs = sorted(
+            [path for path in self._files_by_name.values() if path.suffix.lower() == ".pdf"],
+            key=lambda path: path.name,
+        )
+        canonical = self.folder / self.canonical_pdf_filename(resolved_id)
+        artifact_prefix = f"{resolved_id}_"
+        legacy_prefix = f"#{resolved_id}_"
+        ordered: list[Path] = []
+        if canonical.name in self._files_by_name or canonical.exists():
+            ordered.append(canonical)
+        ordered.extend(path for path in pdfs if path.name.startswith(artifact_prefix) and path not in ordered)
+        ordered.extend(path for path in pdfs if path.name.startswith(legacy_prefix) and path not in ordered)
+        ordered.extend(path for path in pdfs if path not in ordered)
+        return ordered
+
+
+def _sanitize_paper_id_for_filename(paper_id: str) -> str:
+    return PerPaperFileIndex.sanitize_paper_id(paper_id)
+
+
+def _paper_id_hint(folder: Path) -> str:
+    return PerPaperFileIndex.paper_id_hint(folder)
+
+
+def _prefixed_candidates(folder: Path, name: str, paper_id: str | None = None) -> list[Path]:
+    return PerPaperFileIndex(folder, paper_id=paper_id).candidates(name, paper_id=paper_id)
 
 
 @dataclass
@@ -140,12 +295,14 @@ class SupplementalCitedEvidenceLoader:
             return path.name
 
 
-def load_metadata(folder: Path) -> tuple[str, dict[str, Any]]:
+def load_metadata(folder: Path, file_index: PerPaperFileIndex | None = None) -> tuple[str, dict[str, Any]]:
     """human readable hint: read compact artifact metadata for each included paper."""
 
+    file_index = file_index or PerPaperFileIndex(folder)
+    hint = file_index.paper_id or _paper_id_hint(folder)
     for prefix in ["data_extraction", "full_text"]:
-        artifact_path = folder / f"{prefix}_artifact.json"
-        if artifact_path.exists():
+        artifact_path = file_index.first_existing(f"{prefix}_artifact.json", paper_id=hint)
+        if artifact_path:
             try:
                 payload = json.loads(artifact_path.read_text(encoding="utf-8"))
                 if isinstance(payload, dict):
@@ -153,18 +310,20 @@ def load_metadata(folder: Path) -> tuple[str, dict[str, Any]]:
                     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
                     return paper_id, metadata
             except Exception:
-                pass
+                continue
     return folder.name, {}
 
 
-def load_paper_text(folder: Path) -> tuple[str, Path | None]:
+def load_paper_text(folder: Path, file_index: PerPaperFileIndex | None = None) -> tuple[str, Path | None]:
     """human readable hint: use cached normalized text first, then parse the local PDF when needed."""
 
-    normalized_path = folder / "full_text_normalized.txt"
-    if normalized_path.exists():
+    file_index = file_index or PerPaperFileIndex(folder)
+    hint = file_index.paper_id or _paper_id_hint(folder)
+    normalized_path = file_index.first_existing("full_text_normalized.txt", paper_id=hint)
+    if normalized_path:
         return normalized_path.read_text(encoding="utf-8"), None
 
-    pdfs = sorted(folder.glob("*.pdf"))
+    pdfs = file_index.pdf_candidates(paper_id=hint)
     if not pdfs:
         return "", None
 
@@ -176,12 +335,17 @@ def load_paper_text(folder: Path) -> tuple[str, Path | None]:
         return "", pdf_path
 
 
-def load_selected_chunks(folder: Path, paper_id: str) -> list[dict]:
+def load_selected_chunks(
+    folder: Path,
+    paper_id: str,
+    file_index: PerPaperFileIndex | None = None,
+) -> list[dict]:
     """human readable hint: load preselected data_extraction chunks copied from prior pipeline stages."""
 
+    file_index = file_index or PerPaperFileIndex(folder, paper_id=paper_id)
     for prefix in ["data_extraction", "full_text"]:
-        chunks_path = folder / f"{prefix}_selected_chunks.jsonl"
-        if chunks_path.exists():
+        chunks_path = file_index.first_existing(f"{prefix}_selected_chunks.jsonl", paper_id=paper_id)
+        if chunks_path:
             try:
                 with chunks_path.open("r", encoding="utf-8") as handle:
                     for line in handle:
@@ -192,7 +356,7 @@ def load_selected_chunks(folder: Path, paper_id: str) -> list[dict]:
                             chunks = payload.get("selected_chunks")
                             return chunks if isinstance(chunks, list) else []
             except Exception:
-                pass
+                continue
     return []
 
 
@@ -208,9 +372,12 @@ def collect_papers(csv_dir: Path) -> list[PaperItem]:
     for folder in sorted(extraction_dir.iterdir()):
         if not folder.is_dir():
             continue
-        paper_id, metadata = load_metadata(folder)
-        selected_chunks = load_selected_chunks(folder, paper_id)
-        text, pdf_path = load_paper_text(folder)
+        # human readable hint: build one folder file index and reuse it for metadata, chunks, and PDF/text lookup.
+        file_index = PerPaperFileIndex(folder)
+        paper_id, metadata = load_metadata(folder, file_index=file_index)
+        file_index.paper_id = PerPaperFileIndex.sanitize_paper_id(paper_id)
+        selected_chunks = load_selected_chunks(folder, paper_id, file_index=file_index)
+        text, pdf_path = load_paper_text(folder, file_index=file_index)
         # human readable hint: keep table rows intact for downstream LLM extraction.
         normalized_text = normalize_extracted_text_for_llm(text or "") if text else ""
         supplemental_cited_evidence = supplemental_loader.load_for_folder(folder)

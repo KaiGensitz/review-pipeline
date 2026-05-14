@@ -230,6 +230,45 @@ DATA_EXTRACTION_VALIDATION_VALUE_ALIASES = {
 	"concepts.inclusivity_considerations": [
 		["nicht gesondert ausgewertet", "not separately evaluated", "not separately analysed", "not separately analyzed"],
 	],
+	"population.mean_age": [
+		["45-64 years", "45 to 64 years", "45-64 age group", "45-64 age band", "45-64 years: 28/36", "45-64 years 28 36 77.8%"],
+	],
+	"outcomes.reported": [
+		["physical activity", "pa outcome", "physical-activity outcome", "exercise behavior", "exercise adherence", "steps", "step count", "mvpa", "walking"],
+		["feasibility/usability", "feasibility and usability", "feasibility", "usability", "engagement", "acceptability"],
+	],
+	"concepts.smartphone_usage": [
+		["mobile app", "smartphone app", "native app", "android app", "ios app", "phone app", "companion app"],
+		["chatbot", "chat bot", "conversational agent", "voice assistant", "voice-assistant companion app"],
+		["sms/text messages", "sms", "text message", "text messages", "push notification", "push notifications", "reminder", "reminders"],
+		["wearable sync", "wearable synchronization", "wearable-to-phone", "activity tracker sync", "data transmission"],
+		["avatar selection", "badges/profile", "digital badges", "profile", "leaderboard", "leaderboards"],
+	],
+	"concepts.AI_transparency": [
+		["not available", "not reported", "not described", "no explicit ai transparency", "no transparency information", "explainability not reported", "interpretability not reported"],
+	],
+	"concepts.human_AI_interaction": [
+		["chatbot query", "chatbot conversation", "chat bot conversation", "conversational interaction", "user queries"],
+		["voice command", "voice assistant", "voice interaction", "voice-based interaction"],
+		["avatar selection", "goal setting", "audio feedback", "leaderboard", "leaderboards", "self-monitoring", "recommendation response", "alert response"],
+		["adaptive recommendation", "adaptive recommendations", "model-generated prompts", "ai feedback", "ai-selected goals"],
+	],
+	"concepts.development_process": [
+		["design and development process described", "design/development process", "technology development", "app development", "app implementation", "technical integration"],
+		["user-centered design", "user centred design", "co-design", "participatory design", "stakeholder involvement", "user testing", "prototype testing", "iterative prototyping"],
+		["model training", "training-data construction", "dataset creation", "expert annotation"],
+	],
+	"context.setting": [
+		["both", "urban and rural", "urban/suburban plus rural", "urban/suburban and rural/suburban", "urban area and rural area"],
+		["home plus clinic", "home and clinic", "rehabilitation clinic", "clinical site", "clinic"],
+		["university", "workplace", "community", "field-study", "field study", "metropolitan trial site"],
+	],
+	"context.continent": [
+		["europe", "eu", "european"],
+		["north america", "usa", "united states", "canada"],
+		["asia", "asian"],
+		["australia", "oceania"],
+	],
 }
 
 # USER-EDITABLE DATA-EXTRACTION VALIDATION MATCH SETTINGS.
@@ -551,6 +590,7 @@ LLM_SETTINGS = {
 	],  # table-sensitive fields keep full-text table evidence unless semantic quote support is clearly stronger
 	"data_extraction_evidence_mode": "full_text",  # full_text = use cached normalized full text; selected_chunks = use retrieval slice
 	"data_extraction_generate_normalized_text": True,  # True = preflight-create full_text_normalized.txt + data_extraction chunk artifacts from PDFs when missing
+	"data_extraction_full_text_length_ratio_min": 0.80,  # sanity check: normalized length / direct parser length must meet this ratio
 	"data_extraction_full_text_max_words": 0,  # 0 = no word cap; set a number only if full texts exceed model context
 	"data_extraction_schema_evidence_hints": True,  # True = prepend compact schema-derived evidence snippets before full normalized text
 	"data_extraction_evidence_hints_per_variable": 4,  # snippets per schema variable; table-heavy extraction needs enough hints to surface demographic rows

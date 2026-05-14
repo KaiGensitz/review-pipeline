@@ -50,6 +50,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: `CSV_METADATA_COLUMN_ALIASES` is where external export headers are mapped to generic internal metadata such as `paper_id`, `title`, `authors`, and `publication_year`; these export-header facts do not live in `pipeline/` code.
 - Human readable hint: `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` is the optional bridge between human prompt section wording and schema domains. Keep review-topic vocabulary here or in the prompt/schema CSV, not inside pipeline Python.
 - Human readable hint: `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS` controls aggregate extraction output labels, including the AI reviewer label, while `DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES` supplies optional fallback consensus-column aliases for variables.
+- Human readable hint: `DATA_EXTRACTION_VALIDATION_VALUE_ALIASES` stores user-editable, variable-specific semantic equivalence groups for QC validation; add review-specific acceptable paraphrases here rather than in `pipeline/` code.
 - Human readable hint: `DATA_EXTRACTION_EXPERT_REVIEW_SETTINGS`, `DATA_EXTRACTION_EXPERT_REVIEWERS`, and `DATA_EXTRACTION_EXPERT_REVIEW_SHARED_VARIABLES` configure AI-first expert oversight packets without hardcoding reviewer names or schema-variable assignments in pipeline Python.
 - Human readable hint: `PROMPT_SIGNAL_SECTION_ALIASES` defines which prompt section names are treated as primary/secondary retrieval signal lists when prompts contain include/exclude sections.
 - Human readable hint: `CITATION_SEARCHING_SCREENING` switches screening into the citation-search workflow, reads `CITATION_SEARCHING_STAGE_RULES`, runs delta extraction against the baseline export, skips QC sampling, and keeps outputs scoped separately.
@@ -709,8 +710,21 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: when data extraction is split by schema domain, replace the broad all-variable evidence map with a smaller evidence map for the active domain group before each LLM call.
 
 #### PaperScreeningPipeline._preflight_data_extraction_full_text_inputs(papers)
-- Human readable hint: before QC sampling or remaining-paper filtering, ensure every data-extraction folder has usable normalized full text and data-extraction chunk-audit sidecars.
+- Human readable hint: after QC sampling or remaining-paper filtering, ensure every active data-extraction folder has usable normalized full text and data-extraction chunk-audit sidecars.
 - Human readable hint: preflight writes one latest JSON report so repeated QC runs do not clutter the output folder.
+- Human readable hint: preflight reuses one cached per-folder file index for normalized-text, artifact, selected-chunk, and PDF checks so file existence is not repeatedly globbed.
+
+#### FullTextRatioCheckCache
+- Human readable hint: durable object stored in the full-text artifact that records PDF size, PDF mtime, normalized-text SHA, parser level, direct parser length, normalized length, and ratio so unchanged papers skip repeated direct PDF reparsing.
+
+#### PaperScreeningPipeline._pdf_ratio_cache_key(pdf_path)
+- Human readable hint: derive the PDF side of the ratio-check cache key from file size and modified time.
+
+#### PaperScreeningPipeline._full_text_ratio_artifact_payload(folder_path, paper)
+- Human readable hint: read the full-text artifact and any stored ratio-check cache entry for the paper.
+
+#### PaperScreeningPipeline._write_full_text_ratio_check_cache(artifact_path, payload, paper, folder_path, cache_entry)
+- Human readable hint: persist ratio-check audit metadata without changing the normalized text evidence.
 
 #### PaperScreeningPipeline._ensure_full_text_normalized_for_data_extraction(paper)
 - Human readable hint: run the full-text PDF parsing/cache path inside a data-extraction run when `full_text_normalized.txt` is missing or empty.
@@ -755,10 +769,19 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: full_text now performs language-code detection and returns an unsupported-language marker for non-EN/DE policy handling.
 
 #### PaperScreeningPipeline._compact_artifacts_enabled()
-- Human readable hint: enable compact per-paper artifact mode only for full_text runs.
+- Human readable hint: enable compact per-paper artifact mode for PDF-backed `full_text` and `data_extraction` runs.
+
+#### PaperScreeningPipeline._file_index_for_folder(folder_path, paper_id)
+- Human readable hint: cache a per-paper folder listing once and reuse it for prefixed artifact lookup during preflight and prompt assembly.
+
+#### PaperScreeningPipeline._prefixed_path_candidates(folder_path, name, paper_id)
+- Human readable hint: prefer canonical `<paper_id>_<name>` files and keep legacy unprefixed or hash-prefixed names only as read fallback.
+
+#### PaperScreeningPipeline._ensure_prefixed_path(folder_path, name, paper_id)
+- Human readable hint: return the canonical prefixed path for new writes and migrate a legacy filename only when no canonical file exists.
 
 #### PaperScreeningPipeline._compact_artifact_path_for_folder(folder_path, stage)
-- Human readable hint: build stage artifact filename paths for per-paper compact machine outputs.
+- Human readable hint: build canonical `<paper_id>_<stage>_artifact.json` paths for per-paper compact machine outputs.
 
 #### PaperScreeningPipeline._metadata_snapshot_for_folder(folder_path, fallback)
 - Human readable hint: load canonical metadata from per-stage artifact files for synchronized sidecar exports.
@@ -1138,11 +1161,14 @@ This appendix provides function-level explanations for scripts and classes in th
 ### Class SupplementalCitedEvidenceLoader
 - Human readable hint: reads only user-configured per-paper supplemental evidence subfolders, trims source text with visible limits, and renders source-labeled prompt blocks without hardcoding review-topic or study-specific facts.
 
+### Class PerPaperFileIndex
+- Human readable hint: object-oriented per-paper folder index that reads filenames once, derives the generic `<paper_id>_` artifact prefix from the folder or supplied ID, returns canonical candidates before legacy fallbacks, and helps future runs create only canonical prefixed artifacts plus one `<paper_id>.pdf`.
+
 ### Script-level functions
 - Human readable hint: file and formatting helpers for data extraction.
 
 #### collect_papers(csv_dir)
-- Human readable hint: collect prepared paper folders from `input/per_paper_data_extraction/`, apply LLM-focused text cleanup that preserves tables, and attach optional supplemental cited evidence configured in `user_orchestrator.py`.
+- Human readable hint: collect prepared paper folders from `input/per_paper_data_extraction/`, reuse `PerPaperFileIndex` for prefixed artifact lookup, apply LLM-focused text cleanup that preserves tables, and attach optional supplemental cited evidence configured in `user_orchestrator.py`.
 
 #### format_evidence(paper)
 - Human readable hint: build the compact evidence block used by the extraction prompt, including source-labeled supplemental cited evidence when supplied.

@@ -31,7 +31,7 @@ from pipeline.integrations.embedding_utils import (
     normalize_extracted_text_for_llm,
 )
 from pipeline.core.metadata_aliases import read_metadata_value
-from pipeline.core.extraction_io import SupplementalCitedEvidenceLoader
+from pipeline.core.extraction_io import PerPaperFileIndex, SupplementalCitedEvidenceLoader
 from pipeline.core.extraction_schema import (
     DynamicExtractionSchema,
     ExtractionVariable,
@@ -309,7 +309,11 @@ def _format_chunks_for_prompt(
 def _load_data_extraction_full_text_context(folder: Path, paper_id: str, title: str) -> str:
     """human readable hint: rebuild the full normalized text evidence block used by data extraction."""
 
-    for candidate in (folder / "full_text_normalized.txt", folder / "data_extraction_normalized.txt"):
+    file_index = PerPaperFileIndex(folder, paper_id=paper_id)
+    candidates: list[Path] = []
+    for name in ("full_text_normalized.txt", "data_extraction_normalized.txt"):
+        candidates.extend(file_index.candidates(name, paper_id=paper_id))
+    for candidate in candidates:
         if not candidate.exists():
             continue
         raw_text = candidate.read_text(encoding="utf-8")
@@ -483,10 +487,10 @@ def _title_abstract_context(stage: str, paper_id: str) -> tuple[str, list[dict]]
 
 
 def _load_folder_metadata(folder: Path) -> dict:
-    artifact_candidates = [
-        folder / "full_text_artifact.json",
-        folder / "data_extraction_artifact.json",
-    ]
+    file_index = PerPaperFileIndex(folder)
+    artifact_candidates: list[Path] = []
+    for stage_name in ("full_text", "data_extraction"):
+        artifact_candidates.extend(file_index.artifact_candidates(stage_name))
     for artifact_path in artifact_candidates:
         if not artifact_path.exists():
             continue
@@ -536,9 +540,12 @@ def _find_paper_folder(stage: str, paper_id: str, csv_root: Path) -> Path:
 
 
 def _load_selected_chunks(folder: Path, stage: str, paper_id: str) -> list[dict]:
-    chunks_path = folder / f"{stage}_selected_chunks.jsonl"
+    file_index = PerPaperFileIndex(folder, paper_id=paper_id)
+    chunks_candidates = file_index.selected_chunk_candidates(stage, paper_id=paper_id)
 
-    if chunks_path.exists():
+    for chunks_path in chunks_candidates:
+        if not chunks_path.exists():
+            continue
         with chunks_path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 if not line.strip():
@@ -551,10 +558,9 @@ def _load_selected_chunks(folder: Path, stage: str, paper_id: str) -> list[dict]
                     if isinstance(selected, list):
                         return selected
 
-    artifact_candidates = [
-        folder / f"{stage}_artifact.json",
-        folder / "full_text_artifact.json",
-    ]
+    artifact_candidates: list[Path] = []
+    for stage_name in (stage, "full_text"):
+        artifact_candidates.extend(file_index.artifact_candidates(stage_name, paper_id=paper_id))
     for artifact_path in artifact_candidates:
         if not artifact_path.exists():
             continue
@@ -569,11 +575,11 @@ def _load_selected_chunks(folder: Path, stage: str, paper_id: str) -> list[dict]
         if isinstance(selected, list):
             return selected
 
-    if not chunks_path.exists():
+    if not any(path.exists() for path in chunks_candidates):
         raise FileNotFoundError(
-            f"Missing selected chunks sources: {chunks_path} and compact artifacts in {folder}"
+            f"Missing selected chunks sources for stage='{stage}', paper_id='{paper_id}' and compact artifacts in {folder}"
         )
-    raise ValueError(f"No selected chunks found for paper_id='{paper_id}' in {chunks_path}.")
+    raise ValueError(f"No selected chunks found for paper_id='{paper_id}' in selected chunk sidecars under {folder}.")
 
 
 def _folder_stage_context(
@@ -871,7 +877,11 @@ def _line_hits_for_terms(text: str, terms: list[str], max_hits: int = 5) -> list
 def _read_normalized_text(folder: Path) -> tuple[Path | None, str]:
     """human readable hint: read the normalized full text file that extraction used as evidence."""
 
-    for candidate in (folder / "full_text_normalized.txt", folder / "data_extraction_normalized.txt"):
+    file_index = PerPaperFileIndex(folder)
+    candidates: list[Path] = []
+    for name in ("full_text_normalized.txt", "data_extraction_normalized.txt"):
+        candidates.extend(file_index.candidates(name))
+    for candidate in candidates:
         if candidate.exists():
             return candidate, candidate.read_text(encoding="utf-8")
     return None, ""

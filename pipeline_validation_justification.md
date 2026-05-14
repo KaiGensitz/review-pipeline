@@ -10,7 +10,7 @@ For AI-assisted data extraction, we will follow the validation approach describe
 
 Date: 2026-05-11.
 
-The active pipeline now implements four safeguards that define the current validation procedure:
+The active pipeline now implements seven safeguards that define the current validation procedure:
 
 - The QC subset is the validation subset. Validation is intentionally restricted to the human-reviewed QC papers and is not rerun as a formal accuracy/concordance estimate on the non-reviewed remaining sample.
 - The remaining-sample run reuses the persisted QC batch IDs and excludes those papers from post-QC processing. This avoids wasting resources by re-extracting papers that have already been screened for QC.
@@ -18,6 +18,28 @@ The active pipeline now implements four safeguards that define the current valid
 - Reviewer note rows are used as gold-standard replacements only when they contain direct manuscript quotes, manuscript location signals, numeric/table evidence, or clear manuscript-derived replacement values. Generic comments such as "not complete", "negligible", "not separately analysed", or comments about the reviewer judgement are excluded from metric denominators instead of being treated as expected extracted values.
 
 The current implementation also strengthens extraction guidance for the variables that remained most error-prone in QC: study design, conflicts of interest, ethnicity/race detail, smartphone delivery, AI transparency, inclusivity, development process, setting, implications, and limitations.
+
+Update on 2026-05-13: comparison of validation runs v21, v22, and v23 showed that the recent metric decrease was driven by a small set of unstable data-extraction variables rather than by a denominator change. The active schema and data-extraction prompt now add QC calibration for `smartphone_usage`, `AI_transparency`, `human_AI_interaction`, `development_process`, `setting`, `reported`, `mean_age`, and `continent`, emphasizing concise manuscript labels and reviewer-like keywords over broad synthesis. The validation configuration now also includes explicit user-editable semantic alias groups for unambiguous acceptable paraphrases. These changes keep topic-specific calibration in `config/` and `knowledge-base/`, while `pipeline/` remains generic validation machinery.
+
+## Validation Procedure Rationale (Manuscript Justification)
+
+The validation strategy is designed to be methodologically transparent and conservative while still allowing targeted improvement of the extraction system. The key scientific choices are:
+
+1) QC subset as the validation gold standard. Only papers with explicit human review are used for formal accuracy and concordance. This avoids circularity, because the remaining sample has no independent human ground truth and would inflate performance if compared against itself or against auto-derived labels. The QC subset is therefore the only valid denominator for formal reporting.
+
+2) Cell-level metrics with explicit missingness handling. Extraction produces multiple variables per paper with heterogeneous data types. Concordance is defined on human-present items only, while accuracy additionally counts correct missingness. This separates factual agreement from missing-data detection. The manuscript should report both, because a system can correctly recognize missing information while still struggling with detailed values.
+
+3) Schema-defined, quote-aware validation with conservative defaults. Exact and type-normalized matches are accepted automatically, and user-configured aliases capture domain-specific equivalences. Non-exact matches are routed to human adjudication rather than being accepted by heuristic similarity alone. Quote-aware checks are retained as an audit signal because they approximate how a human reviewer reads evidence, but they are not treated as definitive without adjudication.
+
+4) Data integrity guardrails before extraction. The pipeline now checks whether the normalized text length is close to a direct PDF parse (default minimum ratio 0.80). The direct-parse ratio check is cached by PDF size, PDF modified time, and normalized-text SHA so unchanged papers do not require repeated PDF reparsing on later runs. If the cached normalized text is too short and no valid cache exists, the PDF is re-parsed through the full parser chain. If the ratio still fails after all parsing methods, the system emits a warning and does not substitute fallback metadata or abstract text. This avoids inadvertently inflating extraction completeness with non-equivalent evidence while still providing a clear integrity signal for manual follow-up.
+
+5) Per-paper artifact identity. Every non-PDF file created in a per-paper input folder is now expected to carry the generic `<paper_id>_` filename prefix, while the folder PDF is canonicalized as `<paper_id>.pdf`. This prevents stale unprefixed artifacts from competing with current evidence during validation, keeps PDF-derived evidence tied to one paper identifier, and makes cleanup auditable without encoding any review-topic facts in pipeline code. The implementation uses a cached per-folder file index so preflight checks for normalized text, compact artifacts, selected chunks, and PDFs are performed once per active folder and then reused. In QC workflows, preflight now runs after the QC/remaining split so the QC sample and remaining sample do not repeat the same folder checks.
+
+6) Targeted re-extraction when evidence changes. If a paper's normalized text is corrected, the pipeline allows single-paper re-extraction so that the updated evidence is reflected in outputs. This preserves the QC sample as the validation anchor while improving downstream accuracy for that paper. All outputs remain traceable via per-run JSONL artifacts and the aggregate comparison tables.
+
+7) Transparent uncertainty reporting. Wilson 95% intervals are included as descriptive bounds on cell-level concordance and accuracy. Because cells are clustered within papers, these intervals are not interpreted as formal inferential confidence intervals. If inferential uncertainty is required later, paper-level resampling or cluster bootstrap should be used instead.
+
+These steps justify the manuscript claim that the pipeline validation is conservative, auditable, and appropriately constrained by available human ground truth, while still enabling targeted improvements when evidence quality issues are discovered.
 
 ## Source of Truth
 
@@ -43,6 +65,10 @@ Concordance is interpreted as factual congruence among human-present items. It e
 Accuracy includes all evaluable items and therefore also rewards correctly identified unavailable data.
 
 This distinction matters because a model can be accurate about missingness while still having lower concordance for human-present details.
+
+## Confidence Intervals and Clustering Caveats
+
+The extraction validation report now includes Wilson 95% CIs for overall concordance and accuracy. These intervals are computed on item-level counts (cell-level comparisons) and assume independent Bernoulli trials. That assumption is violated because cells are clustered within papers and share the same PDF, metadata, and prompt context. With only four papers in the QC sample, the effective number of independent observations is closer to the paper count than the cell count, so the Wilson intervals are best interpreted as descriptive uncertainty bounds rather than inferential confidence intervals for the study population. If we need inferential intervals later, we should use paper-level resampling (cluster bootstrap) or compute paper-level concordance/accuracy and report those with appropriate uncertainty.
 
 ## Full Text as Primary Evidence
 

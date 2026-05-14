@@ -72,7 +72,7 @@ from pipeline.core.metadata_aliases import (
     normalize_metadata_row,
     read_metadata_value,
 )
-from pipeline.core.extraction_io import SupplementalCitedEvidenceLoader
+from pipeline.core.extraction_io import PerPaperFileIndex, SupplementalCitedEvidenceLoader
 from pipeline.core.extraction_hybrid_rescue import (
     HybridRescueConfig,
     HybridRescuePlanner,
@@ -245,6 +245,95 @@ class PaperRecord:
     title: str
     abstract: str
     metadata: dict
+
+
+@dataclass(frozen=True)
+class FullTextRatioCheckCache:
+    """human readable hint: durable key for skipping unchanged normalized-text ratio reparses."""
+
+    pdf_size: int
+    pdf_mtime_ns: int
+    normalized_text_sha256: str
+    normalized_len: int
+    direct_len: int
+    ratio: float
+    parser_level: str
+    checked_at: str
+
+    @staticmethod
+    def _required_cache_value(raw: dict[str, Any], key: str) -> Any | None:
+        """human readable hint: make missing cache keys explicit before typed conversion."""
+
+        return raw[key] if key in raw else None
+
+    @classmethod
+    def from_artifact_payload(cls, payload: dict[str, Any] | None) -> "FullTextRatioCheckCache | None":
+        """human readable hint: parse a prior ratio check only when all machine keys are present."""
+
+        if not isinstance(payload, dict):
+            return None
+        raw = payload.get("full_text_ratio_check")
+        if not isinstance(raw, dict):
+            return None
+        try:
+            pdf_size_raw = cls._required_cache_value(raw, "pdf_size")
+            pdf_mtime_ns_raw = cls._required_cache_value(raw, "pdf_mtime_ns")
+            normalized_hash_raw = cls._required_cache_value(raw, "normalized_text_sha256")
+            normalized_len_raw = cls._required_cache_value(raw, "normalized_len")
+            direct_len_raw = cls._required_cache_value(raw, "direct_len")
+            ratio_raw = cls._required_cache_value(raw, "ratio")
+            if (
+                pdf_size_raw is None
+                or pdf_mtime_ns_raw is None
+                or normalized_hash_raw is None
+                or normalized_len_raw is None
+                or direct_len_raw is None
+                or ratio_raw is None
+            ):
+                return None
+            pdf_size = int(pdf_size_raw)
+            pdf_mtime_ns = int(pdf_mtime_ns_raw)
+            normalized_hash = str(normalized_hash_raw).strip()
+            normalized_len = int(normalized_len_raw)
+            direct_len = int(direct_len_raw)
+            ratio = float(ratio_raw)
+        except (TypeError, ValueError):
+            return None
+        if not normalized_hash or normalized_len <= 0 or direct_len <= 0:
+            return None
+        return cls(
+            pdf_size=pdf_size,
+            pdf_mtime_ns=pdf_mtime_ns,
+            normalized_text_sha256=normalized_hash,
+            normalized_len=normalized_len,
+            direct_len=direct_len,
+            ratio=ratio,
+            parser_level=str(raw.get("parser_level") or "").strip(),
+            checked_at=str(raw.get("checked_at") or "").strip(),
+        )
+
+    def matches(self, *, pdf_size: int, pdf_mtime_ns: int, normalized_text_sha256: str) -> bool:
+        """human readable hint: invalidate the cache when the PDF or normalized text changes."""
+
+        return (
+            self.pdf_size == int(pdf_size)
+            and self.pdf_mtime_ns == int(pdf_mtime_ns)
+            and self.normalized_text_sha256 == str(normalized_text_sha256 or "").strip()
+        )
+
+    def to_artifact_payload(self) -> dict[str, Any]:
+        """human readable hint: store the ratio audit in the full-text artifact for future runs."""
+
+        return {
+            "pdf_size": self.pdf_size,
+            "pdf_mtime_ns": self.pdf_mtime_ns,
+            "normalized_text_sha256": self.normalized_text_sha256,
+            "normalized_len": self.normalized_len,
+            "direct_len": self.direct_len,
+            "ratio": self.ratio,
+            "parser_level": self.parser_level,
+            "checked_at": self.checked_at,
+        }
 
 
 CANONICAL_FIELDS = [
@@ -436,6 +525,7 @@ class PaperScreeningPipeline:
         self._hybrid_rescue_evidence_builder: HybridSemanticEvidenceBuilder | None = None
         self._hybrid_rescue_selector: HybridRescueSelector | None = None
         self._hybrid_rescue_writer: HybridRescueRunWriter | None = None
+        self._per_paper_file_indexes: dict[str, PerPaperFileIndex] = {}
         self._base_prompt_template = load_stage_prompt_template(self.stage)
         self.prompt_template = self._base_prompt_template
         if self.stage == "data_extraction":
@@ -785,10 +875,6 @@ class PaperScreeningPipeline:
         total_input_rows = len(planned_papers)
         total_planned = len(planned_papers)
 
-        if self.stage == "data_extraction":
-            _start_tracking_if_needed()
-            self._preflight_data_extraction_full_text_inputs(planned_papers)
-
         if not self.split_only and self.qc_enabled:
             created_sample = self._ensure_qc_sample(planned_papers, force_new=self.force_new_qc)
             if hasattr(self, "resource_tracker") and self.resource_tracker:
@@ -832,8 +918,12 @@ class PaperScreeningPipeline:
                 _finish_tracking_if_started()
                 return False
 
-        # For non-QC runs, start tracking only after we confirmed there are papers to process.
+        # human readable hint: start tracked work only after QC sampling has selected the active paper set.
         _start_tracking_if_needed()
+
+        if self.stage == "data_extraction":
+            # human readable hint: preflight only the active papers so QC and remaining runs do not duplicate checks.
+            self._preflight_data_extraction_full_text_inputs(planned_papers)
 
         if self.stage == "data_extraction":
             self._start_data_extraction_aggregate_writer()
@@ -1310,17 +1400,17 @@ class PaperScreeningPipeline:
     def _read_parser_level_for_folder(self, folder_path: Path) -> str:
         """Read parser_level from compact artifact when available."""
 
-        artifact_path = self._compact_artifact_path_for_folder(folder_path, stage="full_text")
-        if not artifact_path.exists():
-            return ""
-
-        try:
-            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict):
-                return ""
-            return str(payload.get("parser_level") or "").strip()
-        except Exception:
-            return ""
+        for artifact_path in self._compact_artifact_candidates_for_folder(folder_path, stage="full_text"):
+            if not artifact_path.exists():
+                continue
+            try:
+                payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    continue
+                return str(payload.get("parser_level") or "").strip()
+            except Exception:
+                continue
+        return ""
 
     def _preparse_full_text_pdfs(self, papers: list[PaperRecord]) -> None:
         """Parse full_text PDFs before screening to warm caches and surface parse status."""
@@ -1484,22 +1574,248 @@ class PaperScreeningPipeline:
             if not self.quiet:
                 print(f"[warning] Could not write preparse report: {exc}")
 
-    def _has_full_text_normalized_content(self, folder_path: Path) -> bool:
-        """human readable hint: treat the normalized text sidecar as valid only when it contains body text."""
+    def _read_full_text_normalized_body(self, folder_path: Path) -> str:
+        """human readable hint: return just the normalized body text from the sidecar."""
 
-        normalized_path = folder_path / "full_text_normalized.txt"
-        if not normalized_path.exists():
-            return False
-
-        try:
-            text = normalized_path.read_text(encoding="utf-8")
-        except Exception:
-            return False
+        text = ""
+        normalized_path = self._first_existing_prefixed_path(folder_path, "full_text_normalized.txt")
+        if normalized_path:
+            try:
+                text = normalized_path.read_text(encoding="utf-8")
+            except Exception:
+                return ""
+        if not text:
+            return ""
 
         marker = "=== normalized_full_text ==="
         marker_index = text.find(marker)
-        body = text[marker_index + len(marker):] if marker_index >= 0 else text
+        return text[marker_index + len(marker):] if marker_index >= 0 else text
+
+    def _has_full_text_normalized_content(self, folder_path: Path) -> bool:
+        """human readable hint: treat the normalized text sidecar as valid only when it contains body text."""
+
+        body = self._read_full_text_normalized_body(folder_path)
         return bool(normalize_extracted_text_for_llm(body).strip())
+
+    @staticmethod
+    def _full_text_length_ratio_min() -> float:
+        """human readable hint: guardrail ratio for normalized length vs direct parser length."""
+
+        try:
+            ratio = float(LLM_SETTINGS.get("data_extraction_full_text_length_ratio_min", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            ratio = 0.0
+        return max(0.0, min(1.0, ratio))
+
+    @staticmethod
+    def _pdf_ratio_cache_key(pdf_path: Path) -> dict[str, int]:
+        """human readable hint: use stable filesystem facts to invalidate ratio-check cache entries."""
+
+        pdf_stat = pdf_path.stat()
+        return {
+            "pdf_size": int(pdf_stat.st_size),
+            "pdf_mtime_ns": int(pdf_stat.st_mtime_ns),
+        }
+
+    def _full_text_ratio_artifact_payload(
+        self,
+        folder_path: Path,
+        paper: PaperRecord,
+    ) -> tuple[Path, dict[str, Any], FullTextRatioCheckCache | None]:
+        """human readable hint: read the durable ratio-check audit from the full-text artifact."""
+
+        artifact_candidates = self._compact_artifact_candidates_for_folder(
+            folder_path,
+            stage="full_text",
+            paper_id=str(paper.paper_id),
+        )
+        artifact_path = next(
+            (candidate for candidate in artifact_candidates if candidate.exists()),
+            artifact_candidates[0],
+        )
+        payload: dict[str, Any] = {}
+        if artifact_path.exists():
+            try:
+                loaded = json.loads(artifact_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    payload = loaded
+            except Exception:
+                payload = {}
+        return artifact_path, payload, FullTextRatioCheckCache.from_artifact_payload(payload)
+
+    def _write_full_text_ratio_check_cache(
+        self,
+        *,
+        artifact_path: Path,
+        payload: dict[str, Any],
+        paper: PaperRecord,
+        folder_path: Path,
+        cache_entry: FullTextRatioCheckCache,
+    ) -> None:
+        """human readable hint: persist a ratio-check result without changing extraction evidence."""
+
+        metadata_snapshot = self._metadata_snapshot_for_folder(folder_path, fallback=paper.metadata)
+        payload = dict(payload or {})
+        payload.setdefault("meta", "stage_artifact")
+        payload.setdefault("schema_version", 1)
+        payload.setdefault("stage", "full_text")
+        payload.setdefault("paper_id", str(paper.paper_id))
+        payload.setdefault("metadata", metadata_snapshot)
+        payload["full_text_ratio_check"] = cache_entry.to_artifact_payload()
+        payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _refresh_full_text_normalized_if_ratio_low(
+        self,
+        paper: PaperRecord,
+        folder_path: Path,
+        pdf_path: Path,
+    ) -> None:
+        """human readable hint: re-parse PDFs when cached normalized text looks too short."""
+
+        min_ratio = self._full_text_length_ratio_min()
+        if min_ratio <= 0.0:
+            return
+
+        normalized_body = self._read_full_text_normalized_body(folder_path)
+        normalized_value = normalize_extracted_text_for_llm(normalized_body).strip()
+        normalized_len = len(normalized_value)
+        if normalized_len <= 0:
+            return
+
+        try:
+            pdf_cache_key = self._pdf_ratio_cache_key(pdf_path)
+        except Exception:
+            pdf_cache_key = {}
+        normalized_hash = self._sha256_text(normalized_value)
+        artifact_path, artifact_payload, cached_ratio = self._full_text_ratio_artifact_payload(folder_path, paper)
+        if (
+            pdf_cache_key
+            and cached_ratio
+            and cached_ratio.matches(
+                pdf_size=pdf_cache_key["pdf_size"],
+                pdf_mtime_ns=pdf_cache_key["pdf_mtime_ns"],
+                normalized_text_sha256=normalized_hash,
+            )
+        ):
+            if cached_ratio.ratio < min_ratio and not self.quiet:
+                print(
+                    "[warning] full_text sanity check ratio below minimum from cache "
+                    f"for paper={paper.paper_id} ratio={cached_ratio.ratio:.2f} "
+                    f"normalized_len={cached_ratio.normalized_len} direct_len={cached_ratio.direct_len} "
+                    f"parser='{cached_ratio.parser_level}'"
+                )
+            return
+
+        direct_text, parser_level = extract_markdown_from_pdf_with_level(pdf_path)
+        direct_len = len((direct_text or "").strip())
+        if direct_len <= 0:
+            if not self.quiet:
+                print(
+                    "[warning] full_text sanity check could not extract direct text "
+                    f"for paper={paper.paper_id} path={pdf_path}"
+                )
+            return
+
+        ratio = normalized_len / float(direct_len) if direct_len else 0.0
+        if ratio >= min_ratio:
+            if pdf_cache_key:
+                self._write_full_text_ratio_check_cache(
+                    artifact_path=artifact_path,
+                    payload=artifact_payload,
+                    paper=paper,
+                    folder_path=folder_path,
+                    cache_entry=FullTextRatioCheckCache(
+                        pdf_size=pdf_cache_key["pdf_size"],
+                        pdf_mtime_ns=pdf_cache_key["pdf_mtime_ns"],
+                        normalized_text_sha256=normalized_hash,
+                        normalized_len=normalized_len,
+                        direct_len=direct_len,
+                        ratio=ratio,
+                        parser_level=str(parser_level or "").strip(),
+                        checked_at=datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
+            return
+
+        normalized_direct = normalize_extracted_text_for_llm(direct_text).strip()
+        if normalized_direct:
+            if self._compact_artifacts_enabled():
+                self._persist_compact_text_artifacts(
+                    paper,
+                    pdf_path,
+                    pdf_cache_key,
+                    normalized_direct,
+                    [],
+                    parser_level=parser_level,
+                )
+            else:
+                metadata_snapshot = self._metadata_snapshot_for_folder(folder_path, fallback=paper.metadata)
+                self._write_compact_human_normalized_text(
+                    folder_path,
+                    metadata_snapshot,
+                    normalized_direct,
+                    target_stage="full_text",
+                    paper_id=str(paper.paper_id),
+                )
+                artifact_path = self._compact_artifact_path_for_folder(
+                    folder_path,
+                    stage="full_text",
+                    paper_id=str(paper.paper_id),
+                )
+                if artifact_path.exists():
+                    try:
+                        payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+                        if isinstance(payload, dict):
+                            payload["normalized_text"] = normalized_direct
+                            payload["normalized_text_sha256"] = self._sha256_text(normalized_direct)
+                            payload["parser_level"] = str(parser_level or payload.get("parser_level") or "").strip()
+                            payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+                            artifact_path.write_text(
+                                json.dumps(payload, ensure_ascii=False, indent=2),
+                                encoding="utf-8",
+                            )
+                    except Exception:
+                        pass
+
+        refreshed_len = len((normalized_direct or "").strip())
+        refreshed_ratio = refreshed_len / float(direct_len) if direct_len else 0.0
+        if pdf_cache_key and (normalized_direct or normalized_value):
+            # human readable hint: if the artifact rewrite touched the PDF sidecar, reread the stat key before caching.
+            try:
+                refreshed_pdf_cache_key = self._pdf_ratio_cache_key(pdf_path)
+            except Exception:
+                refreshed_pdf_cache_key = pdf_cache_key
+            refreshed_hash = self._sha256_text(normalized_direct) if normalized_direct else normalized_hash
+            refreshed_cache_len = refreshed_len if normalized_direct else normalized_len
+            refreshed_cache_ratio = refreshed_ratio if normalized_direct else ratio
+            refreshed_artifact_path, refreshed_payload, _cached = self._full_text_ratio_artifact_payload(
+                folder_path,
+                paper,
+            )
+            self._write_full_text_ratio_check_cache(
+                artifact_path=refreshed_artifact_path,
+                payload=refreshed_payload,
+                paper=paper,
+                folder_path=folder_path,
+                cache_entry=FullTextRatioCheckCache(
+                    pdf_size=refreshed_pdf_cache_key["pdf_size"],
+                    pdf_mtime_ns=refreshed_pdf_cache_key["pdf_mtime_ns"],
+                    normalized_text_sha256=refreshed_hash,
+                    normalized_len=refreshed_cache_len,
+                    direct_len=direct_len,
+                    ratio=refreshed_cache_ratio,
+                    parser_level=str(parser_level or "").strip(),
+                    checked_at=datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+        if refreshed_ratio < min_ratio and not self.quiet:
+            print(
+                "[warning] full_text sanity check ratio below minimum after parser chain "
+                f"for paper={paper.paper_id} ratio={refreshed_ratio:.2f} "
+                f"normalized_len={refreshed_len} direct_len={direct_len} parser='{parser_level}'"
+            )
 
     def _ensure_full_text_normalized_for_data_extraction(self, paper: PaperRecord) -> bool:
         """human readable hint: run the full-text PDF parsing/cache path inside data_extraction when evidence is missing."""
@@ -1515,23 +1831,29 @@ class PaperScreeningPipeline:
 
         folder_path = Path(folder)
         if self._has_full_text_normalized_content(folder_path):
+            resolved_path = self._resolve_pdf_path(paper)
+            if resolved_path and resolved_path.exists():
+                self._refresh_full_text_normalized_if_ratio_low(paper, folder_path, resolved_path)
             return True
 
         resolved_path = self._resolve_pdf_path(paper)
         if not resolved_path or not resolved_path.exists():
             return False
 
-        text, _page_count, _used_path, _pages = self._load_pdf_text(
+        text, _page_count, used_path, _pages = self._load_pdf_text(
             paper,
             resolved_path,
             include_pages=False,
         )
-        return bool(normalize_extracted_text_for_llm(text or "").strip()) and self._has_full_text_normalized_content(
+        ok = bool(normalize_extracted_text_for_llm(text or "").strip()) and self._has_full_text_normalized_content(
             folder_path
         )
+        if ok and used_path:
+            self._refresh_full_text_normalized_if_ratio_low(paper, folder_path, used_path)
+        return ok
 
     def _preflight_data_extraction_full_text_inputs(self, papers: list[PaperRecord]) -> None:
-        """human readable hint: prepare all extraction PDFs before QC sampling chooses a subset."""
+        """human readable hint: prepare only the active extraction PDFs after QC filtering."""
 
         if not self._data_extraction_preflight_enabled or not papers:
             return
@@ -1651,8 +1973,12 @@ class PaperScreeningPipeline:
             return False
 
         folder_path = Path(folder)
-        chunks_path = folder_path / "data_extraction_selected_chunks.jsonl"
-        if chunks_path.exists():
+        chunks_path = self._first_existing_prefixed_path(
+            folder_path,
+            "data_extraction_selected_chunks.jsonl",
+            paper_id=str(paper.paper_id),
+        )
+        if chunks_path:
             try:
                 with chunks_path.open("r", encoding="utf-8") as handle:
                     for line in handle:
@@ -1664,16 +1990,20 @@ class PaperScreeningPipeline:
             except Exception:
                 return False
 
-        artifact_path = self._compact_artifact_path_for_folder(folder_path, stage="data_extraction")
-        if not artifact_path.exists():
-            return False
-        try:
-            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
-        except Exception:
-            return False
-        if not isinstance(payload, dict):
-            return False
-        return bool(payload.get("selected_chunks")) if isinstance(payload.get("selected_chunks"), list) else False
+        artifact_path = self._first_existing_prefixed_path(
+            folder_path,
+            "data_extraction_artifact.json",
+            paper_id=str(paper.paper_id),
+        )
+        if artifact_path:
+            try:
+                payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+            except Exception:
+                return False
+            if not isinstance(payload, dict):
+                return False
+            return bool(payload.get("selected_chunks")) if isinstance(payload.get("selected_chunks"), list) else False
+        return False
 
     def _write_data_extraction_preflight_report(
         self,
@@ -2808,15 +3138,18 @@ class PaperScreeningPipeline:
             return ""
 
         folder_path = Path(folder)
-        candidates = [
-            folder_path / "full_text_normalized.txt",
-            folder_path / "data_extraction_normalized.txt",
-        ]
+        candidates: list[Path] = []
+        for name in ("full_text_normalized.txt", "data_extraction_normalized.txt"):
+            candidate = self._first_existing_prefixed_path(
+                folder_path,
+                name,
+                paper_id=str(paper.paper_id),
+            )
+            if candidate:
+                candidates.append(candidate)
         raw_text = ""
         normalized_text = ""
         for candidate in candidates:
-            if not candidate.exists():
-                continue
             try:
                 raw_text = candidate.read_text(encoding="utf-8")
                 break
@@ -2840,7 +3173,13 @@ class PaperScreeningPipeline:
             # human readable hint: reuse the same normalized full-text sidecar that full_text screening writes.
             if self._ensure_full_text_normalized_for_data_extraction(paper):
                 try:
-                    raw_text = (folder_path / "full_text_normalized.txt").read_text(encoding="utf-8")
+                    candidate = self._first_existing_prefixed_path(
+                        folder_path,
+                        "full_text_normalized.txt",
+                        paper_id=str(paper.paper_id),
+                    )
+                    if candidate:
+                        raw_text = candidate.read_text(encoding="utf-8")
                     marker = "=== normalized_full_text ==="
                     marker_index = raw_text.find(marker)
                     if marker_index >= 0:
@@ -4801,20 +5140,138 @@ class PaperScreeningPipeline:
 
         return self.stage in {"full_text", "data_extraction"} and self.artifact_mode == "compact"
 
-    def _compact_artifact_path_for_folder(self, folder_path: Path, stage: str | None = None) -> Path:
+    @staticmethod
+    def _sanitize_paper_id_for_filename(paper_id: str) -> str:
+        """human readable hint: keep filenames stable when paper IDs contain punctuation."""
+
+        return PerPaperFileIndex.sanitize_paper_id(paper_id)
+
+    def _file_index_for_folder(self, folder_path: Path, paper_id: str | None = None) -> PerPaperFileIndex:
+        """human readable hint: cache each per-paper folder listing so preflight does not rescan it repeatedly."""
+
+        folder = Path(folder_path)
+        try:
+            key = str(folder.resolve())
+        except Exception:
+            key = str(folder)
+        index = self._per_paper_file_indexes.get(key)
+        if index is None:
+            index = PerPaperFileIndex(folder, paper_id=paper_id)
+            self._per_paper_file_indexes[key] = index
+        elif paper_id:
+            index.paper_id = PerPaperFileIndex.sanitize_paper_id(paper_id)
+        return index
+
+    def _infer_paper_id_from_folder(self, folder_path: Path) -> str:
+        """human readable hint: infer paper_id from artifacts or folder naming when needed."""
+
+        file_index = self._file_index_for_folder(folder_path)
+        try:
+            for artifact_path in sorted(
+                [path for path in file_index._files_by_name.values() if path.name.endswith("_artifact.json")],
+                key=lambda path: path.name,
+            ):
+                try:
+                    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if isinstance(payload, dict) and payload.get("paper_id"):
+                    return self._sanitize_paper_id_for_filename(str(payload.get("paper_id")))
+        except Exception:
+            pass
+
+        raw_name = folder_path.name
+        if "_" in raw_name:
+            raw_name = raw_name.split("_", 1)[0]
+        return self._sanitize_paper_id_for_filename(raw_name)
+
+    def _prefixed_filename(self, paper_id: str, name: str) -> str:
+        """human readable hint: apply the <paper_id>_ artifact prefix once."""
+
+        return PerPaperFileIndex.prefixed_filename(paper_id, name)
+
+    def _prefixed_path_candidates(
+        self,
+        folder_path: Path,
+        name: str,
+        *,
+        paper_id: str | None = None,
+    ) -> list[Path]:
+        """human readable hint: prefer prefixed filenames while preserving legacy fallbacks."""
+
+        resolved_id = paper_id or PerPaperFileIndex.paper_id_hint(folder_path)
+        return self._file_index_for_folder(folder_path, paper_id=resolved_id).candidates(name, paper_id=resolved_id)
+
+    def _first_existing_prefixed_path(
+        self,
+        folder_path: Path,
+        name: str,
+        *,
+        paper_id: str | None = None,
+    ) -> Path | None:
+        """human readable hint: answer one canonical/legacy existence query from the cached folder index."""
+
+        resolved_id = paper_id or PerPaperFileIndex.paper_id_hint(folder_path)
+        return self._file_index_for_folder(folder_path, paper_id=resolved_id).first_existing(
+            name,
+            paper_id=resolved_id,
+        )
+
+    def _ensure_prefixed_path(
+        self,
+        folder_path: Path,
+        name: str,
+        *,
+        paper_id: str | None = None,
+    ) -> Path:
+        """human readable hint: rename legacy files to prefixed names when safe."""
+
+        resolved_id = paper_id or PerPaperFileIndex.paper_id_hint(folder_path)
+        return self._file_index_for_folder(folder_path, paper_id=resolved_id).ensure_prefixed_path(
+            name,
+            paper_id=resolved_id,
+        )
+
+    def _compact_artifact_path_for_folder(
+        self,
+        folder_path: Path,
+        stage: str | None = None,
+        *,
+        paper_id: str | None = None,
+    ) -> Path:
         """Return per-paper compact artifact path for the target stage."""
 
         target_stage = stage or self.stage
-        return folder_path / f"{target_stage}_artifact.json"
+        return self._ensure_prefixed_path(
+            folder_path,
+            f"{target_stage}_artifact.json",
+            paper_id=paper_id,
+        )
+
+    def _compact_artifact_candidates_for_folder(
+        self,
+        folder_path: Path,
+        stage: str | None = None,
+        *,
+        paper_id: str | None = None,
+    ) -> list[Path]:
+        """human readable hint: read prefixed artifacts first, with legacy fallback."""
+
+        target_stage = stage or self.stage
+        return self._prefixed_path_candidates(
+            folder_path,
+            f"{target_stage}_artifact.json",
+            paper_id=paper_id,
+        )
 
     def _metadata_snapshot_for_folder(self, folder_path: Path, fallback: dict | None = None) -> dict:
         """Read metadata from per-stage artifact files only."""
 
-        candidate_paths = [
-            self._compact_artifact_path_for_folder(folder_path, stage=self.stage),
-            self._compact_artifact_path_for_folder(folder_path, stage="full_text"),
-            self._compact_artifact_path_for_folder(folder_path, stage="data_extraction"),
-        ]
+        candidate_paths: list[Path] = []
+        for stage_name in (self.stage, "full_text", "data_extraction"):
+            candidate = self._first_existing_prefixed_path(folder_path, f"{stage_name}_artifact.json")
+            if candidate:
+                candidate_paths.append(candidate)
 
         seen: set[Path] = set()
         for artifact_path in candidate_paths:
@@ -4844,11 +5301,17 @@ class PaperScreeningPipeline:
         metadata_snapshot: dict,
         normalized_text: str,
         target_stage: str | None = None,
+        paper_id: str | None = None,
     ) -> None:
         """Write human-checkable normalized text with metadata copied from artifact metadata."""
 
         stage_name = target_stage or self.stage
-        normalized_path = folder_path / f"{stage_name}_normalized.txt"
+        resolved_paper_id = paper_id or read_metadata_value(metadata_snapshot, "paper_id")
+        normalized_path = self._ensure_prefixed_path(
+            folder_path,
+            f"{stage_name}_normalized.txt",
+            paper_id=str(resolved_paper_id) if resolved_paper_id else None,
+        )
         content = [
             "=== metadata ===",
             json.dumps(metadata_snapshot, ensure_ascii=False, indent=2),
@@ -4870,7 +5333,11 @@ class PaperScreeningPipeline:
         """Persist compact machine artifact and synchronized human text sidecar."""
 
         folder_path = pdf_path.parent
-        artifact_path = self._compact_artifact_path_for_folder(folder_path, stage="full_text")
+        artifact_path = self._compact_artifact_path_for_folder(
+            folder_path,
+            stage="full_text",
+            paper_id=str(paper.paper_id),
+        )
         metadata_snapshot = self._metadata_snapshot_for_folder(folder_path, fallback=paper.metadata)
 
         artifact_payload: dict[str, Any] = {}
@@ -4914,6 +5381,7 @@ class PaperScreeningPipeline:
             metadata_snapshot,
             normalized_text,
             target_stage="full_text",
+            paper_id=str(paper.paper_id),
         )
 
     def _materialize_paper_folders_full_text(self) -> None:
@@ -4976,7 +5444,7 @@ class PaperScreeningPipeline:
                 paper_id = str(canonical.get("paper_id") or "").strip()
                 source_pdf = self._find_source_pdf_for_paper_id(paper_id)
                 if source_pdf and source_pdf.exists():
-                    target_pdf = folder_path / source_pdf.name
+                    target_pdf = folder_path / PerPaperFileIndex.canonical_pdf_filename(paper_id or folder_name)
                     try:
                         if source_pdf.resolve() != target_pdf.resolve():
                             shutil.copy2(source_pdf, target_pdf)
@@ -5006,6 +5474,10 @@ class PaperScreeningPipeline:
         cid = str(paper_id or "").strip().lstrip("#")
         if not cid:
             return None
+
+        safe_id = self._sanitize_paper_id_for_filename(cid)
+        artifact_prefix = f"{safe_id}_"
+        legacy_prefix = f"#{safe_id}_"
 
         candidate_folders: list[Path] = []
         direct = self.pdf_root / cid
@@ -5039,6 +5511,15 @@ class PaperScreeningPipeline:
             preferred = folder / f"{cid}.pdf"
             if preferred.exists():
                 return preferred
+            canonical_id = folder / PerPaperFileIndex.canonical_pdf_filename(safe_id)
+            if canonical_id.exists():
+                return canonical_id
+            prefixed_pdfs = sorted(folder.glob(f"{artifact_prefix}*.pdf"))
+            if prefixed_pdfs:
+                return prefixed_pdfs[0]
+            legacy_prefixed_pdfs = sorted(folder.glob(f"{legacy_prefix}*.pdf"))
+            if legacy_prefixed_pdfs:
+                return legacy_prefixed_pdfs[0]
             canonical = folder / PAPER_PDF_NAME
             if canonical.exists():
                 return canonical
@@ -5095,7 +5576,11 @@ class PaperScreeningPipeline:
             dest = target_dir / folder_name
             dest.mkdir(parents=True, exist_ok=True)
 
-            data_artifact_path = self._compact_artifact_path_for_folder(dest, stage="data_extraction")
+            data_artifact_path = self._compact_artifact_path_for_folder(
+                dest,
+                stage="data_extraction",
+                paper_id=paper_id or folder_name,
+            )
             data_artifact_payload: dict[str, Any] = {}
             if data_artifact_path.exists():
                 try:
@@ -5126,12 +5611,14 @@ class PaperScreeningPipeline:
                 if not any(dest.glob("*.pdf")):
                     pdfs = sorted(source_folder.glob("*.pdf"))
                     if pdfs:
-                        shutil.copy2(pdfs[0], dest / pdfs[0].name)
+                        target_pdf = dest / PerPaperFileIndex.canonical_pdf_filename(paper_id or folder_name)
+                        shutil.copy2(pdfs[0], target_pdf)
 
             if not any(dest.glob("*.pdf")) and paper_id:
                 source_pdf = self._find_source_pdf_for_paper_id(paper_id)
                 if source_pdf and source_pdf.exists():
-                    shutil.copy2(source_pdf, dest / source_pdf.name)
+                    target_pdf = dest / PerPaperFileIndex.canonical_pdf_filename(paper_id)
+                    shutil.copy2(source_pdf, target_pdf)
 
             if not any(dest.glob("*.pdf")):
                 missing.append(dest.name)
@@ -5154,22 +5641,18 @@ class PaperScreeningPipeline:
     def _copy_reusable_full_text_artifacts(self, source_folder: Path, dest_folder: Path) -> None:
         """human readable hint: carry full-text parsing results forward instead of deleting or re-parsing them."""
 
-        reusable_names = [
-            "full_text_artifact.json",
-            "full_text_normalized.txt",
-        ]
-        reusable_names.extend(path.name for path in sorted(source_folder.glob("*_normalized_text.txt")))
-        reusable_names.extend(path.name for path in sorted(source_folder.glob("*_normalized_pages.json")))
-        reusable_names.extend(path.name for path in sorted(source_folder.glob("*_normalized_meta.json")))
+        paper_id = self._infer_paper_id_from_folder(dest_folder)
+        prefix = f"{paper_id}_"
+        legacy_prefix = f"#{paper_id}_"
 
-        seen: set[str] = set()
-        for name in reusable_names:
-            if name in seen:
+        core_names = ["full_text_artifact.json", "full_text_normalized.txt"]
+        for name in core_names:
+            dest_path = self._prefixed_path_candidates(dest_folder, name, paper_id=paper_id)[0]
+            if dest_path.exists():
                 continue
-            seen.add(name)
-            source_path = source_folder / name
-            dest_path = dest_folder / name
-            if not source_path.exists() or dest_path.exists():
+            source_candidates = self._prefixed_path_candidates(source_folder, name, paper_id=paper_id)
+            source_path = next((candidate for candidate in source_candidates if candidate.exists()), None)
+            if not source_path:
                 continue
             try:
                 shutil.copy2(source_path, dest_path)
@@ -5179,6 +5662,26 @@ class PaperScreeningPipeline:
                     f"failed to copy reusable full-text artifact '{name}': {exc}",
                     error_type="full_text_artifact_copy_failed",
                 )
+
+        cache_patterns = ["*_normalized_text.txt", "*_normalized_pages.json", "*_normalized_meta.json"]
+        for pattern in cache_patterns:
+            for source_path in sorted(source_folder.glob(pattern)):
+                if not (source_path.name.startswith(prefix) or source_path.name.startswith(legacy_prefix)):
+                    continue
+                dest_name = source_path.name
+                if dest_name.startswith(legacy_prefix):
+                    dest_name = f"{prefix}{dest_name[len(legacy_prefix):]}"
+                dest_path = dest_folder / dest_name
+                if dest_path.exists():
+                    continue
+                try:
+                    shutil.copy2(source_path, dest_path)
+                except Exception as exc:  # pylint: disable=broad-except
+                    self._log_error(
+                        dest_folder.name,
+                        f"failed to copy reusable full-text artifact '{source_path.name}': {exc}",
+                        error_type="full_text_artifact_copy_failed",
+                    )
 
     @staticmethod
     def _find_missing_pdfs(base_dir: Path) -> list[str]:
@@ -5322,7 +5825,15 @@ class PaperScreeningPipeline:
         cache_meta_path = path.parent / f"{path.stem}_normalized_meta.json"
         advanced_mode_for_pdf = bool(self.use_advanced_pdf_parser and path.suffix.lower() == ".pdf")
         compact_mode = self._compact_artifacts_enabled()
-        compact_artifact_path = self._compact_artifact_path_for_folder(path.parent, stage="full_text")
+        compact_candidates = self._compact_artifact_candidates_for_folder(
+            path.parent,
+            stage="full_text",
+            paper_id=str(paper.paper_id),
+        )
+        compact_artifact_path = next(
+            (candidate for candidate in compact_candidates if candidate.exists()),
+            compact_candidates[0],
+        )
         cache_key: dict[str, int] = {}
 
         def _effective_page_count(pages_value: list[str]) -> int:
@@ -5356,6 +5867,7 @@ class PaperScreeningPipeline:
                                 metadata_snapshot,
                                 text,
                                 target_stage="full_text",
+                                paper_id=str(paper.paper_id),
                             )
                             for stale_path in (cache_text_path, cache_pages_path, cache_meta_path):
                                 try:
@@ -5469,7 +5981,7 @@ class PaperScreeningPipeline:
             return "", 0, None, []
 
     def _resolve_pdf_path(self, paper: PaperRecord) -> Path | None:
-        """Find the PDF inside the per-paper folder and normalize its filename."""
+        """human readable hint: find one folder PDF and normalize it to <paper_id>.pdf."""
 
         folder = paper.metadata.get("folder_path")
         if not folder:
@@ -5485,10 +5997,10 @@ class PaperScreeningPipeline:
             )
             return None
 
-        canonical = folder_path / PAPER_PDF_NAME
-        pdfs = sorted(folder_path.glob("*.pdf"))
-        if canonical.exists():
-            pdfs = [canonical] + [p for p in pdfs if p != canonical]
+        paper_id = str(read_metadata_value(paper.metadata, "paper_id", paper.paper_id)).strip()
+        safe_id = self._sanitize_paper_id_for_filename(paper_id)
+        file_index = self._file_index_for_folder(folder_path, paper_id=safe_id)
+        pdfs = file_index.pdf_candidates(paper_id=safe_id)
 
         if not pdfs:
             self._log_error(
@@ -5499,8 +6011,8 @@ class PaperScreeningPipeline:
             return None
 
         pdf_path = pdfs[0]
-        paper_id = str(read_metadata_value(paper.metadata, "paper_id", paper.paper_id)).strip().lstrip("#") or "paper"
-        target = folder_path / f"{paper_id}.pdf"
+        target_name = PerPaperFileIndex.canonical_pdf_filename(paper_id or safe_id)
+        target = folder_path / target_name
         rename_error: Exception | None = None
 
         if pdf_path != target:
@@ -5515,6 +6027,7 @@ class PaperScreeningPipeline:
                     else:
                         pdf_path.replace(target)
                     pdf_path = target
+                file_index.refresh()
             except Exception as exc:  # pylint: disable=broad-except
                 rename_error = exc
 
@@ -6608,7 +7121,11 @@ class PaperScreeningPipeline:
 
             if self._compact_artifacts_enabled():
                 artifact_stage = self.stage
-                artifact_path = self._compact_artifact_path_for_folder(folder_path, stage=artifact_stage)
+                artifact_path = self._compact_artifact_path_for_folder(
+                    folder_path,
+                    stage=artifact_stage,
+                    paper_id=str(paper.paper_id),
+                )
                 artifact_payload: dict[str, Any] = {}
                 if artifact_path.exists():
                     try:
@@ -6640,7 +7157,11 @@ class PaperScreeningPipeline:
                 if self.stage != "data_extraction" and not self.compact_keep_legacy_selected_chunks:
                     return
 
-            chunks_path = folder_path / f"{self.stage}_selected_chunks.jsonl"
+            chunks_path = self._ensure_prefixed_path(
+                folder_path,
+                f"{self.stage}_selected_chunks.jsonl",
+                paper_id=str(paper.paper_id),
+            )
             with open(chunks_path, "w", encoding="utf-8") as handle:
                 handle.write(
                     json.dumps(
@@ -6681,9 +7202,12 @@ class PaperScreeningPipeline:
             return []
 
         folder_path = Path(folder)
-        chunks_path = folder_path / f"{self.stage}_selected_chunks.jsonl"
-
-        if chunks_path.exists():
+        chunks_path = self._first_existing_prefixed_path(
+            folder_path,
+            f"{self.stage}_selected_chunks.jsonl",
+            paper_id=str(paper.paper_id),
+        )
+        if chunks_path:
             try:
                 with open(chunks_path, "r", encoding="utf-8") as handle:
                     for line in handle:
@@ -6699,10 +7223,15 @@ class PaperScreeningPipeline:
                     error_type="selected_chunks_read_failed",
                 )
 
-        artifact_candidates = [
-            self._compact_artifact_path_for_folder(folder_path, stage=self.stage),
-            self._compact_artifact_path_for_folder(folder_path, stage="full_text"),
-        ]
+        artifact_candidates: list[Path] = []
+        for stage_name in (self.stage, "full_text"):
+            candidate = self._first_existing_prefixed_path(
+                folder_path,
+                f"{stage_name}_artifact.json",
+                paper_id=str(paper.paper_id),
+            )
+            if candidate:
+                artifact_candidates.append(candidate)
         seen_paths: set[Path] = set()
         for artifact_path in artifact_candidates:
             if artifact_path in seen_paths or not artifact_path.exists():

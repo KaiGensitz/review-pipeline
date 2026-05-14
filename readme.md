@@ -147,15 +147,17 @@ Behavior notes:
   - PDFs: one PDF per folder in `input/per_paper_full_text/`
   - first run behavior: `main.py` creates `per_paper_full_text/` folders and stops; upload all PDFs, then rerun to start screening
   - per-paper machine artifacts use `SCREENING_DEFAULTS["artifact_mode"]` (default `compact`)
-  - compact mode writes `full_text_artifact.json` plus a human-readable `full_text_normalized.txt`
+  - compact mode writes `<paper_id>_full_text_artifact.json` plus a human-readable `<paper_id>_full_text_normalized.txt`
   - full mode keeps legacy normalized cache sidecars (`*_normalized_text.txt`, `*_normalized_pages.json`, `*_normalized_meta.json`)
 - `data_extraction`
   - input CSV: `*_included_csv_*.csv`
   - Knowledge-base default: [knowledge-base/data_extraction_pos-neg_examples.csv](knowledge-base/data_extraction_pos-neg_examples.csv)
   - Knowledge-base override: set `KNOWLEDGE_BASE_FILES["data_extraction"]` or `KB_FILE_OVERRIDES["data_extraction"]` in [config/user_orchestrator.py](config/user_orchestrator.py)
   - PDFs reused in `input/per_paper_data_extraction/`
-  - before QC sampling or full screening, data extraction checks every included per-paper folder for usable `full_text_normalized.txt`; missing files are generated from the folder PDF with the same normalized full-text artifact path used by `full_text`
-  - data extraction preserves reusable full-text artifacts, writes/updates `data_extraction_artifact.json`, and keeps `data_extraction_selected_chunks.jsonl` as chunk-audit evidence even when the LLM prompt uses full normalized text
+  - after QC sampling chooses the active paper set, data extraction checks each active per-paper folder for usable `<paper_id>_full_text_normalized.txt`; missing files are generated from the folder PDF with the same normalized full-text artifact path used by `full_text`
+  - normalized/full-PDF length sanity checks are cached by PDF size, PDF modified time, and normalized-text hash, so unchanged papers skip repeated direct PDF reparsing on later runs
+  - data extraction preserves reusable full-text artifacts, writes/updates `<paper_id>_data_extraction_artifact.json`, and keeps `<paper_id>_data_extraction_selected_chunks.jsonl` as chunk-audit evidence even when the LLM prompt uses full normalized text
+  - per-paper input artifacts are canonicalized with the `<paper_id>_` prefix; legacy unprefixed or hash-prefixed names are read only as backward-compatible fallbacks and are not created by new runs
   - extraction schema and consensus/export-header validation mapping are read from `DATA_EXTRACTION_SCHEMA_FILE` in [config/user_orchestrator.py](config/user_orchestrator.py)
   - CSV/admin headers are read through `CSV_METADATA_COLUMN_ALIASES` and `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS` in [config/user_orchestrator.py](config/user_orchestrator.py); pipeline Python stays topic- and export-vendor-generic
   - prompt-to-domain matching uses schema text plus optional `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` in [config/user_orchestrator.py](config/user_orchestrator.py)
@@ -265,9 +267,9 @@ In `output/<stage>/` (or per-paper subfolders for extraction):
 - CodeCarbon emissions CSV (merged per sample with `run` column)
 
 Full-text per-paper input artifacts (`input/per_paper_full_text/<paper_folder>/`):
-- always: `full_text_artifact.json` and one PDF
-- compact mode (default): `full_text_artifact.json`, `full_text_normalized.txt`
-- optional in compact mode: `full_text_selected_chunks.jsonl` only when `compact_keep_legacy_selected_chunks=True`
+- always: one `<paper_id>.pdf` file plus `<paper_id>_`-prefixed stage artifacts
+- compact mode (default): `<paper_id>_full_text_artifact.json`, `<paper_id>_full_text_normalized.txt`
+- optional in compact mode: `<paper_id>_full_text_selected_chunks.jsonl` only when `compact_keep_legacy_selected_chunks=True`
 - full mode: legacy normalized sidecars (`*_normalized_text.txt`, `*_normalized_pages.json`, `*_normalized_meta.json`)
 
 Data extraction additionally writes per-paper:
