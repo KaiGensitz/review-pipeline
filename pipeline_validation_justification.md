@@ -21,6 +21,8 @@ The current implementation also strengthens extraction guidance for the variable
 
 Update on 2026-05-13: comparison of validation runs v21, v22, and v23 showed that the recent metric decrease was driven by a small set of unstable data-extraction variables rather than by a denominator change. The active schema and data-extraction prompt now add QC calibration for `smartphone_usage`, `AI_transparency`, `human_AI_interaction`, `development_process`, `setting`, `reported`, `mean_age`, and `continent`, emphasizing concise manuscript labels and reviewer-like keywords over broad synthesis. The validation configuration now also includes explicit user-editable semantic alias groups for unambiguous acceptable paraphrases. These changes keep topic-specific calibration in `config/` and `knowledge-base/`, while `pipeline/` remains generic validation machinery.
 
+Update on 2026-05-14: the active data-extraction schema now separates urbanicity from concrete venue detail more strictly. `setting` is a single-choice urbanicity field (`urban area`, `rural area`, `both`, or `n/a`), while `country` and `continent` carry geographic context and may use first-author country only when no study country is reported. `AI_transparency` now extracts descriptive transparency-relevant AI detail, including explicit referrals to named sources containing those details, but rejects privacy, hosting, system-prompt, and safety-guardrail text unless they explain the AI mechanism, deployment workflow, development, or rationale. `mean_age` now has a stronger table-rescue instruction to prioritize baseline/demographic age descriptions over eligibility thresholds whenever enrolled participant data exist.
+
 ## Validation Procedure Rationale (Manuscript Justification)
 
 The validation strategy is designed to be methodologically transparent and conservative while still allowing targeted improvement of the extraction system. The key scientific choices are:
@@ -317,3 +319,22 @@ The regenerated active report showed:
 - quote-aware accuracy = 84.89%.
 
 The small difference from the earlier side audit reflects tighter missing-value safeguards and the current explicit language/equivalence aliases in `config/user_orchestrator.py`. The report remains transparent because strict lower-bound values and quote-aware reasons are preserved in `output/data_extraction/data_extraction_extraction_validation_cell_audit.csv`.
+
+## Data Extraction AI-Transparency Calibration
+
+Date: 2026-05-14.
+
+The data-extraction prompt and schema were recalibrated so `AI_transparency` extracts descriptive evidence about transparency-relevant AI mechanism, deployment workflow, development, and rationale without prompting the model to return a yes/no answer.
+
+For manuscript traceability, the field now accepts explicit evidence about any of the following:
+
+- how the AI is used in the intervention or assessment;
+- how it is deployed in an app, server, or workflow;
+- how it was developed or trained;
+- what inputs, features, or data it uses;
+- what algorithm, model, or rule selects outputs;
+- why prompts, recommendations, feedback, alerts, or goals are generated;
+- how actual-versus-expected feedback logic, explainability, interpretability, or user-facing/reviewer-facing rationale is described;
+- explicit primary-manuscript referrals to a named report, protocol, development paper, appendix, supplement, or cited source where those details are provided.
+
+The exclusion side was also sharpened: AI buzzwords, commercial model names, privacy/security text, hosting details, generic system prompts, chatbot safety restrictions, and medical-disclaimer guardrails do not count unless they explain usage, deployment, development, method logic, or rationale.
