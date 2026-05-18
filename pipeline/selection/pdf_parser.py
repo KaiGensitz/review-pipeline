@@ -1,7 +1,7 @@
 """Layout-aware PDF to Markdown extraction for screening workflows.
 
 This module provides a single public function,
-`extract_markdown_from_pdf`, that is resilient to parser failures
+`extract_markdown_from_pdf_with_level`, that is resilient to parser failures
 and always returns a string so the main pipeline does not crash.
 """
 
@@ -437,13 +437,6 @@ def extract_markdown_from_pdf_with_level(pdf_path: Path) -> tuple[str, str]:
         return _coerce_to_text(markdown_text), parser_level
 
 
-def extract_markdown_from_pdf(pdf_path: Path) -> str:
-    """Extract Markdown from PDF and return text only (compatibility wrapper)."""
-
-    markdown_text, _ = extract_markdown_from_pdf_with_level(pdf_path)
-    return markdown_text
-
-
 def warm_docling_for_pdf(pdf_path: Path, timeout_seconds: int | None = None) -> bool:
     """Warm Docling model assets by forcing one Docling conversion attempt."""
 
@@ -456,7 +449,6 @@ def warm_docling_for_pdf(pdf_path: Path, timeout_seconds: int | None = None) -> 
 
 
 __all__ = [
-    "extract_markdown_from_pdf",
     "extract_markdown_from_pdf_with_level",
     "warm_docling_for_pdf",
 ]

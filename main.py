@@ -16,9 +16,11 @@ from config.user_orchestrator import (
     STAGE_RULES,
     CITATION_SEARCHING_SCREENING,
     CITATION_SEARCHING_STAGE_RULES,
+    STAGE_HANDOFF_SETTINGS,
 )
 from pipeline.core.run_screening import run_pipeline
 from pipeline.core.citation_io import CitationCsvParser
+from pipeline.core.stage_handoff import latest_handoff_for_stage
 from pipeline.additions.resource_usage import backfill_time_savings
 from pipeline.additions.retry_flow import (
     _archive_retry_csv,
@@ -520,6 +522,12 @@ class MainWorkflow:
             print(f"[main] Run scope: {self.run_scope}")
         if self.citation_searching_mode:
             print("[main] Citation-searching mode: ON (QC sampling disabled).")
+        if not input_files and not self.citation_searching_mode:
+            auto_handoff = _latest_auto_handoff_for_stage(stage)
+            if auto_handoff:
+                input_files = [str(auto_handoff)]
+                self.input_files = input_files
+                print(f"[handoff] Auto-selected latest previous-stage handoff for {stage}: {auto_handoff}")
         if input_files:
             print("[main] Explicit input file(s):")
             for path in input_files:
@@ -797,6 +805,20 @@ def _active_stage_rule(stage: str, *, citation_searching: bool = False) -> dict:
     if citation_searching:
         rule.update(CITATION_SEARCHING_STAGE_RULES.get(stage, {}))
     return rule
+
+
+def _latest_auto_handoff_for_stage(stage: str) -> Path | None:
+    """human readable hint: use the newest previous-stage CSV handoff only when the user supplied no file."""
+
+    if not bool(STAGE_HANDOFF_SETTINGS.get("enabled", True)):
+        return None
+    if not bool(STAGE_HANDOFF_SETTINGS.get("auto_use_latest_previous_handoff", True)):
+        return None
+    configured_dir = Path(
+        STAGE_HANDOFF_SETTINGS.get("output_dir")
+        or Path(PATH_SETTINGS["csv_dir"])
+    )
+    return latest_handoff_for_stage(stage, configured_dir)
 
 
 def _prepare_citation_searching_delta(csv_dir: Path, stage: str) -> list[str]:

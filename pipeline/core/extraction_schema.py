@@ -8,7 +8,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping, cast, get_args
+from typing import Any, Literal, Mapping, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 
@@ -23,8 +23,8 @@ REQUIRED_KB_COLUMNS = {
     "variable_type",
     "allowed_options",
     "instruction",
-    "covidence_column_name",
 }
+CONSENSUS_COLUMN_FIELDS = ("consensus_column_name", "covidence_column_name")
 PROMPT_MARKER_REPLACEMENTS = {
     "{extraction_domain_overview}": "domain_overview",
     "{extraction_schema_instructions}": "schema_instructions",
@@ -61,6 +61,12 @@ class ExtractionVariable:
     human_reviewer_instruction: str = ""
     evidence_profile: str = ""
     do_not_infer_from: str = ""
+
+    @property
+    def consensus_column_name(self) -> str:
+        """human readable hint: generic name for the schema-owned human consensus/export column."""
+
+        return self.covidence_column_name
 
     @property
     def value_key(self) -> str:
@@ -279,7 +285,7 @@ class SchemaEvidenceHintBuilder:
             [
                 variable.domain,
                 variable.variable_name.replace("_", " "),
-                variable.covidence_column_name,
+                variable.consensus_column_name,
                 variable.instruction,
                 variable.human_reviewer_instruction,
                 variable.evidence_profile,
@@ -467,12 +473,6 @@ class DynamicExtractionSchema:
             domain_overview_text=domain_overview_text,
         )
 
-    @classmethod
-    def from_prompt(cls, _prompt_text: str) -> "DynamicExtractionSchema":
-        """human readable hint: compatibility shim; extraction schemas now always come from the CSV KB."""
-
-        return cls.from_kb()
-
     def inject_into_prompt(self, prompt_template: str) -> str:
         """human readable hint: combine the human prompt framework with the CSV machine schema at runtime."""
 
@@ -519,11 +519,6 @@ class DynamicExtractionSchema:
             seen.add(variable.domain)
             ordered.append(variable.domain)
         return tuple(ordered)
-
-    def for_domain(self, domain: str) -> "DynamicExtractionSchema":
-        """human readable hint: build a smaller schema for one domain so the LLM returns shorter JSON."""
-
-        return self.for_domains((domain,))
 
     def for_domains(self, domains: Iterable[str]) -> "DynamicExtractionSchema":
         """human readable hint: build a scoped schema for one or more configured domains."""
@@ -761,7 +756,7 @@ def _aliases_for_domains(domains: tuple[str, ...], variables: tuple[ExtractionVa
             aliases.add(_normalize_prompt_text(alias))
     for variable in variables:
         aliases.add(_normalize_prompt_text(variable.variable_name))
-        aliases.add(_normalize_prompt_text(variable.covidence_column_name))
+        aliases.add(_normalize_prompt_text(variable.consensus_column_name))
     return {alias for alias in aliases if alias}
 
 
@@ -800,6 +795,11 @@ def load_extraction_variables(kb_path: Path) -> list[ExtractionVariable]:
         missing = REQUIRED_KB_COLUMNS - columns
         if missing:
             raise ValueError(f"Extraction schema KB missing required columns: {sorted(missing)}")
+        if not any(column_name in columns for column_name in CONSENSUS_COLUMN_FIELDS):
+            raise ValueError(
+                "Extraction schema KB missing required consensus/export column. "
+                "Use 'consensus_column_name' for new schemas or legacy 'covidence_column_name'."
+            )
 
         variables: list[ExtractionVariable] = []
         seen: set[tuple[str, str]] = set()
@@ -812,7 +812,7 @@ def load_extraction_variables(kb_path: Path) -> list[ExtractionVariable]:
             )
             variable_type = _normalize_variable_type(row.get("variable_type", ""))
             instruction = str(row.get("instruction") or "").strip()
-            covidence_column_name = str(row.get("covidence_column_name") or "").strip()
+            consensus_column_name = _read_consensus_column_name(row)
             allowed_options = tuple(_split_allowed_options(row.get("allowed_options", "")))
             semantic_anchors = tuple(_split_semantic_anchors(row.get("semantic_anchors", "")))
             human_reviewer_instruction = str(row.get("human_reviewer_instruction") or "").strip()
@@ -828,9 +828,9 @@ def load_extraction_variables(kb_path: Path) -> list[ExtractionVariable]:
                 raise ValueError(f"Enum variable requires allowed_options at row {row_number}: {domain}.{variable_name}")
             if not instruction:
                 raise ValueError(f"Extraction variable requires an instruction at row {row_number}: {domain}.{variable_name}")
-            if not covidence_column_name:
+            if not consensus_column_name:
                 raise ValueError(
-                    f"Extraction variable requires covidence_column_name at row {row_number}: {domain}.{variable_name}"
+                    f"Extraction variable requires consensus_column_name at row {row_number}: {domain}.{variable_name}"
                 )
 
             variables.append(
@@ -840,7 +840,7 @@ def load_extraction_variables(kb_path: Path) -> list[ExtractionVariable]:
                     variable_type=variable_type,
                     allowed_options=allowed_options,
                     instruction=instruction,
-                    covidence_column_name=covidence_column_name,
+                    covidence_column_name=consensus_column_name,
                     semantic_anchors=semantic_anchors,
                     human_reviewer_instruction=human_reviewer_instruction,
                     evidence_profile=evidence_profile,
@@ -948,7 +948,7 @@ def format_instruction_block(variables: tuple[ExtractionVariable, ...], response
         extra_text = " " + " ".join(extras) if extras else ""
         lines.append(
             f"- [{variable.domain}] {variable.variable_name}: {variable.instruction}"
-            f" Consensus/export column: {variable.covidence_column_name}.{allowed}{extra_text}"
+            f" Consensus/export column: {variable.consensus_column_name}.{allowed}{extra_text}"
         )
 
     lines.extend(
@@ -981,6 +981,16 @@ def parse_and_validate(raw_text: str, schema: DynamicExtractionSchema) -> tuple[
     except (ValueError, json.JSONDecodeError, ValidationError) as exc:
         error = str(exc) or exc.__class__.__name__
         return schema.default_payload(), error
+
+
+def validate_llm_extraction(raw_text: str | None, schema: DynamicExtractionSchema) -> tuple[dict[str, Any], str | None]:
+    """human readable hint: normalize empty/API-error LLM outputs before schema validation."""
+
+    if not raw_text:
+        return schema.default_payload(), "empty_response"
+    if isinstance(raw_text, str) and raw_text.startswith("LLM error"):
+        return schema.default_payload(), raw_text
+    return parse_and_validate(raw_text, schema)
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
@@ -1243,6 +1253,16 @@ def _split_semantic_anchors(value: str | None) -> list[str]:
     return deduped
 
 
+def _read_consensus_column_name(row: dict[str, Any]) -> str:
+    """human readable hint: prefer generic schema naming while accepting legacy schema CSVs."""
+
+    for column_name in CONSENSUS_COLUMN_FIELDS:
+        value = str(row.get(column_name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _safe_json_key(value: str | None, *, label: str, preserve_case: bool = False) -> str:
     """human readable hint: convert KB labels into JSON-safe snake_case keys while rejecting blank names."""
 
@@ -1263,9 +1283,3 @@ def _model_name(value: str) -> str:
 
     parts = [part.capitalize() for part in re.split(r"[^A-Za-z0-9]+", value) if part]
     return "".join(parts) or "ExtractionDomain"
-
-
-def literal_options(annotation: Any) -> tuple[str, ...]:
-    """human readable hint: expose enum values for tests and documentation without importing typing internals elsewhere."""
-
-    return tuple(str(option) for option in get_args(annotation))

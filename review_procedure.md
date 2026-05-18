@@ -38,6 +38,7 @@ This document defines the execution order for screening and extraction runs.
 - Stage KB file exists with `label` (`POS`/`NEG`) and `text` columns.
 - For `data_extraction`, `DATA_EXTRACTION_SCHEMA_FILE` in `config/user_orchestrator.py` points to an existing schema CSV with consensus/export column mappings.
 - If your input/export headers differ, update `CSV_METADATA_COLUMN_ALIASES`, `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, and optional extraction header fallbacks in `config/user_orchestrator.py` before running.
+- `STAGE_HANDOFF_SETTINGS` controls the direct CSV chain between stages. By default, handoff CSVs are written to `input/` with the existing `*_select_csv_*` and `*_included_csv_*` naming conventions, and the next stage auto-uses the newest matching handoff when no `--input-file` is supplied.
 - Optional for `full_text`: cleaned-hybrid draft generated and selected via `KB_FILE_OVERRIDES["full_text"]` when you want the draft instead of the default full-text KB.
 
 ## Stage 0: Bootstrap KB and Prompt Suggestions
@@ -69,6 +70,17 @@ To use it in a run, set `KB_FILE_OVERRIDES["full_text"]` in [config/user_orchest
 
 Do not skip stage order.
 
+Default operational input chain:
+
+1. Start `title_abstract` with a bibliographic CSV export that uses supported headers and is renamed into the existing input convention:
+	- `input/<descriptive_name>_screen_csv_<timestamp>.csv`
+	- Any sample export file is only a structural template for headers, not the required file name.
+	- Run: `python main.py --stage title_abstract`
+2. After title/abstract screening, use the generated `title_abstract_to_full_text_select_csv_*.csv` as the full-text input:
+	- `python main.py --stage full_text`
+3. After full-text screening, use the generated `full_text_to_data_extraction_included_csv_*.csv` as the data-extraction input:
+	- `python main.py --stage data_extraction`
+
 ## Run Model per Stage
 
 Every stage follows two passes:
@@ -98,6 +110,7 @@ Use this section when you need to know exactly when parsing, embeddings, LLM cal
 7. If QC validation is accepted, remaining-pass screening starts.
 8. If `QC_ENABLED=False`, the run skips QC branch and goes directly to remaining-pass screening.
 9. At end of any pass, unresolved errors can trigger retry prompts. Retry outputs are written separately and tracked in the retry manifest.
+10. After final title_abstract/full_text remaining runs, canonical handoff CSVs are written from the final merged eligibility JSONL so QC and remaining records are represented in one next-stage input.
 
 ### B) Per-paper technical call chain (screening run)
 
@@ -154,7 +167,7 @@ Use this section when you need to know exactly when parsing, embeddings, LLM cal
 	- `full_text` (default): pass cached normalized full text to each domain-wise extraction call. Pros: best recall and quote coverage. Cons: high token use. `data_extraction_pos-neg_examples.csv` is mostly optional/fallback infrastructure.
 	- `selected_chunks`: pass retrieval-selected evidence chunks only. Pros: much cheaper and faster. Cons: can miss fields if retrieval misses evidence. `data_extraction_pos-neg_examples.csv` becomes important and should contain curated POS/NEG extraction snippets.
 	- Optional hybrid rescue: set `data_extraction_hybrid_rescue_enabled=True` only after QC justification. Full text remains primary; semantic retrieval produces auditable second-opinion rows for configured variables/domains.
-3. Prepare the schema CSV referenced by `DATA_EXTRACTION_SCHEMA_FILE`; each row maps a dynamic LLM variable to an exact consensus/export header in `covidence_column_name`.
+3. Prepare the schema CSV referenced by `DATA_EXTRACTION_SCHEMA_FILE`; each row maps a dynamic LLM variable to an exact consensus/export column in `consensus_column_name` for new schemas, with legacy `covidence_column_name` accepted.
 4. Confirm `CSV_METADATA_COLUMN_ALIASES` can read the included CSV's paper ID/title/year columns and `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS` matches the aggregate comparison/audit headers you want.
 5. Edit `config/prompt_script_data_extraction.txt` as the human-readable conceptual framework. Do not add technical schema placeholders; the pipeline inserts the active CSV contract automatically before `# CONTEXT`.
 6. If a prompt section does not map cleanly to a schema domain, add bridge terms in `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES`.

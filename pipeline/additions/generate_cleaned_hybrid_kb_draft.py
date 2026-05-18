@@ -8,34 +8,14 @@ import json
 from pathlib import Path
 import re
 
+from pipeline.selection.prompt_signals import retrieval_terms
 
-DOMAIN_KEYWORDS = {
-    "intervention",
-    "exposure",
-    "participants",
-    "sample",
-    "outcome",
-    "measure",
-    "method",
-    "analysis",
-    "follow-up",
-}
 
-NEGATIVE_SIGNAL_KEYWORDS = {
-    "review",
-    "meta-analysis",
-    "simulation",
-    "abm",
-    "children",
-    "adolescent",
-    "non-empirical",
-    "commentary",
-    "protocol",
-}
-
-POS_METHOD_KEYWORDS = {"participants", "sample", "baseline", "follow-up", "randomized", "cohort"}
-POS_INTERVENTION_KEYWORDS = {"intervention", "exposure", "program", "implementation", "delivery"}
-POS_OUTCOME_KEYWORDS = {"outcome", "measure", "effect", "result", "finding", "endpoint"}
+DOMAIN_KEYWORDS = retrieval_terms("cleaned_hybrid_domain_terms")
+GENERIC_NEGATIVE_SIGNAL_KEYWORDS = retrieval_terms("cleaned_hybrid_negative_terms")
+POS_METHOD_KEYWORDS = retrieval_terms("cleaned_hybrid_positive_method_terms")
+POS_PRIMARY_KEYWORDS = retrieval_terms("cleaned_hybrid_positive_primary_terms")
+POS_SECONDARY_KEYWORDS = retrieval_terms("cleaned_hybrid_positive_secondary_terms")
 
 REFERENCE_PATTERN = re.compile(
     r"\b(references?|bibliography|copyright|all rights reserved|doi)\b",
@@ -194,14 +174,15 @@ def _quality_metrics(text: str) -> dict[str, float | int | bool]:
         if keyword in lower:
             signal_hits += 1
     exclusion_hits = 0
-    for keyword in NEGATIVE_SIGNAL_KEYWORDS:
+    # human readable hint: NEG signals stay generic and avoid topic/protocol-specific population assumptions.
+    for keyword in GENERIC_NEGATIVE_SIGNAL_KEYWORDS:
         if keyword in lower:
             signal_hits += 1
             exclusion_hits += 1
 
     method_hits = sum(1 for keyword in POS_METHOD_KEYWORDS if keyword in lower)
-    intervention_hits = sum(1 for keyword in POS_INTERVENTION_KEYWORDS if keyword in lower)
-    outcome_hits = sum(1 for keyword in POS_OUTCOME_KEYWORDS if keyword in lower)
+    primary_hits = sum(1 for keyword in POS_PRIMARY_KEYWORDS if keyword in lower)
+    secondary_hits = sum(1 for keyword in POS_SECONDARY_KEYWORDS if keyword in lower)
 
     alpha_chars = sum(ch.isalpha() for ch in chars)
     avg_token_len = sum(len(token) for token in words) / max(word_count, 1)
@@ -216,8 +197,8 @@ def _quality_metrics(text: str) -> dict[str, float | int | bool]:
         "signal_hits": signal_hits,
         "exclusion_hits": exclusion_hits,
         "method_hits": method_hits,
-        "intervention_hits": intervention_hits,
-        "outcome_hits": outcome_hits,
+        "primary_hits": primary_hits,
+        "secondary_hits": secondary_hits,
         "reference_like": bool(REFERENCE_PATTERN.search(lower)),
         "low_value_like": bool(LOW_VALUE_PATTERN.search(lower)),
     }
@@ -306,8 +287,8 @@ def _build_chunk_candidates(
         signal_hits = int(metrics.get("signal_hits", 0) or 0)
         exclusion_hits = int(metrics.get("exclusion_hits", 0) or 0)
         method_hits = int(metrics.get("method_hits", 0) or 0)
-        intervention_hits = int(metrics.get("intervention_hits", 0) or 0)
-        outcome_hits = int(metrics.get("outcome_hits", 0) or 0)
+        primary_hits = int(metrics.get("primary_hits", 0) or 0)
+        secondary_hits = int(metrics.get("secondary_hits", 0) or 0)
         reference_like = bool(metrics.get("reference_like", False))
         low_value_like = bool(metrics.get("low_value_like", False))
 
@@ -340,7 +321,7 @@ def _build_chunk_candidates(
             continue
 
         if row.label == "POS":
-            positive_families = int(method_hits > 0) + int(intervention_hits > 0) + int(outcome_hits > 0)
+            positive_families = int(method_hits > 0) + int(primary_hits > 0) + int(secondary_hits > 0)
             if positive_families < 2:
                 skipped["pos_missing_generic_evidence_families"] += 1
                 continue
@@ -412,12 +393,11 @@ def _to_hybrid_rows(candidates: list[ChunkCandidate]) -> list[ExampleRow]:
     for candidate in candidates:
         if candidate.label == "POS":
             reasoning = (
-                "Positive hybrid example from cleaned full-text chunk with topic-relevant method, intervention/exposure, or outcome evidence."
+                "Positive hybrid example from cleaned full-text chunk with configured method, primary-scope, or secondary-scope evidence."
             )
         else:
             reasoning = (
-                "Negative hybrid example from cleaned full-text chunk preserving exclusion-relevant evidence "
-                "(for example review, simulation, non-adult target, or weak participant-level evidence)."
+                "Negative hybrid example from cleaned full-text chunk preserving generic exclusion-relevant evidence."
             )
 
         source = f"{candidate.source_base} | hybrid_cleaned_chunk_draft"
@@ -475,7 +455,11 @@ def main() -> None:
         max_chunks_per_source=max(1, int(args.max_chunks_per_source)),
     )
 
-    hybrid_rows = short_rows + _to_hybrid_rows(selected_pos) + _to_hybrid_rows(selected_neg)
+    hybrid_rows = (
+        short_rows
+        + _to_hybrid_rows(selected_pos)
+        + _to_hybrid_rows(selected_neg)
+    )
     _write_csv(args.output_kb, hybrid_rows)
 
     final_pos = sum(1 for row in hybrid_rows if row.label == "POS")

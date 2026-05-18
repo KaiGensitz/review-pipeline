@@ -52,8 +52,8 @@ def _recommended_fix(human_tag: str, human_note: str, mismatch_type: str) -> str
     if "language not en/de" in tag:
         return "Verify language gate diagnostics and detected language code handling."
 
-    if "wrong publication type" in tag or "no intervention" in note:
-        return "Increase exclusion weight for papers without the required empirical design or participant exposure."
+    if "wrong publication type" in tag or "required scope" in note:
+        return "Increase exclusion weight for papers without the required empirical design or configured scope evidence."
 
     if mismatch_type == "FP":
         return "Tighten the prompt logic for the human exclusion tag and require stronger direct evidence."

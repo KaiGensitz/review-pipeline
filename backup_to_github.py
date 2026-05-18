@@ -1,4 +1,14 @@
-"""Direct run: `python backup_to_github.py`"""
+"""Back up the currently checked-out Git branch to GitHub.
+
+Direct run:
+    python backup_to_github.py
+
+This script is intentionally small and explicit. It backs up the branch you are
+already on by staging tracked/untracked non-ignored files, creating one commit,
+and pushing that commit to the branch's configured upstream.
+"""
+
+from __future__ import annotations
 
 import subprocess
 import sys
@@ -8,16 +18,19 @@ from datetime import datetime
 def _default_backup_message() -> str:
     """human readable hint: build a timestamped default commit message at runtime."""
 
-    return f"Automated backup after pipeline run on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return f"Automated backup after pipeline run on {timestamp}"
 
 
 def prompt_commit_message(default_message: str) -> str:
-    """human readable hint: ask user for commit message and fall back to default when needed."""
+    """human readable hint: ask for a commit message but keep non-interactive runs safe."""
 
+    # human readable hint: scheduled/non-interactive runs cannot answer prompts, so use the default.
     if not sys.stdin.isatty():
         print(f"Non-interactive terminal detected. Using default commit message: {default_message}")
         return default_message
 
+    # human readable hint: an empty answer is not an error; it means "use the suggested message".
     print("Enter commit message for this backup commit.")
     print("Press Enter to use the default shown below.")
     print(f"Default: {default_message}")
@@ -29,16 +42,12 @@ def prompt_commit_message(default_message: str) -> str:
 
     return user_input if user_input else default_message
 
-class BackupToGitHub:
-    """human readable hint: one-class backup workflow with explicit command methods and one run entrypoint."""
 
-    def __init__(self, backup_message: str) -> None:
-        """human readable hint: __init__ stores the commit message used for the backup commit."""
-
-        self.backup_message = backup_message
+class GitCommandRunner:
+    """human readable hint: one small object owns all subprocess calls to Git."""
 
     def run_command(self, cmd: list[str]) -> None:
-        """human readable hint: run one git command and stop the script when the command fails."""
+        """human readable hint: run one Git command and stop immediately if it fails."""
 
         print(f"Running: {' '.join(cmd)}")
         result = subprocess.run(cmd, check=False)
@@ -47,7 +56,7 @@ class BackupToGitHub:
             sys.exit(result.returncode)
 
     def has_staged_changes(self) -> bool:
-        """human readable hint: detect whether there is anything staged before committing."""
+        """human readable hint: return True only when `git add` staged something commit-worthy."""
 
         result = subprocess.run(["git", "diff", "--cached", "--quiet"], check=False)
         if result.returncode == 0:
@@ -56,31 +65,51 @@ class BackupToGitHub:
             return True
         print("Command failed: git diff --cached --quiet")
         sys.exit(result.returncode)
+        return False
+
+
+class BackupToGitHub:
+    """human readable hint: current-branch backup workflow with one public run method."""
+
+    def __init__(self, backup_message: str, runner: GitCommandRunner | None = None) -> None:
+        """human readable hint: store the commit message and injectable Git command runner."""
+
+        self.backup_message = backup_message
+        self.runner = runner or GitCommandRunner()
 
     def run_backup(self) -> None:
-        """human readable hint: execute pull, add, commit, and push in safe sequence."""
+        """human readable hint: update branch, commit local changes, and push to GitHub."""
 
-        self.run_command(["git", "pull", "--ff-only"])
-        self.run_command(["git", "add", "-A"])
-        if not self.has_staged_changes():
+        # human readable hint: fast-forward only avoids accidental merge commits during a backup.
+        self.runner.run_command(["git", "pull", "--ff-only"])
+
+        # human readable hint: .gitignore decides what stays local; `git add -A` captures all allowed changes.
+        self.runner.run_command(["git", "add", "-A"])
+
+        # human readable hint: if nothing changed, there is no commit to make and no push is needed.
+        if not self.runner.has_staged_changes():
             print("No staged changes detected. Skipping commit and push.")
             return
-        self.run_command(["git", "commit", "-m", self.backup_message])
-        self.run_command(["git", "push"])
-        print("Backup complete! Your changes are now on GitHub.")
+
+        # human readable hint: one backup run produces one Git commit for traceable rollback.
+        self.runner.run_command(["git", "commit", "-m", self.backup_message])
+        self.runner.run_command(["git", "push"])
+        print("Backup complete. Your current branch changes are now on GitHub.")
 
 
 def run(cmd: list[str]) -> None:
-    """Compatibility wrapper for older calls."""
+    """human readable hint: compatibility wrapper for older code that imported `run`."""
 
-    BackupToGitHub(_default_backup_message()).run_command(cmd)
+    GitCommandRunner().run_command(cmd)
 
 
-def main():
-    # human readable hint: pulling first reduces push conflicts when multiple users work on the repo.
+def main() -> None:
+    """human readable hint: command-line entrypoint for current-branch backup."""
+
     default_message = _default_backup_message()
     commit_message = prompt_commit_message(default_message)
     BackupToGitHub(commit_message).run_backup()
+
 
 if __name__ == "__main__":
     main()

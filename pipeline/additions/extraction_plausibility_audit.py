@@ -16,7 +16,7 @@ from typing import Any
 
 from config.user_orchestrator import (
     DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS,
-    DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES,
+    DATA_EXTRACTION_CONSENSUS_HEADER_ALIASES,
     DATA_EXTRACTION_SCHEMA_FILE,
     PATH_SETTINGS,
 )
@@ -164,11 +164,11 @@ class SchemaColumnResolver:
 
     def _value_column(self, variable: ExtractionVariable) -> str | None:
         candidates = [
-            variable.covidence_column_name,
+            variable.consensus_column_name,
             variable.variable_name,
             f"{variable.domain}.{variable.variable_name}",
         ]
-        candidates.extend(DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES.get(f"{variable.domain}.{variable.variable_name}", []))
+        candidates.extend(DATA_EXTRACTION_CONSENSUS_HEADER_ALIASES.get(f"{variable.domain}.{variable.variable_name}", []))
         for candidate in candidates:
             header = self.table.header_by_key.get(_normal_key(candidate))
             if header:
@@ -447,7 +447,7 @@ class PlausibilityAuditor:
             "title": self.candidate.title_for(paper_id) or self.baseline.title_for(paper_id),
             "domain": ref.variable.domain,
             "variable": ref.variable.variable_name,
-            "consensus_column": ref.value_column or ref.variable.covidence_column_name,
+            "consensus_column": ref.value_column or ref.variable.consensus_column_name,
             "value": value,
             "quote": quote,
             "details": details,
@@ -737,7 +737,7 @@ class PlausibilityAuditor:
         """human readable hint: locate generic population variables by schema names rather than export headers."""
 
         for ref in self.schema_refs:
-            haystack = _normal_key(f"{ref.variable.variable_name} {ref.variable.covidence_column_name}")
+            haystack = _normal_key(f"{ref.variable.variable_name} {ref.variable.consensus_column_name}")
             if all(token in haystack for token in required_tokens):
                 return ref
         return None

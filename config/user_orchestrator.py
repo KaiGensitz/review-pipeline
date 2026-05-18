@@ -95,7 +95,7 @@ PROMPT_FILES = {
 }
 
 # USER-EDITABLE DATA-EXTRACTION SCHEMA.
-# human readable hint: this CSV defines extraction variables, types, instructions, and Covidence headers.
+# human readable hint: this CSV defines extraction variables, types, instructions, and consensus/export headers.
 # human readable hint: change this only when you intentionally switch to a different machine-readable extraction schema.
 DATA_EXTRACTION_SCHEMA_FILE = REPO_ROOT / "knowledge-base" / "data_extraction_schema.csv"
 
@@ -104,11 +104,11 @@ DATA_EXTRACTION_SCHEMA_FILE = REPO_ROOT / "knowledge-base" / "data_extraction_sc
 # The pipeline uses generic internal keys; edit these aliases when your export headers differ.
 CSV_METADATA_COLUMN_ALIASES = {
 	# human readable hint: paper_id aliases identify the unique study record ID from exported CSVs.
-	"paper_id": ["paper_id", "Covidence #", "Covidence#", "covidence id", "covidence_id", "covidence number", "Ref", "Study", "ID", "id"],
+	"paper_id": ["paper_id", "Key", "Covidence #", "Covidence#", "covidence id", "covidence_id", "covidence number", "Ref", "Study", "ID", "id"],
 	# human readable hint: title aliases identify the publication title.
 	"title": ["title", "Title"],
 	# human readable hint: abstract aliases identify the title/abstract screening abstract text.
-	"abstract": ["abstract", "Abstract"],
+	"abstract": ["abstract", "Abstract", "Abstract Note"],
 	# human readable hint: authors aliases identify publication authors for prompts, metadata, and exports.
 	"authors": ["authors", "Authors", "author", "Author"],
 	# human readable hint: publication_year aliases identify the year used in citations and metadata.
@@ -116,7 +116,7 @@ CSV_METADATA_COLUMN_ALIASES = {
 	# human readable hint: publication_month aliases identify optional month metadata.
 	"publication_month": ["publication_month", "month", "Month", "Published Month", "Published month"],
 	# human readable hint: journal aliases identify source journal or publication title.
-	"journal": ["journal", "Journal", "Source", "Source Title", "Publication Title"],
+	"journal": ["journal", "Journal", "Source", "Source Title", "Publication Title", "Journal Abbreviation"],
 	# human readable hint: volume aliases identify bibliographic volume metadata.
 	"volume": ["volume", "Volume"],
 	# human readable hint: issue aliases identify bibliographic issue metadata.
@@ -128,15 +128,50 @@ CSV_METADATA_COLUMN_ALIASES = {
 	# human readable hint: doi aliases identify the publication DOI.
 	"doi": ["doi", "DOI", "Doi"],
 	# human readable hint: reference aliases identify full citation/reference text when exported.
-	"reference": ["reference", "Reference", "Ref"],
+	"reference": ["reference", "Reference", "Ref", "Url", "URL", "url"],
 	# human readable hint: study_id aliases identify optional internal study IDs distinct from paper_id.
 	"study_id": ["study_id", "Study ID", "Study"],
 	# human readable hint: notes aliases identify free-text note columns from external exports.
 	"notes": ["notes", "Notes"],
 	# human readable hint: tags aliases identify screening tags or labels from external exports.
-	"tags": ["tags", "Tags", "Keywords", "keywords", "label", "labels"],
+	"tags": ["tags", "Tags", "Keywords", "keywords", "label", "labels", "Manual Tags", "Automatic Tags"],
 	# human readable hint: reviewer_name aliases identify reviewer rows in human/AI comparison exports.
 	"reviewer_name": ["Reviewer Name", "reviewer_name", "reviewer"],
+}
+
+# USER-EDITABLE STAGE HANDOFF SETTINGS.
+# human readable hint: each screening stage can write a canonical CSV that is directly usable by the next stage.
+STAGE_HANDOFF_SETTINGS = {
+	# human readable hint: True writes next-stage CSV handoff files after title_abstract and full_text screening.
+	"enabled": True,
+	# human readable hint: handoff CSVs keep the existing input/ naming conventions (*_select_csv_* and *_included_csv_*).
+	"output_dir": REPO_ROOT / "input",
+	# human readable hint: True lets main.py use the latest previous-stage handoff when no explicit --input-file is supplied.
+	"auto_use_latest_previous_handoff": True,
+	# human readable hint: True also writes false-decision CSVs for audit/validation, not only the next-stage input.
+	"write_excluded_audit_csv": True,
+}
+
+# USER-EDITABLE PIPELINE BOUNDARY CHECK TERMS.
+# human readable hint: smoke tests use these terms to confirm pipeline/ Python stayed generic.
+PIPELINE_BOUNDARY_CHECK_TERMS = {
+	"topic_terms": [
+		"smartphone",
+		"physical activity",
+		"urban",
+		"MVPA",
+		"RQ1",
+		"RQ2",
+		"RQ3",
+		"RQ4",
+		"green AI",
+	],
+	"admin_header_terms": [
+		"Covidence #",
+		"Reviewer Name",
+		"Study ID",
+		"Published Year",
+	],
 }
 
 # USER-EDITABLE DATA-EXTRACTION PROMPT ALIASES.
@@ -190,9 +225,9 @@ DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS = {
 	"publication_year_column": "publication_year",
 }
 
-# USER-EDITABLE FALLBACK HEADER ALIASES FOR EXTRACTION VARIABLES.
-# human readable hint: exact covidence_column_name in the schema CSV is tried first; these aliases are optional fallbacks.
-DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES = {
+# USER-EDITABLE FALLBACK CONSENSUS/EXPORT HEADER ALIASES FOR EXTRACTION VARIABLES.
+# human readable hint: exact consensus/export column names in the schema CSV are tried first; these aliases are optional fallbacks.
+DATA_EXTRACTION_CONSENSUS_HEADER_ALIASES = {
 	# human readable hint: fallback human-export headers for age.
 	"population.mean_age": ["Age", "Mean age", "Mean age Overall", "Mean age (years) ± SD Overall"],
 	# human readable hint: fallback human-export headers for sample size.
@@ -208,6 +243,10 @@ DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES = {
 	# human readable hint: fallback human-export header for reported outcome domains.
 	"outcomes.reported": ["outcomes_reported"],
 }
+
+# BACKWARD-COMPATIBILITY ALIAS.
+# human readable hint: legacy code/config may still import this name; keep it pointing at the generic setting.
+DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES = DATA_EXTRACTION_CONSENSUS_HEADER_ALIASES
 
 # USER-EDITABLE DATA-EXTRACTION VALIDATION VALUE ALIASES.
 # human readable hint: groups of semantically equivalent validation values; stats_engine uses these only after human ground truth has been built.
@@ -289,7 +328,7 @@ DATA_EXTRACTION_VALIDATION_VALUE_ALIASES = {
 # ---------------------------------------------------------------------------
 
 # human readable hint: True switches the run into citation-search file patterns and separate output folders.
-# Keep False for the regular Covidence-export workflow.
+# Keep False for the regular database/bibliographic-export workflow.
 CITATION_SEARCHING_SCREENING = False
 
 # Human reviewer timing (per stage).
@@ -617,6 +656,72 @@ PROMPT_SIGNAL_SECTION_ALIASES = {
 	"primary": ["intervention / exposure", "intervention/exposure", "intervention", "exposure"],
 	# human readable hint: section names treated as secondary outcome signals when prompts expose Include/Exclude lists.
 	"secondary": ["outcome", "outcomes"],
+}
+
+# USER-EDITABLE RETRIEVAL AND CHUNK-SIGNAL VOCABULARY.
+# human readable hint: these terms affect chunk ranking and smoke/bootstrap helpers; edit here for a new protocol.
+RETRIEVAL_SIGNAL_SETTINGS = {
+	# human readable hint: canonical publication sections used for section-aware diversity and rescue.
+	"section_priority": ["introduction", "method", "results", "discussion", "conclusion"],
+	# human readable hint: aliases mapped to canonical section labels during PDF chunking and section inference.
+	"section_heading_aliases": {
+		"introduction": ["introduction", "background"],
+		"method": ["method", "methods", "materials and methods", "methodology", "study design"],
+		"results": ["result", "results", "finding", "findings"],
+		"discussion": ["discussion"],
+		"conclusion": ["conclusion", "conclusions", "summary"],
+		"reference": ["reference", "references", "bibliography", "acknowledgement", "acknowledgements"],
+	},
+	# human readable hint: broad section/evidence terms used to rescue relevant full-text chunks.
+	"section_rescue_terms": [
+		"introduction", "background", "method", "methods", "methodology", "materials and methods",
+		"participant", "participants", "intervention", "procedure", "outcome", "results",
+		"discussion", "conclusion", "conclusions", "trial", "protocol",
+	],
+	# human readable hint: substantive sentence terms that prevent useful citation-heavy method/result lines being discarded.
+	"substantive_sentence_terms": [
+		"method", "methods", "participant", "participants", "intervention", "procedure",
+		"analysis", "result", "results", "finding", "findings", "outcome", "baseline",
+		"follow-up", "effect", "significant", "comparison",
+	],
+	# human readable hint: method/evidence terms used to identify chunks with concrete study evidence.
+	"method_evidence_terms": [
+		"method", "methods", "methodology", "materials and methods", "study design",
+		"participant", "participants", "recruit", "recruited", "recruitment",
+		"intervention", "procedure", "protocol", "randomized", "randomised",
+		"outcome measure", "baseline", "follow-up",
+	],
+	# human readable hint: main-text evidence terms used to distinguish substantive findings from boilerplate.
+	"main_text_evidence_terms": [
+		"result", "results", "finding", "findings", "analysis", "effect", "improved",
+		"improvement", "increase", "decrease", "significant", "comparison", "group",
+		"sample", "participant", "participants", "outcome", "baseline", "follow-up",
+	],
+	# human readable hint: prefix roots for monitoring/assessment-like content that may need deprioritization.
+	"monitoring_seed_roots": [
+		"monitor", "assess", "evaluat", "feasib", "usabil", "acceptab", "observ",
+		"classif", "predict", "detect", "framework", "protocol", "pilot", "measur",
+		"diagnos", "benchmark",
+	],
+	# human readable hint: prefix roots that indicate active primary-scope/action evidence in a study.
+	"primary_action_seed_roots": [
+		"interven", "randomi", "trial", "assign", "arm", "program", "coach",
+		"feedback", "counsel", "behavior", "treat", "support", "nudge", "goal",
+		"recommend", "prescrib", "prompt", "deliver",
+	],
+	# human readable hint: terms that indicate the prompt expects primary-scope evidence even without include-list cues.
+	"primary_scope_requirement_terms": ["intervention", "intervention-first"],
+	# human readable hint: generic positive-evidence signal families used by the optional cleaned-hybrid KB draft utility.
+	"cleaned_hybrid_domain_terms": [
+		"intervention", "exposure", "participants", "sample", "outcome", "measure",
+		"method", "analysis", "follow-up",
+	],
+	"cleaned_hybrid_negative_terms": [
+		"review", "meta-analysis", "simulation", "abm", "non-empirical", "commentary", "protocol",
+	],
+	"cleaned_hybrid_positive_method_terms": ["participants", "sample", "baseline", "follow-up", "randomized", "cohort"],
+	"cleaned_hybrid_positive_primary_terms": ["intervention", "exposure", "program", "implementation", "delivery"],
+	"cleaned_hybrid_positive_secondary_terms": ["outcome", "measure", "effect", "result", "finding", "endpoint"],
 }
 
 # ---------------------------------------------------------------------------

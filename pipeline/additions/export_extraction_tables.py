@@ -15,7 +15,7 @@ from typing import Any
 
 from config.user_orchestrator import (
     DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS,
-    DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES,
+    DATA_EXTRACTION_CONSENSUS_HEADER_ALIASES,
     DATA_EXTRACTION_QUOTE_COLUMN_ALIASES,
     PATH_SETTINGS,
 )
@@ -188,7 +188,7 @@ def _schema_comparison_headers() -> list[str]:
     try:
         schema = DynamicExtractionSchema.from_kb()
         for variable in schema.variables:
-            header = str(variable.covidence_column_name or "").strip()
+            header = str(variable.consensus_column_name or "").strip()
             if header and header not in headers:
                 headers.append(header)
     except Exception:
@@ -275,18 +275,18 @@ def _candidate_headers(variable: ExtractionVariable) -> list[str]:
     """human readable hint: exact schema mapping first, optional user-configured aliases second."""
 
     candidates = [
-        variable.covidence_column_name,
+        variable.consensus_column_name,
         variable.variable_name,
         f"{variable.domain}_{variable.variable_name}",
     ]
     config_key = f"{variable.domain}.{variable.variable_name}"
-    aliases = DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES.get(config_key, [])
+    aliases = DATA_EXTRACTION_CONSENSUS_HEADER_ALIASES.get(config_key, [])
     if isinstance(aliases, (list, tuple)):
         candidates.extend(str(alias) for alias in aliases)
     if variable.variable_name.endswith("_overall"):
         candidates.append(variable.variable_name[: -len("_overall")])
-    if variable.covidence_column_name.casefold().endswith(" overall"):
-        candidates.append(variable.covidence_column_name[: -len(" overall")])
+    if variable.consensus_column_name.casefold().endswith(" overall"):
+        candidates.append(variable.consensus_column_name[: -len(" overall")])
     return [candidate for candidate in candidates if str(candidate or "").strip()]
 
 

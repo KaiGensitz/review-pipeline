@@ -36,15 +36,15 @@ This start document provides the summary view of the review pipeline and links t
 flowchart LR
   A[Set API key and environment] --> B[Place POS and NEG PDFs in papers/pos_examples and papers/neg_examples]
   B --> C[Run KB and prompt bootstrap utility]
-  C --> D[Place stage CSV exports in input]
-  D --> E[Run main.py]
+  C --> D[Place export as input/*_screen_csv_*.csv]
+  D --> E[Write canonical handoff CSV for next stage]
   E --> F[Create deterministic QC sample]
   F --> G[QC-only AI run + human review]
   G --> H{Validation acceptable?}
   H -- No --> I[Refine prompt/KB and rerun QC]
   I --> F
   H -- Yes --> J[Run remaining papers]
-  J --> K[Write outputs + validation + resource logs]
+  J --> K[Write outputs + validation + resource logs + next-stage handoff]
 ```
 
 ## Quick Start
@@ -66,7 +66,16 @@ flowchart LR
 9. (Optional) Select KB files for this run in [config/user_orchestrator.py](config/user_orchestrator.py):
   - set per-stage defaults in `KNOWLEDGE_BASE_FILES`
   - set one-off stage swaps in `KB_FILE_OVERRIDES`
-10. Run:
+10. Rename the bibliographic export into the existing title/abstract input convention:
+   - `input/<descriptive_name>_screen_csv_<timestamp>.csv`
+   - Any sample export file is only a structural header template, not a required file name.
+11. Run the first stage:
+   - Windows: `.venv\Scripts\python main.py --stage title_abstract`
+   - macOS/Linux: `python main.py --stage title_abstract`
+12. Then run later stages without an explicit input file when `STAGE_HANDOFF_SETTINGS["auto_use_latest_previous_handoff"] = True`:
+   - `python main.py --stage full_text`
+   - `python main.py --stage data_extraction`
+13. Standard run using `CURRENT_STAGE` remains available:
    - Windows: `.venv\Scripts\python main.py`
    - macOS/Linux: `python main.py`
 
@@ -78,7 +87,10 @@ Provide these items before the first screening run:
 2. Negative example PDFs in [papers/neg_examples](papers/neg_examples) that clearly represent out-of-scope records.
 3. A balanced example set whenever possible (recommended minimum: 5 POS and 5 NEG, better: >=10 each).
 4. PDF files with selectable text (not image-only scans), because chunk selection quality depends on text extraction quality.
-5. Stage input CSV exports in [input](input) (`*_screen_csv_*`, `*_select_csv_*`, `*_included_csv_*`).
+5. Stage input CSV exports in [input](input) (`*_screen_csv_*`, `*_select_csv_*`, `*_included_csv_*`). Generated handoffs keep those same conventions.
+
+The default manuscript-traceable input chain is:
+`bibliographic export renamed as *_screen_csv_* -> title_abstract handoff CSV -> full_text handoff CSV -> data_extraction`.
 
 Practical recommendation:
 - Keep file names descriptive (author/year/title style) to improve traceability in generated `source` fields.
@@ -187,7 +199,7 @@ Use this block when you switch to a different review topic.
   - Edit the `USER-EDITABLE STUDY TAGS` block so each `STUDY_TAGS_INCLUDE` entry represents one exclusion category you expect in QC validation.
   - Tags are normalized to snake_case internally, so `No intervention` maps to `no_intervention`.
 3. Update CSV/export aliases in [config/user_orchestrator.py](config/user_orchestrator.py).
-  - Edit `CSV_METADATA_COLUMN_ALIASES` when your input export uses different paper ID, title, author, year, reviewer, or study ID headers.
+  - Edit `CSV_METADATA_COLUMN_ALIASES` when your input export uses different paper ID, title, author, year, reviewer, or internal identifier headers.
   - Edit `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS` if the aggregate extraction CSVs need different administrative column labels.
   - Edit `PROMPT_SIGNAL_SECTION_ALIASES` and `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` only when your prompt section names need explicit help mapping to retrieval signals or extraction domains.
 4. Update the stage knowledge base.
@@ -204,10 +216,10 @@ Dynamic behavior implemented in pipeline:
 - Topic retrieval signals are derived from prompt include lists and KB examples, without hidden protocol-specific seed terms in Python code.
 - Prompt-derived retrieval/schema signal helpers live in `pipeline/selection/prompt_signals.py`, keeping the main pipeline class focused on orchestration.
 - `main.py` keeps the interactive stage flow; retry bookkeeping, output indexing, and startup checks live in focused `pipeline/additions` modules.
-- Data-extraction validation is dynamic: each KB `variable_name` maps to the exact consensus/export header named in `covidence_column_name`.
+- Data-extraction validation is dynamic: each KB `variable_name` maps to the exact consensus/export column named in `consensus_column_name` for new schemas, with legacy `covidence_column_name` still accepted.
 - Data-extraction prompting is prompt-driven plus CSV-validated: users edit the prompt for review concepts/domains and edit `DATA_EXTRACTION_SCHEMA_FILE` for exact output variables, value types, missing-value rules, and consensus/export headers.
 - Input metadata and aggregate-output administrative labels are config-driven through `CSV_METADATA_COLUMN_ALIASES` and `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, so a different export system should require config edits rather than pipeline edits.
-- AI-first extraction expert oversight is configured through `DATA_EXTRACTION_EXPERT_REVIEW_SETTINGS`, `DATA_EXTRACTION_EXPERT_REVIEWERS`, and `DATA_EXTRACTION_EXPERT_REVIEW_SHARED_VARIABLES`; reviewer names and assigned schema variables stay in [config/user_orchestrator.py](config/user_orchestrator.py).
+- AI-first extraction expert oversight is configured through `DATA_EXTRACTION_EXPERT_REVIEW_SETTINGS`, `DATA_EXTRACTION_EXPERT_REVIEWERS`, and `DATA_EXTRACTION_EXPERT_REVIEW_SHARED_VARIABLES`; reviewer identities and assigned schema variables stay in [config/user_orchestrator.py](config/user_orchestrator.py).
 - Citation-search runs can be separated from normal screening by setting `CITATION_SEARCHING_SCREENING=True`; the pipeline then reads citation-search patterns from `CITATION_SEARCHING_STAGE_RULES`, generates a delta CSV under `input/citation_searching_delta/`, skips QC sampling, and writes scoped outputs under `citation_searching`.
 - No code edits are required for topic changes if prompt, knowledge base, and `user_orchestrator.py` are updated consistently.
 
@@ -293,9 +305,9 @@ Data-extraction validation additionally writes run-level exports:
 - `extraction_error_audit.csv`
 
 Data-extraction schema and validation mapping:
-- The configured extraction schema CSV defines `domain`, `variable_name`, `variable_type`, `allowed_options`, `instruction`, and `covidence_column_name`.
+- The configured extraction schema CSV defines `domain`, `variable_name`, `variable_type`, `allowed_options`, `instruction`, and a consensus/export column (`consensus_column_name` preferred; legacy `covidence_column_name` accepted).
 - The LLM output uses `{variable_name}_value` and `{variable_name}_quote` under each domain.
-- Validation maps each LLM value field to the exact consensus/export header named in `covidence_column_name`.
+- Validation maps each LLM value field to the exact consensus/export column named in the schema.
 - `python -m pipeline.additions.human_gold_standard_builder --source <review_sheet.csv> --output-dir <audit_dir>` converts binary human review sheets into a wide `stats_engine` consensus CSV and a long adjudication audit. Companion columns ending in `__human_score` let reviewed 0/1 judgements drive the match decision; cells without those companions still use type-aware exact comparison.
 - Archived data-extraction folders can be validated with `python -m pipeline.additions.stats_engine --consensus <human_gold_standard.csv> --ai-output-dir <output/data_extraction_v*>`.
 - Add `--use-human-score-columns` only when the human binary scores were assigned to the same AI run being validated; omit it when validating a newer run against curated gold values.
@@ -326,8 +338,10 @@ Data-extraction evidence modes:
 ## Manual Backup
 
 - Auto-prompt appears after `main.py` run.
-- Manual command: `python backup_to_github.py`
-- Backup uses `git add -A`; `.gitignore` keeps local artifact trees (`input/`, `output/`, `papers/`, `_tests/`, etc.) out of commits by default.
+- Current-branch backup command: `python backup_to_github.py`
+- Separate-branch backup command: `python backup_to_github_second_branch.py`
+- Backup uses `git add -A`; `.gitignore` keeps local artifact trees (`input/`, `output/`, `papers/`, scratch folders, etc.) out of commits by default.
+- The separate-branch backup creates a new branch from the current worktree, commits there, and pushes it to GitHub without rewriting file contents.
 
 ## Notes
 

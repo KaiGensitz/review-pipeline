@@ -43,6 +43,12 @@ class SchemaVariable:
     variable_name: str
     covidence_column_name: str
 
+    @property
+    def consensus_column_name(self) -> str:
+        """human readable hint: generic name for the schema-owned consensus/export column."""
+
+        return self.covidence_column_name
+
 
 @dataclass(frozen=True)
 class ReviewedPaperBlock:
@@ -106,13 +112,13 @@ class SchemaColumnMatcher:
             best_index = self._best_index_for_variable(variable)
             if best_index is None:
                 continue
-            mapping[variable.covidence_column_name] = best_index
+            mapping[variable.consensus_column_name] = best_index
         return mapping
 
     def _best_index_for_variable(self, variable: SchemaVariable) -> int | None:
         variable_label = self._normalize(variable.variable_name)
         variable_stem = self._normalize(variable.variable_name.replace("_overall", "").replace("_", " "))
-        consensus_label = self._normalize(variable.covidence_column_name)
+        consensus_label = self._normalize(variable.consensus_column_name)
         best: tuple[int, int] | None = None
         for index, header_label in enumerate(self.normalized_headers):
             score = self._score(header_label, variable_label, variable_stem, consensus_label)
@@ -254,12 +260,14 @@ class HumanGoldStandardBuilder:
                 SchemaVariable(
                     domain=str(row.get("domain", "")).strip(),
                     variable_name=str(row.get("variable_name", "")).strip(),
-                    covidence_column_name=str(row.get("covidence_column_name", "")).strip(),
+                    covidence_column_name=str(
+                        row.get("consensus_column_name") or row.get("covidence_column_name") or ""
+                    ).strip(),
                 )
                 for row in rows
                 if str(row.get("domain", "")).strip()
                 and str(row.get("variable_name", "")).strip()
-                and str(row.get("covidence_column_name", "")).strip()
+                and str(row.get("consensus_column_name") or row.get("covidence_column_name") or "").strip()
             ]
         if not variables:
             raise ValueError(f"No schema variables found in {self.schema_path}")
@@ -335,7 +343,7 @@ class HumanGoldStandardBuilder:
                 "title": self._cell(block.ai_row, title_index) if title_index is not None else "",
             }
             for variable in variables:
-                source_index = column_map.get(variable.covidence_column_name)
+                source_index = column_map.get(variable.consensus_column_name)
                 source_value = self._cell(block.ai_row, source_index)
                 human_score = self._normalize_score(self._cell(block.score_row, source_index))
                 human_note = self._reviewer_note_for_variable(block.note_row, block.score_row, source_index, human_score)
@@ -345,12 +353,13 @@ class HumanGoldStandardBuilder:
                     human_note,
                 )
 
-                wide[variable.covidence_column_name] = gold_value
-                wide[f"{variable.covidence_column_name}{HUMAN_SCORE_SUFFIX}"] = human_score
-                wide[f"{variable.covidence_column_name}{HUMAN_NOTE_SUFFIX}"] = human_note
-                wide[f"{variable.covidence_column_name}{SOURCE_VALUE_SUFFIX}"] = source_value
-                wide[f"{variable.covidence_column_name}{HUMAN_EVALUABLE_SUFFIX}"] = evaluable
-                wide[f"{variable.covidence_column_name}{HUMAN_GROUND_TRUTH_SOURCE_SUFFIX}"] = ground_truth_source
+                consensus_column_name = variable.consensus_column_name
+                wide[consensus_column_name] = gold_value
+                wide[f"{consensus_column_name}{HUMAN_SCORE_SUFFIX}"] = human_score
+                wide[f"{consensus_column_name}{HUMAN_NOTE_SUFFIX}"] = human_note
+                wide[f"{consensus_column_name}{SOURCE_VALUE_SUFFIX}"] = source_value
+                wide[f"{consensus_column_name}{HUMAN_EVALUABLE_SUFFIX}"] = evaluable
+                wide[f"{consensus_column_name}{HUMAN_GROUND_TRUTH_SOURCE_SUFFIX}"] = ground_truth_source
 
                 long_rows.append(
                     {
@@ -358,7 +367,8 @@ class HumanGoldStandardBuilder:
                         "reviewer": block.reviewer,
                         "domain": variable.domain,
                         "variable": variable.variable_name,
-                        "covidence_column_name": variable.covidence_column_name,
+                        "consensus_column_name": consensus_column_name,
+                        "covidence_column_name": consensus_column_name,
                         "source_column": headers[source_index] if source_index is not None else "",
                         "source_ai_value": source_value,
                         "human_score": human_score,
@@ -466,7 +476,7 @@ class HumanGoldStandardBuilder:
 
         fieldnames = ["paper_id", "reviewer", "source_study_id", "title"]
         for variable in variables:
-            base = variable.covidence_column_name
+            base = variable.consensus_column_name
             fieldnames.extend(
                 [
                     base,
@@ -488,6 +498,7 @@ class HumanGoldStandardBuilder:
             "reviewer",
             "domain",
             "variable",
+            "consensus_column_name",
             "covidence_column_name",
             "source_column",
             "source_ai_value",
@@ -511,19 +522,20 @@ class HumanGoldStandardBuilder:
 
         rows: list[dict[str, str]] = []
         for variable in variables:
-            index = column_map.get(variable.covidence_column_name)
+            index = column_map.get(variable.consensus_column_name)
             rows.append(
                 {
                     "domain": variable.domain,
                     "variable": variable.variable_name,
-                    "covidence_column_name": variable.covidence_column_name,
+                    "consensus_column_name": variable.consensus_column_name,
+                    "covidence_column_name": variable.consensus_column_name,
                     "source_column": headers[index] if index is not None else "",
                     "source_column_index": "" if index is None else str(index),
                 }
             )
         HumanGoldStandardBuilder._write_dicts(
             path,
-            ["domain", "variable", "covidence_column_name", "source_column", "source_column_index"],
+            ["domain", "variable", "consensus_column_name", "covidence_column_name", "source_column", "source_column_index"],
             rows,
         )
 

@@ -20,17 +20,21 @@ This appendix provides function-level explanations for scripts and classes in th
 
 ## backup_to_github.py
 
-### Class BackupToGitHub
-- Human readable hint: one-class backup workflow with explicit command methods and one run entrypoint.
-- __init__ parameters: backup_message
-#### BackupToGitHub.__init__(backup_message)
-- Human readable hint: __init__ stores the commit message used for the backup commit.
+### Class GitCommandRunner
+- Human readable hint: focused wrapper around Git subprocess calls and staged-change detection.
 
-#### BackupToGitHub.run_command(cmd)
-- Human readable hint: run one git command and stop the script when the command fails.
+#### GitCommandRunner.run_command(cmd)
+- Human readable hint: run one Git command and stop the script when the command fails.
+
+#### GitCommandRunner.has_staged_changes()
+- Human readable hint: detect whether `git add -A` produced staged changes before committing.
+
+### Class BackupToGitHub
+- Human readable hint: current-branch backup workflow that pulls fast-forward only, stages allowed files, commits, and pushes.
+- __init__ parameters: backup_message, runner
 
 #### BackupToGitHub.run_backup()
-- Human readable hint: execute pull, stage tracked code/doc updates, commit, and push in safe sequence.
+- Human readable hint: execute pull, stage tracked code/doc updates, commit if needed, and push in safe sequence.
 
 ### Script-level functions
 - Human readable hint: compatibility wrappers or helper functions used by the primary class.
@@ -39,7 +43,40 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: Compatibility wrapper for older calls.
 
 #### main()
-- Human readable hint: No docstring in source; placeholder retained intentionally for exhaustive traceability.
+- Human readable hint: command-line entrypoint for current-branch backup.
+
+## backup_to_github_second_branch.py
+
+### Class GitCommandRunner
+- Human readable hint: standalone Git command wrapper copied into this script so branch backup does not depend on `backup_to_github.py`.
+
+#### GitCommandRunner.run_command(cmd)
+- Human readable hint: run a Git command that must succeed.
+
+#### GitCommandRunner.capture_command(cmd)
+- Human readable hint: run a Git command and return stdout for branch-name discovery.
+
+#### GitCommandRunner.command_succeeds(cmd)
+- Human readable hint: probe Git state quietly, used for checking whether a local branch already exists.
+
+#### GitCommandRunner.has_staged_changes()
+- Human readable hint: detect whether the new backup branch needs a new commit.
+
+### Class SecondBranchBackupToGitHub
+- Human readable hint: create a separate branch from the current worktree, commit allowed files there, and push that branch to GitHub.
+- __init__ parameters: target_branch, backup_message, runner
+
+#### SecondBranchBackupToGitHub.current_branch()
+- Human readable hint: record the source branch before creating the backup branch.
+
+#### SecondBranchBackupToGitHub.local_branch_exists(branch_name)
+- Human readable hint: avoid overwriting an existing local branch name.
+
+#### SecondBranchBackupToGitHub.unique_branch_name()
+- Human readable hint: append a timestamp when the requested backup branch name already exists.
+
+#### SecondBranchBackupToGitHub.run_backup()
+- Human readable hint: create the branch, stage files allowed by `.gitignore`, commit if needed, and push with upstream tracking.
 
 ## config/user_orchestrator.py
 
@@ -49,10 +86,13 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: `user_orchestrator.py` is organized as a guided control panel: every-run settings first, then topic/protocol settings, frequently changed workflow settings, result-investigation settings, and finally high-consequence infrastructure/runtime settings.
 - Human readable hint: `DATA_EXTRACTION_SCHEMA_FILE` points to the CSV that defines extraction variables and exact human consensus/export header mappings.
 - Human readable hint: `CSV_METADATA_COLUMN_ALIASES` is where external export headers are mapped to generic internal metadata such as `paper_id`, `title`, `authors`, and `publication_year`; these export-header facts do not live in `pipeline/` code.
+- Human readable hint: `STAGE_HANDOFF_SETTINGS` controls whether screening stages write canonical next-stage CSVs under `input/` using the existing `*_select_csv_*` and `*_included_csv_*` naming conventions, and whether later stages auto-use the newest previous-stage handoff.
+- Human readable hint: `PIPELINE_BOUNDARY_CHECK_TERMS` stores smoke-test terms used to verify that topic/admin vocabulary stays outside `pipeline/` Python.
+- Human readable hint: `RETRIEVAL_SIGNAL_SETTINGS` is where configurable retrieval/chunk-ranking vocabulary lives; pipeline Python compiles these terms but does not own protocol-specific signal words.
 - Human readable hint: `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` is the optional bridge between human prompt section wording and schema domains. Keep review-topic vocabulary here or in the prompt/schema CSV, not inside pipeline Python.
-- Human readable hint: `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS` controls aggregate extraction output labels, including the AI reviewer label, while `DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES` supplies optional fallback consensus-column aliases for variables.
+- Human readable hint: `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS` controls aggregate extraction output labels, including the AI reviewer label, while `DATA_EXTRACTION_CONSENSUS_HEADER_ALIASES` supplies optional fallback consensus/export column aliases for variables; the older `DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES` name remains a compatibility alias.
 - Human readable hint: `DATA_EXTRACTION_VALIDATION_VALUE_ALIASES` stores user-editable, variable-specific semantic equivalence groups for QC validation; add review-specific acceptable paraphrases here rather than in `pipeline/` code.
-- Human readable hint: `DATA_EXTRACTION_EXPERT_REVIEW_SETTINGS`, `DATA_EXTRACTION_EXPERT_REVIEWERS`, and `DATA_EXTRACTION_EXPERT_REVIEW_SHARED_VARIABLES` configure AI-first expert oversight packets without hardcoding reviewer names or schema-variable assignments in pipeline Python.
+- Human readable hint: `DATA_EXTRACTION_EXPERT_REVIEW_SETTINGS`, `DATA_EXTRACTION_EXPERT_REVIEWERS`, and `DATA_EXTRACTION_EXPERT_REVIEW_SHARED_VARIABLES` configure AI-first expert oversight packets without hardcoding reviewer identities or schema-variable assignments in pipeline Python.
 - Human readable hint: `PROMPT_SIGNAL_SECTION_ALIASES` defines which prompt section names are treated as primary/secondary retrieval signal lists when prompts contain include/exclude sections.
 - Human readable hint: `CITATION_SEARCHING_SCREENING` switches screening into the citation-search workflow, reads `CITATION_SEARCHING_STAGE_RULES`, runs delta extraction against the baseline export, skips QC sampling, and keeps outputs scoped separately.
 ### Script-level functions
@@ -77,7 +117,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: With `data_extraction_evidence_mode="full_text"`, `DATA_EXTRACTION_SCHEMA_FILE` is the strongest extraction contract; `knowledge-base/data_extraction_pos-neg_examples.csv` still helps retrieval/ranking and becomes especially important when extraction uses `selected_chunks`.
 - Human readable hint: `data_extraction_hybrid_rescue_enabled` keeps full-text extraction as the primary path and optionally adds a schema-anchor semantic second opinion for user-configured variables/domains, writing separate hybrid audit files instead of silently replacing the main extraction.
 - Human readable hint: Data-extraction schema instructions include generic demographic safeguards for denominator consistency, full-cohort-over-subgroup preference for overall fields, same-table population sweeps, per-arm protocol sample-size arithmetic, repeated-row age/gender table counting, and separate race/ethnicity preservation.
-- Human readable hint: Current data-extraction schema guidance treats `setting` as a high-level urbanicity choice, assigns concrete geography to `country`/`continent`, allows first-author country only as an explicit fallback, and gives `mean_age` table-rescue priority over eligibility thresholds when enrolled/baseline age data exist.
+- Human readable hint: Current data-extraction schema guidance can encode high-level context, concrete geography, and table-rescue priorities in the schema CSV rather than in pipeline Python.
 - Human readable hint: `AI_transparency` schema guidance now extracts a concise description of explicitly reported transparency-relevant AI detail, such as algorithm workflow, deployment workflow, development/training, inputs, decision logic, rationale, explainability/interpretability, or named referrals to sources containing those details. It excludes AI buzzwords, model names, privacy/hosting/system-prompt/safety-guardrail text when those do not explain the AI mechanism or rationale, and it forbids yes/no-only values.
 - Human readable hint: The `context.evidence_source` schema variable now means publication/source legitimacy type, such as peer-reviewed journal article, conference proceeding, preprint, trial registration, thesis/dissertation, report, or other grey literature, not an article-internal section name.
 - Human readable hint: Data extraction defaults to `data_extraction_split_by_domain=True` with optional `data_extraction_domain_groups`; population and context are kept as focused batches because they depend on table, recruitment, and location evidence.
@@ -118,6 +158,9 @@ This appendix provides function-level explanations for scripts and classes in th
 
 #### _run_qc_loop(stage, sample_rate, quiet)
 - Human readable hint: run QC screening, validation, and the user decision gate before remaining-paper processing.
+
+#### _latest_auto_handoff_for_stage(stage)
+- Human readable hint: find the newest prior-stage operational CSV handoff for `full_text` or `data_extraction` when no explicit `--input-file` is supplied.
 
 #### main()
 - Human readable hint: compatibility entrypoint that parses optional `--stage`, `--input-file`, and `--run-scope` arguments before running `MainWorkflow`.
@@ -167,6 +210,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: decide whether a data_extraction QC sample can be reused by checking that every QC paper already has a result file.
 
 #### _update_index_from_artifact(stage, artifact, attempt_index)
+- Human readable hint: record eligibility JSONL outputs and, when available, the matching canonical handoff CSV path in `<stage>_eligibility_index.csv`.
 - Human readable hint: refresh the eligibility index rows for all decision splits from a run artifact.
 
 #### _post_run_updates(stage, artifact, attempt_index)
@@ -279,7 +323,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: represent one wide reviewer-facing consensus CSV and resolve paper ID/title columns through user-editable config.
 
 ### Class SchemaColumnResolver
-- Human readable hint: map each schema CSV variable to the reviewer-facing export column using `covidence_column_name` plus user-editable aliases.
+- Human readable hint: map each schema CSV variable to the reviewer-facing export column using `consensus_column_name` plus user-editable aliases, while accepting legacy `covidence_column_name`.
 
 ### Class QuoteAuditTable
 - Human readable hint: index the long quote-audit CSV so every schema variable can be checked for value/quote support.
@@ -520,9 +564,6 @@ This appendix provides function-level explanations for scripts and classes in th
 #### _factual_text_match(human_value, ai_value, variable)
 - Human readable hint: optional exploratory helper for reviewer-derived prose fields; it is not used for primary accuracy/concordance unless `count_fuzzy_matches_in_metrics=True`.
 
-#### _human_score_columns_present(human_wide, variables)
-- Human readable hint: detect generated reviewer 0/1 score columns for explicit legacy validation mode; default validation uses reviewer-derived ground truth values instead.
-
 #### _latest_binary_review_source()
 - Human readable hint: prefer `input/data_extraction_human_review_qc_sample_binary_scoring.csv` as the editable source of truth for data-extraction validation.
 
@@ -533,7 +574,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: default validation reads the editable input scoring CSV directly; explicit consensus files are only legacy/special-case inputs.
 
 #### validate_extraction(consensus_path, ai_output_dir)
-- Human readable hint: validate extraction outputs against a human gold-standard CSV by mapping each KB `variable_name` to its exact `covidence_column_name`.
+- Human readable hint: validate extraction outputs against a human gold-standard CSV by mapping each KB `variable_name` to its exact consensus/export column.
 - Optional `ai_output_dir` validates archived data-extraction runs without moving files into the active output folder.
 - If the editable binary scoring CSV is present, it is converted into reviewer-derived ground truth first: accepted AI values for score `1`, quote-row corrections for score `0`, and non-evaluable cells skipped.
 - The optional `--use-human-score-columns` mode remains available for legacy binary-score validation, but default validation compares current AI output against human ground-truth values.
@@ -572,7 +613,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: detect reviewed paper blocks from cleaned paper-id cells followed by `0/1` score and `quote` rows, while still supporting older `Reviewer: paper_id` labels.
 
 #### HumanGoldStandardBuilder._parse_paper_id_cell(paper_id_cell)
-- Human readable hint: parse both cleaned `22` and older `Marc: 22` paper-id cells into a paper ID and optional reviewer hint.
+- Human readable hint: parse both cleaned paper-id cells and older `reviewer: paper_id` cells into a paper ID and optional reviewer hint.
 
 #### main()
 - Human readable hint: command-line entrypoint for repeatable human-gold generation.
@@ -583,7 +624,6 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: typed container for one KB row (`label`, `source`, `text`).
 ### Class ChunkCandidate
 - Human readable hint: typed container for one cleaned chunk candidate with score and source metadata.
-
 ### Script-level functions
 - Human readable hint: compatibility wrappers or helper functions used by the primary class.
 
@@ -594,19 +634,19 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: load KB rows from CSV (`utf-8-sig`), keeping only non-empty POS/NEG examples.
 
 #### _quality_metrics(text)
-- Human readable hint: compute chunk quality signals (token ratios, domain signals, low-value/legal-text flags).
+- Human readable hint: compute chunk quality signals (token ratios, generic evidence signals, generic exclusion signals, low-value/legal-text flags).
 
 #### _best_window(text, max_words)
 - Human readable hint: select the highest-quality text window from long chunk rows while preserving punctuation.
 
 #### _build_chunk_candidates(rows, max_words, min_words)
-- Human readable hint: clean, filter, deduplicate, and score chunk rows into reusable candidate snippets.
+- Human readable hint: clean, filter, deduplicate, and score chunk rows into reusable candidate snippets without topic-specific signal lists.
 
 #### _select_candidates(candidates, needed, max_chunks_per_source)
 - Human readable hint: choose top-scoring candidates with per-source diversity limits.
 
 #### _to_hybrid_rows(candidates)
-- Human readable hint: convert selected chunk candidates into final POS/NEG KB rows with explicit reasoning preface.
+- Human readable hint: convert selected chunk candidates into final POS/NEG KB rows with explicit generic reasoning preface.
 
 #### _write_csv(path, rows)
 - Human readable hint: write the cleaned-hybrid draft KB CSV without touching source KB files.
@@ -624,7 +664,6 @@ This appendix provides function-level explanations for scripts and classes in th
 
 ### Class BootstrapSignals
 - Human readable hint: data-derived include, exclude, and extraction cue terms learned from the local POS/NEG example PDFs.
-
 ### Script-level functions
 - Human readable hint: build stage KB CSVs and suggested prompts without fixed review-topic term lists.
 
@@ -638,14 +677,14 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: score candidate extraction chunks using local data-derived extraction terms.
 
 #### _build_prompt_suggestions(signals)
-- Human readable hint: render suggested prompt files from the learned bootstrap signals.
+- Human readable hint: render suggested prompt files from learned bootstrap signals.
 
 ## pipeline/core/pipeline.py
 
 ### Class PaperRecord
 - Human readable hint: No class docstring in source; placeholder retained intentionally for exhaustive traceability.
 ### Class PaperScreeningPipeline
-- Human readable hint: No class docstring in source; placeholder retained intentionally for exhaustive traceability.
+- Human readable hint: Shared orchestration class that now inherits stage-specific methods from `stage_title_abstract.py`, `stage_full_text.py`, and `stage_data_extraction.py` while preserving the public import path.
 - __init__ parameters: csv_dir, knowledge_base_path, eligibility_output_path, chunks_output_path, text_output_path, top_k, score_threshold, batch_size, embedder, examples, sample_size, sample_seed, sustainability_tracking, resource_log_path, enable_time_savings, run_label, codecarbon_enabled, qc_sample_path, qc_sample_readable_path, confirm_sampling, sample_rate, qc_only, qc_enabled, force_new_qc, error_log_path, stage, pdf_root, overflow_log_path, split_only, quiet, summary_to_console, artifact_mode
 #### PaperScreeningPipeline.__init__(csv_dir, knowledge_base_path, eligibility_output_path, chunks_output_path, text_output_path, top_k, score_threshold, batch_size, embedder, examples, sample_size, sample_seed, sustainability_tracking, resource_log_path, enable_time_savings, run_label, codecarbon_enabled, qc_sample_path, qc_sample_readable_path, confirm_sampling, sample_rate, qc_only, qc_enabled, force_new_qc, error_log_path, stage, pdf_root, overflow_log_path, split_only, quiet, summary_to_console, artifact_mode)
 - Human readable hint: Initialize the screening/extraction pipeline with configuration. All arguments are strictly typed and have clear defaults for robust, reproducible runs. Non-coders: Each parameter controls a key aspect of the workflow (see README for details).
@@ -807,23 +846,14 @@ This appendix provides function-level explanations for scripts and classes in th
 #### PaperScreeningPipeline._find_missing_pdfs(base_dir)
 - Human readable hint: List folders that do not contain any PDF.
 
-#### PaperScreeningPipeline._find_included_csv()
-- Human readable hint: Find the most recent included CSV used for data_extraction.
-
 #### PaperScreeningPipeline._stage_csv_files(select_only)
 - Human readable hint: Return stage-appropriate CSV files.
-
-#### PaperScreeningPipeline._load_included_ids(csv_path)
-- Human readable hint: Read included IDs from the configured included-paper CSV.
 
 #### PaperScreeningPipeline._extract_paper_id(row)
 - Human readable hint: Extract the best available paper ID from user-configured CSV headers.
 
 #### PaperScreeningPipeline._extract_year(row)
 - Human readable hint: Try to find a publication year from many possible columns.
-
-#### PaperScreeningPipeline._match_row_value(row, key)
-- Human readable hint: Find a value in a row using exact, case-insensitive, or compact keys.
 
 #### PaperScreeningPipeline._build_paper_folder_name(row)
 - Human readable hint: Create a safe per-paper folder name using ID/author/year/title.
@@ -889,7 +919,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: Load preselected chunks from the input folder, if present.
 
 #### PaperScreeningPipeline._write_data_extraction_outputs(paper, extraction_payload)
-- Human readable hint: write one canonical per-paper `data_extraction_results.jsonl` and `data_extraction_results.csv` pair.
+- Human readable hint: delegate canonical per-paper extraction JSONL/CSV artifact writing to `extraction_io.write_outputs`, then update live aggregate tables.
 
 #### PaperScreeningPipeline._build_extraction_payload(paper, llm_decision)
 - Human readable hint: validate data-extraction JSON strictly against the KB-generated schema; the older prompt-field fallback path has been removed.
@@ -991,10 +1021,19 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: prompt and KB signal helpers moved out of `pipeline/core/pipeline.py` so retrieval/schema adaptation is easier to inspect.
 
 #### build_prompt_signal_config(prompt_template)
-- Human readable hint: derive topic-sensitive retrieval regexes from the active prompt include lists.
+- Human readable hint: derive retrieval regexes from active prompt include lists and user-configured signal aliases.
 
 #### build_monitoring_signal_config(prompt_template, topic_signal_config, kb_examples)
-- Human readable hint: derive monitoring/action deprioritization cues from prompt terms and POS/NEG KB examples.
+- Human readable hint: derive configured monitoring/action deprioritization cues from prompt terms and POS/NEG KB examples.
+
+#### retrieval_terms(key)
+- Human readable hint: read a user-editable retrieval signal list from `RETRIEVAL_SIGNAL_SETTINGS`.
+
+#### retrieval_pattern(key)
+- Human readable hint: compile a user-editable retrieval signal list into a case-insensitive matcher.
+
+#### retrieval_section_patterns(inline)
+- Human readable hint: compile configured publication-section aliases into heading matchers owned by `ChunkBuilder`.
 
 #### normalize_schema_key(value)
 - Human readable hint: normalize user tag labels and prompt JSON fields into comparable snake_case keys.
@@ -1027,9 +1066,6 @@ This appendix provides function-level explanations for scripts and classes in th
 
 #### _truncate_to_budget(text, max_tokens)
 - Human readable hint: trim evidence text using a lightweight token estimate before sending it to the model.
-
-#### _build_llm_input(paper, prompt_template, max_prompt_tokens)
-- Human readable hint: insert paper evidence into `{data}` or append it as an Evidence block.
 
 #### _call_llm(client, model, prompt, response_format, max_tokens, temperature, top_p)
 - Human readable hint: send one extraction prompt with the KB-generated OpenAI `response_format` and return the raw JSON text.
@@ -1093,18 +1129,12 @@ This appendix provides function-level explanations for scripts and classes in th
 #### DynamicExtractionSchema.from_kb(kb_path)
 - Human readable hint: read the configured extraction schema CSV, validate required columns, preserve semantic anchors and reviewer guidance metadata when present, and build the grouped extraction model.
 
-#### DynamicExtractionSchema.from_prompt(prompt_text)
-- Human readable hint: compatibility shim; extraction schemas now come from the CSV KB, not from prompt JSON.
-
 #### DynamicExtractionSchema.inject_into_prompt(prompt_template)
 - Human readable hint: keeps the user prompt as the conceptual framework, removes the conceptual response guide from runtime prompts, and inserts the KB-generated field contract before `# CONTEXT`; scoped runtime calls copy only matching `# STEPS` guidance for one domain or one configured domain batch.
 - Human readable hint: legacy insertion placeholders are still tolerated for old prompt files, but future user prompts should be plain, readable review frameworks without technical markers.
 
 #### DynamicExtractionSchema.domains
 - Human readable hint: list KB domains in CSV order so extraction can split one paper into smaller schema requests.
-
-#### DynamicExtractionSchema.for_domain(domain)
-- Human readable hint: build a one-domain schema and instruction block for short, more reliable extraction responses.
 
 #### DynamicExtractionSchema.for_domains(domains)
 - Human readable hint: build a scoped schema for a configured group of domains so the run can balance fewer LLM calls with reliable smaller JSON responses.
@@ -1125,7 +1155,7 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: resolve the user-configured extraction schema path from `config/user_orchestrator.py`, falling back to `knowledge-base/data_extraction_schema.csv`.
 
 #### load_extraction_variables(kb_path)
-- Human readable hint: parse required KB columns: `domain`, `variable_name`, `variable_type`, `allowed_options`, `instruction`, and `covidence_column_name`, plus default project guidance columns `semantic_anchors`, `human_reviewer_instruction`, `evidence_profile`, and `do_not_infer_from` when available.
+- Human readable hint: parse required KB columns: `domain`, `variable_name`, `variable_type`, `allowed_options`, `instruction`, and a consensus/export column (`consensus_column_name` preferred; legacy `covidence_column_name` accepted), plus default project guidance columns `semantic_anchors`, `human_reviewer_instruction`, `evidence_profile`, and `do_not_infer_from` when available.
 
 #### format_domain_overview(variables)
 - Human readable hint: create the prompt-visible domain list from the active schema CSV so users can see the extraction plan.
@@ -1181,21 +1211,18 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: flatten nested extraction output into dot-path CSV columns while keeping quote columns separate.
 
 #### serialize_result(paper, extracted_data, run_id, raw_output, error)
-- Human readable hint: build one stable JSONL record for downstream validation and audit.
+- Human readable hint: build one extraction artifact dictionary for downstream validation and audit.
 
 #### write_outputs(payload, output_root, folder_name)
-- Human readable hint: write per-paper JSONL and CSV extraction artifacts.
+- Human readable hint: atomically write per-paper JSONL and CSV extraction artifacts; `pipeline.py` delegates here so extraction I/O stays at the boundary.
+
+#### load_completed_output(output_root, folder_name, stage, paper_id)
+- Human readable hint: parse canonical JSONL and return a completed error-free extraction artifact so reruns can skip expensive LLM calls.
+
+#### append_error(path, payload)
+- Human readable hint: validate and append extraction error dictionaries for reliable audits.
 
 ## pipeline/core/run_screening.py
-
-### Class StagePipelineRunner
-- Human readable hint: one-class stage runner that centralizes stage defaults and the run entrypoint.
-- __init__ parameters: stage, csv_dir
-#### StagePipelineRunner.__init__(stage, csv_dir)
-- Human readable hint: __init__ stores the stage and input folder used to start screening.
-
-#### StagePipelineRunner.run()
-- Human readable hint: execute one stage run while allowing explicit overrides from callers.
 
 ### Script-level functions
 - Human readable hint: compatibility wrappers or helper functions used by the primary class.
@@ -1211,9 +1238,6 @@ This appendix provides function-level explanations for scripts and classes in th
 
 #### _stage_prefixed(path, target_stage)
 - Human readable hint: Ensure a file path is placed under output/<stage>/ for consistency. Args: path: Desired file path (possibly outside output/<stage>/). target_stage: Stage name for output placement. Returns: Path under output/<stage>/ with the same filename. Note: keeps all outputs stage-scoped.
-
-#### _extract_text(row, keys)
-- Human readable hint: Read a text field from a CSV row using a list of possible column names. Args: row: A CSV row as a dict. keys: Candidate column names to search for. Returns: The first non-empty matching value, or empty string. Note: handles minor column-name variations in exports.
 
 #### _load_negative_examples_from_csvs(csv_dir, patterns)
 - Human readable hint: Load extra negative examples from CSVs to enrich the knowledge base. Args: csv_dir: Directory containing exported screening CSV files. patterns: List of glob patterns for negative-example CSVs. Returns: List of NEG example dicts with label/text. Note: these negatives improve evidence filtering precision.
@@ -1231,7 +1255,25 @@ This appendix provides function-level explanations for scripts and classes in th
 - Human readable hint: Append QC sample eligibility records to the remaining-sample output.
 
 #### run_pipeline(stage, split_only, csv_dir, kb_file, eligibility_output, chunks_output, text_output, error_log, resource_log, top_k, score_threshold, sample_size, sample_seed, batch_size, sustainability_tracking, pdf_root, quiet, confirm_sampling, sample_rate, qc_only, qc_enabled, force_new_qc, enable_time_savings, run_label_override, artifact_mode)
-- Human readable hint: Run one pipeline stage with stage-specific defaults and outputs. Supports optional artifact mode override (`compact` or `full`) for per-paper full_text artifact persistence.
+- Human readable hint: Run one pipeline stage with stage-specific defaults and outputs. Supports optional artifact mode override (`compact` or `full`) for per-paper full_text artifact persistence. After final title_abstract/full_text remaining runs, writes generic CSV handoffs from the merged eligibility JSONL when `STAGE_HANDOFF_SETTINGS["enabled"]` is true.
+
+## pipeline/core/stage_handoff.py
+
+### Class StageHandoffSpec
+- Human readable hint: one immutable decision split and its next-stage CSV naming contract.
+
+### Class StageHandoffCsvWriter
+- Human readable hint: object-oriented writer that turns final eligibility JSONL into canonical CSV inputs for the next stage without embedding review-topic or export-header facts in pipeline code.
+- __init__ parameters: stage, eligibility_path, output_dir, run_id, run_label, write_excluded_audit_csv
+
+#### StageHandoffCsvWriter.write()
+- Human readable hint: write the operational true-decision handoff CSV and optional false-decision audit CSV, returning paths and record counts.
+
+### Script-level functions
+- Human readable hint: handoff discovery helpers used by `main.py` and smoke tests.
+
+#### latest_handoff_for_stage(stage, output_dir)
+- Human readable hint: find the newest `title_abstract` to `full_text` or `full_text` to `data_extraction` CSV handoff for auto-selection.
 
 ## pipeline/integrations/embedding_utils.py
 
@@ -1324,6 +1366,9 @@ This appendix provides function-level explanations for scripts and classes in th
 #### ChunkBuilder.clean_text(value)
 - Human readable hint: Trim whitespace from text fields safely.
 
+#### ChunkBuilder._extract_section_heading(line)
+- Human readable hint: detect configured publication section headings once, so chunking and later retrieval use the same section labels.
+
 #### ChunkBuilder._is_low_information_sentence(sentence)
 - Human readable hint: discard table-like/citation-like sentence fragments before full-text chunk assembly.
 
@@ -1339,14 +1384,8 @@ This appendix provides function-level explanations for scripts and classes in th
 ### Script-level functions
 - Human readable hint: compatibility wrappers or helper functions used by the primary class.
 
-#### _clean_text(value)
-- Human readable hint: Trim whitespace from text fields safely.
-
 #### chunk_paper_sentences(paper_id, title, abstract, language)
 - Human readable hint: Split title and abstract into sentence chunks (title sentences are always kept).
-
-#### _chunk_sentence_entries(entries, chunk_size, overlap_size)
-- Human readable hint: Group sentence entries into overlapping chunks with page/line spans.
 
 #### chunk_fulltext_sentences(paper_id, title, full_text, language, page_texts)
 - Human readable hint: Split full-text into overlapping blocks to stay within context limits.

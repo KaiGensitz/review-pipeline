@@ -35,7 +35,7 @@ For publication and reproducibility packages, document:
 
 - Exact model identifiers and runtime settings (including temperature, `max_tokens`, and `context_window_total_tokens`).
 - Prompt versions used per stage.
-- Data-extraction schema KB version (`DATA_EXTRACTION_SCHEMA_FILE`, default `knowledge-base/data_extraction_schema.csv`) and its consensus/export `covidence_column_name` mappings.
+- Data-extraction schema KB version (`DATA_EXTRACTION_SCHEMA_FILE`, default `knowledge-base/data_extraction_schema.csv`) and its consensus/export column mappings (`consensus_column_name`, with legacy `covidence_column_name` support).
 - For data extraction, report the prompt as the conceptual review framework and the schema CSV as the authoritative machine contract; the runtime prompt combines both automatically before the evidence section.
 - External export/admin mappings configured for the study (`CSV_METADATA_COLUMN_ALIASES`, `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, optional `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES`), especially if the input source changes.
 - Data-extraction evidence mode:

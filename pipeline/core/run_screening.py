@@ -22,9 +22,11 @@ from config.user_orchestrator import (
     STAGE_RULES,
     CITATION_SEARCHING_SCREENING,
     CITATION_SEARCHING_STAGE_RULES,
+    STAGE_HANDOFF_SETTINGS,
     require_setting,
 )
 from pipeline.core.metadata_aliases import read_metadata_value
+from pipeline.core.stage_handoff import StageHandoffCsvWriter
 
 
 DEFAULT_STAGE_ROOT = Path(PATH_SETTINGS.get("output_root", REPO_ROOT / "output"))
@@ -60,24 +62,6 @@ def _load_stage_kb_defaults_from_config() -> dict[str, Path]:
 
 STAGE_KB_DEFAULTS = _load_stage_kb_defaults_from_config()
 
-
-class StagePipelineRunner:
-    """human readable hint: one-class stage runner that centralizes stage defaults and the run entrypoint."""
-
-    def __init__(self, stage: str = CURRENT_STAGE, csv_dir: str | None = None) -> None:
-        """human readable hint: __init__ stores the stage and input folder used to start screening."""
-
-        self.stage = stage
-        self.csv_dir = csv_dir or PATH_SETTINGS.get("csv_dir")
-
-    def run(self, **kwargs):
-        """human readable hint: execute one stage run while allowing explicit overrides from callers."""
-
-        if "stage" not in kwargs:
-            kwargs["stage"] = self.stage
-        if "csv_dir" not in kwargs and self.csv_dir is not None:
-            kwargs["csv_dir"] = self.csv_dir
-        return run_pipeline(**kwargs)
 
 def _timestamp_label() -> str:
     """Create a timestamp string for output filenames.
@@ -186,28 +170,6 @@ def _stage_prefixed(path: Path, target_stage: str) -> Path:
     if path.parent.name == target_stage:
         return path
     return stage_root / path.name
-
-
-def _extract_text(row: dict, keys: list[str]) -> str:
-    """Read a text field from a CSV row using a list of possible column names.
-
-    Args:
-        row: A CSV row as a dict.
-        keys: Candidate column names to search for.
-
-    Returns:
-        The first non-empty matching value, or empty string.
-
-    Note: handles minor column-name variations in exports.
-    """
-    for key in keys:
-        if key in row and row[key]:
-            return str(row[key]).strip()
-        lower = key.lower()
-        for rk, rv in row.items():
-            if rv and rk.lower() == lower:
-                return str(rv).strip()
-    return ""
 
 
 def _load_negative_examples_from_csvs(csv_dir: Path, patterns: list[str]) -> list[dict]:
@@ -653,6 +615,7 @@ def run_pipeline(
     text_path = text_output.resolve()
     resource_log_resolved = resource_log_path.resolve()
     error_log_path = error_log.resolve()
+    handoff_details: dict[str, dict[str, object]] = {}
 
     if stage in {"title_abstract", "full_text"}:
         print(
@@ -685,6 +648,40 @@ def run_pipeline(
     else:
         print("[status] run_errors status=none")
 
+    # human readable hint: after QC records are merged into the final JSONL, create CSV handoffs for the next stage.
+    if (
+        stage in {"title_abstract", "full_text"}
+        and not qc_only
+        and not split_only
+        and bool(STAGE_HANDOFF_SETTINGS.get("enabled", True))
+        and elig_path.exists()
+    ):
+        try:
+            handoff_output_dir = Path(
+                STAGE_HANDOFF_SETTINGS.get("output_dir")
+                or (REPO_ROOT / "input")
+            )
+            writer = StageHandoffCsvWriter(
+                stage=stage,
+                eligibility_path=elig_path,
+                output_dir=handoff_output_dir,
+                run_id=run_id,
+                run_label=run_label,
+                write_excluded_audit_csv=bool(
+                    STAGE_HANDOFF_SETTINGS.get("write_excluded_audit_csv", True)
+                ),
+            )
+            handoff_details = writer.write()
+            for decision_label, info in handoff_details.items():
+                print(
+                    "[output] handoff_csv "
+                    f"decision={decision_label} "
+                    f"records={info.get('paper_count', 0)} "
+                    f"path={info.get('path')}"
+                )
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[warning] Could not write stage handoff CSV: {exc}")
+
     # Derive split eligibility paths for downstream merging
     split_paths: dict[str, str] = {}
     if stage in {"title_abstract", "full_text"}:
@@ -712,6 +709,12 @@ def run_pipeline(
         "stage_csv_files": stage_csvs,
         "error_ids": sorted(error_ids),
         "split_paths": split_paths,
+        "handoff_paths": {
+            label: str(info.get("path"))
+            for label, info in handoff_details.items()
+            if info.get("path")
+        },
+        "handoff_details": handoff_details,
     }
 
     return artifact

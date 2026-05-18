@@ -404,7 +404,7 @@ def export_expert_review_packets(
                     "variable_type": variable.variable_type,
                     "allowed_options": "; ".join(variable.allowed_options),
                     "schema_instruction": variable.instruction,
-                    "consensus_column": _header_value(audit_row, columns["consensus"]) or variable.covidence_column_name,
+                    "consensus_column": _header_value(audit_row, columns["consensus"]) or variable.consensus_column_name,
                     "ai_value": ai_value,
                     "ai_quote": ai_quote,
                     "evidence_context": evidence_context,

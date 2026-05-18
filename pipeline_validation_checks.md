@@ -51,8 +51,9 @@ This document lists implementation-level checks to verify run readiness and outp
 - Domain-specific prompt matching uses schema text plus optional `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` from `config/user_orchestrator.py`; review-topic words should stay there, in prompts, or in schema CSVs.
 - Schema-guided evidence hints use schema text plus optional `DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_ALIASES`, `DATA_EXTRACTION_SCHEMA_EVIDENCE_HINT_LOW_PRIORITY_PATTERNS`, and `LLM_SETTINGS["data_extraction_evidence_hint_context_lines"]`; review-specific hint terms should stay in config, not `pipeline/`.
 - Input export/admin headers should be checked in `CSV_METADATA_COLUMN_ALIASES` and `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, not in pipeline Python.
+- Stage-to-stage CSV handoffs are controlled by `STAGE_HANDOFF_SETTINGS`; when enabled, title/abstract and full-text remaining runs write canonical next-stage input CSVs to `input/` using the existing naming conventions.
 - Wide quote columns in the consensus-style export should be checked in `DATA_EXTRACTION_QUOTE_COLUMN_ALIASES`; the full quote audit remains `data_extraction_all_papers_quote_audit.csv`.
-- AI-first expert oversight packets should read reviewer names and assigned schema variables from `DATA_EXTRACTION_EXPERT_REVIEWERS`; pipeline Python should not hardcode reviewer names or topic-specific review assignments.
+- AI-first expert oversight packets should read reviewer identities and assigned schema variables from `DATA_EXTRACTION_EXPERT_REVIEWERS`; pipeline Python should not hardcode people or topic-specific review assignments.
 - With default grouped data extraction, verify each runtime prompt contains only the relevant conceptual guidance for the active domain batch plus that batch's exact `{variable_name}_value` / `{variable_name}_quote` keys from `DATA_EXTRACTION_SCHEMA_FILE`.
 - Verify `LLM_SETTINGS["data_extraction_domain_groups"]` contains only domain names present in the active schema CSV; missing schema domains are appended as singleton batches automatically.
 - If grouped/domain-wise extraction errors occur, inspect `data_extraction_domain_validation_failed` entries to identify the failing domain batch rather than rerunning the whole paper blindly.
@@ -117,7 +118,7 @@ This document lists implementation-level checks to verify run readiness and outp
 ### Title Abstract
 
 Required inputs:
-- `input/*_screen_csv_*.csv`
+- A bibliographic export with supported headers renamed into `input/*_screen_csv_*.csv`; any sample export file is only a structural header template.
 - `knowledge-base/title_abstract_pos-neg_examples.csv` (or stage-specific override configured in `config/user_orchestrator.py`)
 
 Expected outputs:
@@ -128,6 +129,9 @@ Expected outputs:
 - `..._selected_chunks_...jsonl`
 - `..._screening_results_readable_...txt`
 - `..._resource_usage_...log`
+- handoff files:
+  - `input/title_abstract_to_full_text_select_csv_*.csv`
+  - optional audit: `input/title_abstract_to_full_text_irrelevant_csv_*.csv`
 - validation files:
   - `..._qc_sample_validation_alignment_...csv`
   - `..._qc_sample_validation_stats_report_...txt`
@@ -139,7 +143,7 @@ Validation command:
 ### Full Text
 
 Required inputs:
-- `input/*_select_csv_*.csv`
+- latest `input/title_abstract_to_full_text_select_csv_*.csv` is auto-used when no `--input-file` is supplied, or any explicit `*_select_csv_*.csv`
 - `knowledge-base/full_text_pos-neg_examples.csv` (or stage-specific override configured in `config/user_orchestrator.py`)
 - optional override file: `knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv`
 - optional draft report: `knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json`
@@ -154,6 +158,9 @@ Expected outputs:
 - `output/full_text/full_text_<qc_sample|remaining_sample>_selected_chunks_*.jsonl`
 - `..._screening_results_readable_...txt`
 - `..._resource_usage_...log`
+- handoff files:
+  - `input/full_text_to_data_extraction_included_csv_*.csv`
+  - optional audit: `input/full_text_to_data_extraction_excluded_csv_*.csv`
 - validation files (`alignment`, `stats_report`, `matrix`)
 - per-paper files in `input/per_paper_full_text/<paper_folder>/`:
   - always: `full_text_artifact.json` and one PDF
@@ -167,11 +174,11 @@ Validation command:
 ### Data Extraction
 
 Required inputs:
-- `input/*_included_csv_*.csv`
+- latest `input/full_text_to_data_extraction_included_csv_*.csv` is auto-used when no `--input-file` is supplied, or any explicit `*_included_csv_*.csv`
 - `knowledge-base/data_extraction_pos-neg_examples.csv` now supplies embedding examples for retrieval-based extraction; POS rows describe relevant protocol intersections and NEG rows describe structural noise, while field-specific semantic targets live in `data_extraction_schema.csv`.
 - extraction schema/mapping KB: `DATA_EXTRACTION_SCHEMA_FILE` in `config/user_orchestrator.py`
 - Human consensus/gold-standard CSV: `input/data_extraction_schema.csv` (or explicit `--consensus`)
-- external metadata/admin header mapping: `CSV_METADATA_COLUMN_ALIASES`, `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, and optional `DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES` in `config/user_orchestrator.py`
+- external metadata/admin header mapping: `CSV_METADATA_COLUMN_ALIASES`, `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS`, and optional `DATA_EXTRACTION_CONSENSUS_HEADER_ALIASES` in `config/user_orchestrator.py`
 - optional wide quote-column mapping: `DATA_EXTRACTION_QUOTE_COLUMN_ALIASES` in `config/user_orchestrator.py`
 
 Expected outputs:
@@ -190,9 +197,9 @@ Expected outputs:
 
 Validation command:
 - `python -m pipeline.additions.stats_engine --consensus <human_gold_standard.csv> --ai-output-dir <data_extraction_output_dir>`
-- The validator reads the configured schema CSV, maps each LLM `{variable_name}_value` to the exact `covidence_column_name`, and compares with type-aware coercion.
+- The validator reads the configured schema CSV, maps each LLM `{variable_name}_value` to the exact consensus/export column (`consensus_column_name` preferred; legacy `covidence_column_name` accepted), and compares with type-aware coercion.
 - Human binary review sheets can first be converted with `python -m pipeline.additions.human_gold_standard_builder --source <review_sheet.csv> --output-dir <audit_dir>`.
-- If validating the same AI run that humans scored, add `--use-human-score-columns`; companion columns named `<covidence_column_name>__human_score` then become the cell-level match decision.
+- If validating the same AI run that humans scored, add `--use-human-score-columns`; companion columns named `<consensus_column_name>__human_score` then become the cell-level match decision.
 - If validating a later AI run, omit `--use-human-score-columns` and use manually adjudicated gold values instead.
 - Concordance excludes human `Not Available`/`n/a`; accuracy includes correctly identified missing values.
 - If a model returns malformed JSON for one domain, the merged payload keeps fallback missing values for that domain and logs the domain-specific validation error.

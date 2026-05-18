@@ -17,11 +17,19 @@ The active pipeline now implements seven safeguards that define the current vali
 - The editable source of truth remains `input/data_extraction_human_review_qc_sample_binary_scoring.csv`. The stats engine can read this file directly and convert it in memory; persistent derived gold-standard CSV files are not required for normal validation.
 - Reviewer note rows are used as gold-standard replacements only when they contain direct manuscript quotes, manuscript location signals, numeric/table evidence, or clear manuscript-derived replacement values. Generic comments such as "not complete", "negligible", "not separately analysed", or comments about the reviewer judgement are excluded from metric denominators instead of being treated as expected extracted values.
 
-The current implementation also strengthens extraction guidance for the variables that remained most error-prone in QC: study design, conflicts of interest, ethnicity/race detail, smartphone delivery, AI transparency, inclusivity, development process, setting, implications, and limitations.
+The current implementation also strengthens extraction guidance for schema variables that remained most error-prone in QC. Those refinements are kept in the active schema CSV, prompt text, and user-editable config rather than in pipeline Python.
 
-Update on 2026-05-13: comparison of validation runs v21, v22, and v23 showed that the recent metric decrease was driven by a small set of unstable data-extraction variables rather than by a denominator change. The active schema and data-extraction prompt now add QC calibration for `smartphone_usage`, `AI_transparency`, `human_AI_interaction`, `development_process`, `setting`, `reported`, `mean_age`, and `continent`, emphasizing concise manuscript labels and reviewer-like keywords over broad synthesis. The validation configuration now also includes explicit user-editable semantic alias groups for unambiguous acceptable paraphrases. These changes keep topic-specific calibration in `config/` and `knowledge-base/`, while `pipeline/` remains generic validation machinery.
+Update on 2026-05-13: comparison of validation runs v21, v22, and v23 showed that the recent metric decrease was driven by a small set of unstable data-extraction variables rather than by a denominator change. The active schema and data-extraction prompt now add QC calibration for selected schema-owned variables, emphasizing concise manuscript labels and reviewer-like keywords over broad synthesis. The validation configuration now also includes explicit user-editable semantic alias groups for unambiguous acceptable paraphrases. These changes keep topic-specific calibration in `config/` and `knowledge-base/`, while `pipeline/` remains generic validation machinery.
 
-Update on 2026-05-14: the active data-extraction schema now separates urbanicity from concrete venue detail more strictly. `setting` is a single-choice urbanicity field (`urban area`, `rural area`, `both`, or `n/a`), while `country` and `continent` carry geographic context and may use first-author country only when no study country is reported. `AI_transparency` now extracts descriptive transparency-relevant AI detail, including explicit referrals to named sources containing those details, but rejects privacy, hosting, system-prompt, and safety-guardrail text unless they explain the AI mechanism, deployment workflow, development, or rationale. `mean_age` now has a stronger table-rescue instruction to prioritize baseline/demographic age descriptions over eligibility thresholds whenever enrolled participant data exist.
+Update on 2026-05-14: the active data-extraction schema now separates broad context classification from concrete location detail more strictly. Schema variables carry geographic/context information and may define explicit fallback rules when direct study-level information is absent. Selected fields now include stronger instructions for descriptive mechanism detail, deployment workflow, development rationale, and table-rescue priority when enrolled or baseline participant data exist.
+
+Update on 2026-05-14: cleanup work tightened the generic pipeline boundary by moving retrieval/chunk-ranking signal vocabulary into `RETRIEVAL_SIGNAL_SETTINGS`, deleting duplicate core section inference in favor of `ChunkBuilder`, centralizing extraction LLM validation through `validate_llm_extraction`, deleting the redundant `pipeline.additions.extraction_validator` wrapper, and adding the one-command smoke/boundary script.
+
+Update on 2026-05-14: data-extraction restart behavior is idempotent at the per-paper artifact boundary. Completed, error-free canonical extraction JSONL files are validated as dictionaries and reused before any LLM call; per-paper JSONL/CSV outputs use same-directory atomic replacement; compact-artifact refresh failures are logged instead of silently ignored.
+
+Update on 2026-05-14: `PaperScreeningPipeline` was split into stage-specific mixins for title/abstract, full text, and data extraction. The public import path remains stable, while stage-owned preparation, preflight, and extraction methods are easier to inspect independently.
+
+Update on 2026-05-18: screening stages now write canonical CSV handoff files after the final QC-plus-remaining eligibility JSONL is available. The operational chain is `input/*_screen_csv_*.csv -> title_abstract_to_full_text_select_csv_*.csv -> full_text_to_data_extraction_included_csv_*.csv -> data_extraction`. Bibliographic exports are supported structurally through configurable header aliases, but actual operating files keep the existing `input/` naming conventions. Handoff CSVs are generated from generic metadata aliases and boolean eligibility decisions, while the JSONL files remain the audit source. Export-header mappings and auto-handoff behavior are configured in `config/user_orchestrator.py`; pipeline code contains only generic stage, metadata, and decision logic.
 
 ## Validation Procedure Rationale (Manuscript Justification)
 
@@ -223,10 +231,10 @@ If a threshold must be reported for exploratory triage, the analysis supports de
 
 Date: 2026-05-11.
 
-Purpose: compare later extraction versions against the v16 output that Marc and Shawan reviewed. This analysis uses:
+Purpose: compare later extraction versions against the v16 output that human reviewers assessed. This analysis uses:
 
 - the reviewer-derived value from `input/data_extraction_human_review_qc_sample_binary_scoring.csv`;
-- the original v16 AI value reviewed by Marc/Shawan;
+- the original v16 AI value reviewed by humans;
 - the reviewer quote/correction row where present;
 - each candidate run's value and quote.
 
@@ -254,15 +262,15 @@ The v16_HumanCheck run remains the strongest formal validation anchor because it
 
 Date: 2026-05-11.
 
-The v19 changed-cell review found useful corrections for `reported` and `evidence_source`, but also regressions in table-sensitive population variables, study design, AI transparency, smartphone usage, human-AI interaction, and limitations. The safest implementation is therefore not to replace the full-text/v16-style extraction strategy with v19 behavior. Instead, the validated lessons were ported into the active schema and generic validation machinery:
+The v19 changed-cell review found useful corrections for selected schema variables, but also regressions in table-sensitive and concept-sensitive variables. The safest implementation is therefore not to replace the full-text/v16-style extraction strategy with v19 behavior. Instead, the validated lessons were ported into the active schema and generic validation machinery:
 
 - `knowledge-base/data_extraction_schema.csv` now includes the default user-editable guidance columns `human_reviewer_instruction`, `evidence_profile`, and `do_not_infer_from`.
-- The `human_reviewer_instruction` column was populated from the second row of `input/data_extraction_human_review_qc_sample_binary_scoring.csv`, which contains the instructions originally given to Marc and Shawan.
-- Risky variables now carry explicit schema guidance: `reported` should be an outcome/domain label rather than a Boolean; `evidence_source` should be a publication/source type rather than an article section; population fields should preserve table labels and denominators; AI transparency should not be inferred from hidden guardrails alone; sensing modalities should be data-capture inputs; smartphone usage should describe the intervention/assessment role; limitations should include the complete stated set.
+- The `human_reviewer_instruction` column was populated from the reviewer-instruction row of `input/data_extraction_human_review_qc_sample_binary_scoring.csv`.
+- Risky variables now carry explicit schema guidance for expected labels, source types, table denominators, non-inference rules, input/modality descriptions, and completeness requirements.
 - The pipeline remains generic: it parses and injects schema guidance fields when the active schema provides them. The active project schema provides them by default; the review-specific content remains in the KB.
 - Validation normalization now standardizes Unicode dash and quote variants before comparison, preventing false mismatches such as `GPT‑4` versus `GPT-4`.
 
-This preserves v16 as the formal human-reviewed baseline while selectively porting the corrections that Marc/Shawan and the v19 audit made methodologically defensible.
+This preserves v16 as the formal human-reviewed baseline while selectively porting corrections that human review and the v19 audit made methodologically defensible.
 
 ## Strict Pipeline Validation Versus Quote-Aware Plausibility Audit
 
@@ -273,7 +281,7 @@ After the active full-text data-extraction run, the formal pipeline validation r
 - strict concordance: 33/116 = 28.45%;
 - strict accuracy: 56/139 = 40.29%.
 
-A separate quote-aware plausibility audit was run on the same AI outputs and the same human source file. This audit compared candidate values and candidate quotes against both the reviewer-derived human value and the Marc/Shawan quote/correction row. It also normalized harmless formatting differences such as underscores, Unicode dashes, and list-vs-string punctuation, while preventing missing AI values from matching present human truth.
+A separate quote-aware plausibility audit was run on the same AI outputs and the same human source file. This audit compared candidate values and candidate quotes against both the reviewer-derived human value and the reviewer quote/correction row. It also normalized harmless formatting differences such as underscores, Unicode dashes, and list-vs-string punctuation, while preventing missing AI values from matching present human truth.
 
 The quote-aware audit reported:
 
@@ -283,7 +291,7 @@ The quote-aware audit reported:
 
 Interpretation:
 
-The strict pipeline metric is intentionally conservative: it counts only exact/type-normalized matches and explicit configured aliases. It does not count paraphrases, list/string formatting differences, quote support, or reviewer quote overlap. Therefore it underestimates factual agreement for variables where the AI extracted the right fact in different wording, such as `physical_activity` versus `physical activity`, semicolon lists versus JSON-style lists, and concise paraphrases of aims, findings, methods, limitations, or behavioral strategies.
+The strict pipeline metric is intentionally conservative: it counts only exact/type-normalized matches and explicit configured aliases. It does not count paraphrases, list/string formatting differences, quote support, or reviewer quote overlap. Therefore it can underestimate factual agreement for variables where the AI extracted the right fact in different wording, such as schema-key spelling variants, semicolon lists versus JSON-style lists, and concise paraphrases of aims, findings, methods, limitations, or intervention strategies.
 
 The quote-aware audit is closer to how a human reviewer reads the extraction table: it asks whether the candidate value or its supporting quote contains the same factual information as the human value or reviewer correction. This explains why the audit score is much higher. However, it is not automatically suitable as the primary manuscript metric because token/quote overlap can still over-credit partial matches and because some reviewer note rows contain evaluative comments rather than clean replacement values. The most defensible use is:
 

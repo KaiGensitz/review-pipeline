@@ -154,7 +154,7 @@ Prompt/schema behavior:
   - accuracy, sensitivity, specificity, PPV, NPV
   - PABAK
   - Clopper-Pearson 95% confidence intervals
-- Data extraction validation maps each LLM `{variable_name}_value` to the KB `covidence_column_name`, calculates per-variable concordance and accuracy, and writes `extraction_error_audit.csv` with the LLM quote.
+- Data extraction validation maps each LLM `{variable_name}_value` to the schema consensus/export column (`consensus_column_name`, with legacy `covidence_column_name` support), calculates per-variable concordance and accuracy, and writes `extraction_error_audit.csv` with the LLM quote.
 - AI-first expert oversight packets are a separate review workflow: the AI extraction remains the primary output, and configured experts review assigned schema variables using the AI value, quote, and available manuscript context.
 
 ## Resource and Emissions Tracking

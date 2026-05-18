@@ -188,7 +188,7 @@ Prepare knowledge-base files:
 - [knowledge-base/title_abstract_pos-neg_examples.csv](knowledge-base/title_abstract_pos-neg_examples.csv)
 - [knowledge-base/full_text_pos-neg_examples.csv](knowledge-base/full_text_pos-neg_examples.csv)
 - [knowledge-base/data_extraction_pos-neg_examples.csv](knowledge-base/data_extraction_pos-neg_examples.csv), mainly needed when `data_extraction_evidence_mode="selected_chunks"`
-- [knowledge-base/data_extraction_schema.csv](knowledge-base/data_extraction_schema.csv) for data-extraction fields and Covidence header mapping, unless `DATA_EXTRACTION_SCHEMA_FILE` in [config/user_orchestrator.py](config/user_orchestrator.py) points elsewhere
+- [knowledge-base/data_extraction_schema.csv](knowledge-base/data_extraction_schema.csv) for data-extraction fields and consensus/export column mapping, unless `DATA_EXTRACTION_SCHEMA_FILE` in [config/user_orchestrator.py](config/user_orchestrator.py) points elsewhere
 - Optional full_text draft: [knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv](knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft.csv)
 - Optional draft report: [knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json](knowledge-base/full_text_pos-neg_examples_cleaned_hybrid_draft_report.json)
 - Optional shared criteria file: [knowledge-base/eligibility_criteria.txt](knowledge-base/eligibility_criteria.txt)
@@ -209,11 +209,11 @@ Required columns in the configured extraction schema CSV:
 - `variable_type`
 - `allowed_options`
 - `instruction`
-- `covidence_column_name`
+- `consensus_column_name` for new schemas, or legacy `covidence_column_name` for backward compatibility
 
 Data-extraction prompt/schema relationship:
 - `config/prompt_script_data_extraction.txt` is the human-readable review framework.
-- `DATA_EXTRACTION_SCHEMA_FILE` is the exact machine contract for output keys, value types, missing values, and Covidence headers.
+- `DATA_EXTRACTION_SCHEMA_FILE` is the exact machine contract for output keys, value types, missing values, and consensus/export columns.
 - `CSV_METADATA_COLUMN_ALIASES` and `DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS` keep export-specific administrative labels in config rather than in pipeline code.
 - `DATA_EXTRACTION_DOMAIN_PROMPT_ALIASES` is optional; schema text is used first for prompt-domain matching.
 - The pipeline combines both at runtime, so the prompt should not contain technical insertion markers.

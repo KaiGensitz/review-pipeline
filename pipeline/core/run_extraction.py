@@ -26,6 +26,7 @@ from pipeline.core.extraction_io import (
     append_error,
     collect_papers,
     format_evidence,
+    load_completed_output,
     serialize_result,
     write_outputs,
 )
@@ -34,7 +35,7 @@ from pipeline.core.extraction_schema import (
     SchemaEvidenceHintBuilder,
     SchemaEvidenceHintConfig,
     domain_groups_for_schema,
-    parse_and_validate,
+    validate_llm_extraction,
 )
 from pipeline.core.prompt_context import load_stage_prompt_template
 from pipeline.additions.export_extraction_tables import ExtractionAggregateWriter
@@ -273,12 +274,6 @@ def _chunk_location(chunk: dict) -> str:
     return " | " + " | ".join(parts) if parts else ""
 
 
-def _build_llm_input(paper: PaperItem, prompt_template: str, max_prompt_tokens: int) -> str:
-    """human readable hint: insert paper evidence into the prompt while respecting the model context budget."""
-
-    return _build_llm_input_from_evidence(format_evidence(paper), prompt_template, max_prompt_tokens)
-
-
 def _build_llm_input_with_schema_hints(
     evidence_bundle: ExtractionEvidenceBundle,
     prompt_template: str,
@@ -370,7 +365,7 @@ async def _process_paper(
     async with semaphore:
         if not paper.normalized_text and not paper.selected_chunks and not paper.supplemental_cited_evidence:
             error = "no_text_available"
-            append_error(error_log, {"paper_id": paper.paper_id, "error": error, "stage": STAGE})
+            append_error(error_log, {"paper_id": paper.paper_id, "error": error})
             return serialize_result(paper, schema.default_payload(), run_id, raw_output="", error=error)
 
         # human readable hint: semantic retrieval runs before prompt injection so the LLM never receives hidden full text.
@@ -412,7 +407,7 @@ async def _process_paper(
                     top_p=top_p,
                 )
                 raw_by_domain[group_label] = raw_text
-                domain_data, domain_error = parse_and_validate(raw_text, domain_schema)
+                domain_data, domain_error = validate_llm_extraction(raw_text, domain_schema)
                 if domain_error:
                     errors_by_domain[group_label] = domain_error
                     append_error(
@@ -420,7 +415,6 @@ async def _process_paper(
                         {
                             "paper_id": paper.paper_id,
                             "error": f"domain group '{group_label}' failed validation: {domain_error}",
-                            "stage": STAGE,
                             "error_type": "data_extraction_domain_validation_failed",
                         },
                     )
@@ -452,9 +446,9 @@ async def _process_paper(
             temperature=temperature,
             top_p=top_p,
         )
-        extracted_data, error = parse_and_validate(raw_text, schema)
+        extracted_data, error = validate_llm_extraction(raw_text, schema)
         if error:
-            append_error(error_log, {"paper_id": paper.paper_id, "error": error, "stage": STAGE})
+            append_error(error_log, {"paper_id": paper.paper_id, "error": error})
         return serialize_result(paper, extracted_data, run_id, raw_output=raw_text, error=error)
 
 
@@ -495,6 +489,20 @@ async def run_extraction() -> None:
     # human readable hint: the semaphore caps simultaneous extraction calls using the user-editable endpoint load setting.
     semaphore = asyncio.Semaphore(concurrency)
 
+    completed_artifacts: list[dict[str, Any]] = []
+    pending_papers: list[PaperItem] = []
+    for paper in papers:
+        artifact = load_completed_output(
+            output_root,
+            paper.folder_path.name,
+            stage=STAGE,
+            paper_id=paper.paper_id,
+        )
+        if artifact is None:
+            pending_papers.append(paper)
+        else:
+            completed_artifacts.append(artifact)
+
     tasks = [
         _process_paper(
             paper=paper,
@@ -512,16 +520,22 @@ async def run_extraction() -> None:
             error_log=error_log,
             evidence_assembler=evidence_assembler,
         )
-        for paper in papers
+        for paper in pending_papers
     ]
 
-    for coro in asyncio.as_completed(tasks):
-        payload = await coro
-        folder_name = str(payload.get("folder_name") or payload.get("paper_id") or "paper")
-        write_outputs(payload, output_root, folder_name)
-        aggregate_writer.append_record(payload)
+    for artifact in completed_artifacts:
+        aggregate_writer.append_record(artifact)
 
-    print(f"[extraction] Completed {len(papers)} papers. Outputs in {output_root}.")
+    for coro in asyncio.as_completed(tasks):
+        artifact = await coro
+        folder_name = str(artifact.get("folder_name") or artifact.get("paper_id") or "paper")
+        write_outputs(artifact, output_root, folder_name)
+        aggregate_writer.append_record(artifact)
+
+    print(
+        f"[extraction] Completed {len(papers)} papers "
+        f"({len(completed_artifacts)} reused, {len(pending_papers)} processed). Outputs in {output_root}."
+    )
 
 
 if __name__ == "__main__":

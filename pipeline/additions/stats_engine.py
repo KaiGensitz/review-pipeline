@@ -29,7 +29,7 @@ from statsmodels.stats.proportion import proportion_confint
 from config.user_orchestrator import (
     CURRENT_STAGE,
     DATA_EXTRACTION_ADMIN_OUTPUT_COLUMNS,
-    DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES,
+    DATA_EXTRACTION_CONSENSUS_HEADER_ALIASES,
     DATA_EXTRACTION_VALIDATION_MATCH_SETTINGS,
     DATA_EXTRACTION_VALIDATION_VALUE_ALIASES,
     STUDY_TAGS_IGNORE,
@@ -599,10 +599,6 @@ def _write_alignment(df: pd.DataFrame, suffix: str | None = None) -> None:
         if path.exists():
             path.unlink()
         return
-
-    def _norm(val: object) -> str:
-        text = "" if val is None else str(val)
-        return _normalize_tag_text(text)
 
     def _tag_list(val: object) -> list[str]:
         return _extract_tags(val)
@@ -1212,15 +1208,6 @@ def _parse_human_cell_score(value: Any) -> Optional[bool]:
     return None
 
 
-def _human_score_columns_present(human_wide: pd.DataFrame, variables: tuple[ExtractionVariable, ...]) -> bool:
-    """human readable hint: detect reviewer 0/1 judgement columns in generated human gold-standard tables."""
-
-    for variable in variables:
-        if _human_score_column_name(variable.covidence_column_name) in human_wide.columns:
-            return True
-    return False
-
-
 def _latest_binary_review_source() -> Path | None:
     """human readable hint: the editable reviewer scoring sheet in input/ is the source of truth when present."""
 
@@ -1281,15 +1268,15 @@ def _load_extraction_human_wide(
 def _apply_human_export_aliases(human_wide: pd.DataFrame, variables: tuple[ExtractionVariable, ...]) -> pd.DataFrame:
     """human readable hint: user-configured header aliases adapt old reviewer templates to the active schema."""
 
-    if not isinstance(DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES, dict):
+    if not isinstance(DATA_EXTRACTION_CONSENSUS_HEADER_ALIASES, dict):
         return human_wide
     human_wide = human_wide.copy()
     for variable in variables:
-        target = variable.covidence_column_name
+        target = variable.consensus_column_name
         if target in human_wide.columns:
             continue
         alias_key = f"{variable.domain}.{variable.variable_name}"
-        aliases = DATA_EXTRACTION_COVIDENCE_HEADER_ALIASES.get(alias_key, ())
+        aliases = DATA_EXTRACTION_CONSENSUS_HEADER_ALIASES.get(alias_key, ())
         for alias in aliases or ():
             alias_name = str(alias or "").strip()
             if alias_name and alias_name in human_wide.columns:
@@ -1337,9 +1324,9 @@ def validate_extraction(
                 "validation will use human-reviewed rows from the source file."
             )
     missing_columns = [
-        variable.covidence_column_name
+        variable.consensus_column_name
         for variable in schema.variables
-        if variable.covidence_column_name not in human_wide.columns
+        if variable.consensus_column_name not in human_wide.columns
     ]
     if missing_columns:
         raise KeyError(
@@ -1365,17 +1352,18 @@ def validate_extraction(
         extracted = ai_payload.get("extracted_data", {}) if isinstance(ai_payload, dict) else {}
 
         for variable in schema.variables:
-            evaluable_col = f"{variable.covidence_column_name}{EXTRACTION_HUMAN_EVALUABLE_SUFFIX}"
+            consensus_column_name = variable.consensus_column_name
+            evaluable_col = f"{consensus_column_name}{EXTRACTION_HUMAN_EVALUABLE_SUFFIX}"
             if evaluable_col in human_wide.columns and str(human_row.get(evaluable_col, "")).strip().casefold() == "false":
                 continue
-            human_value = human_row.get(variable.covidence_column_name)
+            human_value = human_row.get(consensus_column_name)
             ai_value = _value_from_extracted_data(extracted, variable)
             ai_quote = _quote_from_extracted_data(extracted, variable)
-            reviewer_note_col = _validation_review_note_column_name(variable.covidence_column_name)
+            reviewer_note_col = _validation_review_note_column_name(consensus_column_name)
             reviewer_note = human_row.get(reviewer_note_col, "") if reviewer_note_col in human_wide.columns else ""
             human_missing = _is_extraction_missing(human_value, variable)
             ai_missing = _is_extraction_missing(ai_value, variable)
-            score_col = _human_score_column_name(variable.covidence_column_name)
+            score_col = _human_score_column_name(consensus_column_name)
             human_score = (
                 _parse_human_cell_score(human_row.get(score_col))
                 if effective_use_human_score_columns and score_col in human_wide.columns
@@ -1398,7 +1386,8 @@ def validate_extraction(
                 {
                     "paper_id": paper_id,
                     "variable": variable.variable_name,
-                    "covidence_column_name": variable.covidence_column_name,
+                    "consensus_column_name": consensus_column_name,
+                    "covidence_column_name": consensus_column_name,
                     "human_present": not human_missing,
                     "human_missing": human_missing,
                     "ai_missing": ai_missing,
@@ -1471,7 +1460,7 @@ def validate_extraction(
         metric_rows.append(
             {
                 VALIDATION_VARIABLE_COLUMN: variable.variable_name,
-                VALIDATION_CONSENSUS_COLUMN: variable.covidence_column_name,
+                VALIDATION_CONSENSUS_COLUMN: variable.consensus_column_name,
                 "N_Papers": variable_paper_n,
                 "N_Papers_Human_Present": variable_present_paper_n,
                 "Concordance_Matches": concordance_matches,
@@ -1607,7 +1596,7 @@ def _parse_args():
     parser.add_argument(
         "--use-human-score-columns",
         action="store_true",
-        help="Use <covidence_column_name>__human_score companion columns as match decisions.",
+        help="Use <consensus_column_name>__human_score companion columns as match decisions.",
     )
     return parser.parse_args()
 
@@ -1639,5 +1628,3 @@ def run_validation() -> None:
 
 if __name__ == "__main__":
     run_validation()
-
-

@@ -436,33 +436,6 @@ class HybridRescueRunWriter:
         self.summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def apply_hybrid_selected_values(payload: dict[str, Any], decisions: Iterable[HybridRescueDecision]) -> dict[str, Any]:
-    """human readable hint: return a copy where selected hybrid values are materialized for optional downstream use."""
-
-    updated = dict(payload)
-    extracted = updated.get("extracted_data")
-    if not isinstance(extracted, dict):
-        return updated
-    copied = {domain: dict(values) if isinstance(values, dict) else values for domain, values in extracted.items()}
-    for decision in decisions:
-        if decision.evidence_mode_used != "semantic_rescue":
-            continue
-        domain, variable_name = decision.variable.split(".", 1)
-        domain_payload = copied.get(domain)
-        if not isinstance(domain_payload, dict):
-            continue
-        domain_payload[f"{variable_name}_value"] = decision.selected_value
-        domain_payload[f"{variable_name}_quote"] = decision.selected_quote
-    updated["extracted_data"] = copied
-    updated["extracted_data_flat"] = {
-        f"{domain}.{key}": value
-        for domain, values in copied.items()
-        if isinstance(values, dict)
-        for key, value in values.items()
-    }
-    return updated
-
-
 def _list_setting(key: str) -> list[Any]:
     value = LLM_SETTINGS.get(key, [])
     if value is None:

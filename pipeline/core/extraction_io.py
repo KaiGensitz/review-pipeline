@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
+from uuid import uuid4
 
 from config.user_orchestrator import DATA_EXTRACTION_SUPPLEMENTAL_CITED_EVIDENCE, LLM_SETTINGS
 from pipeline.core.metadata_aliases import read_metadata_value
@@ -167,10 +169,6 @@ def _sanitize_paper_id_for_filename(paper_id: str) -> str:
 
 def _paper_id_hint(folder: Path) -> str:
     return PerPaperFileIndex.paper_id_hint(folder)
-
-
-def _prefixed_candidates(folder: Path, name: str, paper_id: str | None = None) -> list[Path]:
-    return PerPaperFileIndex(folder, paper_id=paper_id).candidates(name, paper_id=paper_id)
 
 
 @dataclass
@@ -468,19 +466,30 @@ def serialize_result(
     }
 
 
-def write_outputs(payload: dict[str, Any], output_root: Path, folder_name: str) -> None:
+def write_outputs(
+    payload: dict[str, Any],
+    output_root: Path,
+    folder_name: str,
+    *,
+    stage: str = STAGE,
+    run_label: str = STAGE,
+    criteria: Iterable[str] = (),
+) -> None:
     """human readable hint: write per-paper extraction artifacts for downstream validation."""
 
+    payload = _valid_extraction_payload(payload)
     output_dir = output_root / folder_name
     output_dir.mkdir(parents=True, exist_ok=True)
+    criteria = tuple(criteria)
 
     jsonl_text = (
         json.dumps(
             {
                 "meta": "extraction_results",
                 "description": "Per-paper extracted fields (JSONL).",
-                "run_label": STAGE,
-                "run_id": payload.get("run_id"),
+                "criteria": list(criteria),
+                "run_label": run_label,
+                "run_id": payload["run_id"],
             },
             ensure_ascii=False,
         )
@@ -489,33 +498,112 @@ def write_outputs(payload: dict[str, Any], output_root: Path, folder_name: str) 
         + "\n"
     )
     # human readable hint: write one canonical extraction JSONL to avoid duplicate artifact names.
-    jsonl_path = output_dir / f"{STAGE}_results.jsonl"
-    jsonl_path.write_text(jsonl_text, encoding="utf-8")
-    stale_jsonl_path = output_dir / f"{STAGE}_extraction_results.jsonl"
-    if stale_jsonl_path.exists():
-        stale_jsonl_path.unlink()
+    jsonl_path = output_dir / f"{stage}_results.jsonl"
+    _atomic_write_text(jsonl_path, jsonl_text)
 
-    flat = payload.get("extracted_data_flat") or {}
-    fieldnames = ["paper_id", "run_id"] + sorted(str(key) for key in flat)
-    row = {"paper_id": payload.get("paper_id"), "run_id": payload.get("run_id")}
-    for key in fieldnames[2:]:
-        row[key] = flat.get(key, "")
-    csv_path = output_dir / f"{STAGE}_results.csv"
-    with csv_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerow(row)
-    stale_csv_path = output_dir / f"{STAGE}_extraction_results.csv"
-    if stale_csv_path.exists():
-        stale_csv_path.unlink()
+    flat = payload["extracted_data_flat"]
+    extracted = payload["extracted_data"]
+    fieldnames = ["paper_id", "run_id"] + (sorted(str(key) for key in flat) if flat else list(criteria) or ["extracted_data"])
+    row = {"paper_id": payload["paper_id"], "run_id": payload["run_id"]}
+    if flat:
+        row.update({key: flat.get(key, "") for key in fieldnames[2:]})
+    elif criteria:
+        for key in criteria:
+            value = extracted.get(key, "")
+            row[key] = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else value
+    else:
+        row["extracted_data"] = json.dumps(extracted, ensure_ascii=False)
+    csv_path = output_dir / f"{stage}_results.csv"
+    csv_buffer = io.StringIO()
+    writer = csv.DictWriter(csv_buffer, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerow(row)
+    _atomic_write_text(csv_path, csv_buffer.getvalue())
+    for stale_path in (
+        output_dir / f"{stage}_extraction_results.jsonl",
+        output_dir / f"{stage}_extraction_results.csv",
+    ):
+        stale_path.unlink(missing_ok=True)
+
+
+def load_completed_output(
+    output_root: Path,
+    folder_name: str,
+    *,
+    stage: str = STAGE,
+    paper_id: str,
+) -> dict[str, Any] | None:
+    """human readable hint: completed artifacts are valid only when canonical JSONL is parseable and error-free."""
+
+    path = output_root / folder_name / f"{stage}_results.jsonl"
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                payload = json.loads(line)
+                if not isinstance(payload, dict) or payload.get("meta"):
+                    continue
+                payload = _valid_extraction_payload(payload)
+                if payload["paper_id"] == str(paper_id).strip() and not payload.get("error"):
+                    return payload
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return None
 
 
 def append_error(path: Path, payload: dict[str, Any]) -> None:
     """human readable hint: keep extraction errors append-only for reliable audits."""
 
+    if not isinstance(payload, dict):
+        raise TypeError("Extraction error payload must be a dictionary.")
+    payload.update(
+        paper_id=str(payload.get("paper_id") or "").strip(),
+        error=str(payload.get("error") or "").strip(),
+        stage=str(payload.get("stage") or STAGE).strip() or STAGE,
+    )
+    if not payload["paper_id"] or not payload["error"]:
+        raise ValueError("Extraction error payload requires paper_id and error.")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def _valid_extraction_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise TypeError("Extraction payload must be a dictionary.")
+    payload.update(
+        paper_id=str(payload.get("paper_id") or "").strip(),
+        run_id=str(payload.get("run_id") or "").strip(),
+    )
+    if not payload["paper_id"] or not payload["run_id"] or not isinstance(payload.get("extracted_data"), dict):
+        raise ValueError("Extraction payload requires paper_id, run_id, and extracted_data dictionary.")
+    payload.update(
+        extracted_data_flat=(
+            payload["extracted_data_flat"]
+            if isinstance(payload.get("extracted_data_flat"), dict)
+            else flatten_extracted(payload["extracted_data"])
+        ),
+        run_label=str(payload.get("run_label") or STAGE).strip() or STAGE,
+        folder_name=str(payload.get("folder_name") or payload["paper_id"]).strip() or payload["paper_id"],
+        timestamp=str(payload.get("timestamp") or datetime.now(timezone.utc).isoformat()),
+    )
+    return payload
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """human readable hint: replace final artifacts only after a complete same-directory write succeeds."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(text, encoding="utf-8")
+        temp_path.replace(path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
 
 
 def _stringify(value: Any) -> str:

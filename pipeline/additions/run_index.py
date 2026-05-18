@@ -341,6 +341,7 @@ def _append_index_row(
     path: Path,
     stats: tuple[int, float, float, float, float],
     total_paper_count: int | None = None,
+    handoff_path: Path | None = None,
 ) -> None:
     """human readable hint: write/update one row in eligibility index for a decision split."""
 
@@ -357,6 +358,7 @@ def _append_index_row(
         "max_seconds",
         "timestamp",
         "file_path",
+        "handoff_csv_path",
         "total_paper_count",
         "percent_of_input_file",
     ]
@@ -383,6 +385,7 @@ def _append_index_row(
         "max_seconds": pmax,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "file_path": str(path),
+        "handoff_csv_path": str(handoff_path) if handoff_path else "",
         "total_paper_count": total_paper_count or 0,
         "percent_of_input_file": percent_of_input,
     }
@@ -459,6 +462,8 @@ def _update_index_from_artifact(stage: str, artifact: dict | None, attempt_index
     elig_path = _existing_or_fallback(elig_path_raw, base_outputs.get("eligibility"))
     split_paths_raw = artifact.get("split_paths") if isinstance(artifact.get("split_paths"), dict) else {}
     split_paths: dict[str, object] = dict(split_paths_raw) if isinstance(split_paths_raw, dict) else {}
+    handoff_paths_raw = artifact.get("handoff_paths") if isinstance(artifact.get("handoff_paths"), dict) else {}
+    handoff_paths: dict[str, object] = dict(handoff_paths_raw) if isinstance(handoff_paths_raw, dict) else {}
 
     stage_csvs = [Path(p) for p in artifact.get("stage_csv_files", []) if p]
     qc_csv = _to_path(artifact.get("qc_sample_path"))
@@ -475,20 +480,20 @@ def _update_index_from_artifact(stage: str, artifact: dict | None, attempt_index
     if baseline_total <= 0 and isinstance(elig_path, Path):
         baseline_total = _count_records(elig_path)
 
-    entries: list[tuple[str, Path | None, str]] = []
-    entries.append(("all", elig_path, "eligibility"))
+    entries: list[tuple[str, Path | None, str, Path | None]] = []
+    entries.append(("all", elig_path, "eligibility", None))
     if stage == "title_abstract":
         select_path = _existing_or_fallback(_to_path(split_paths.get("select")), base_outputs.get("split_select"))
         irrelevant_path = _existing_or_fallback(_to_path(split_paths.get("irrelevant")), base_outputs.get("split_exclude"))
-        entries.append(("select", select_path, "eligibility_select"))
-        entries.append(("irrelevant", irrelevant_path, "eligibility_irrelevant"))
+        entries.append(("select", select_path, "eligibility_select", _to_path(handoff_paths.get("select"))))
+        entries.append(("irrelevant", irrelevant_path, "eligibility_irrelevant", _to_path(handoff_paths.get("irrelevant"))))
     elif stage == "full_text":
         included_path = _existing_or_fallback(_to_path(split_paths.get("included")), base_outputs.get("split_included"))
         excluded_path = _existing_or_fallback(_to_path(split_paths.get("excluded")), base_outputs.get("split_excluded"))
-        entries.append(("included", included_path, "eligibility_included"))
-        entries.append(("excluded", excluded_path, "eligibility_excluded"))
+        entries.append(("included", included_path, "eligibility_included", _to_path(handoff_paths.get("included"))))
+        entries.append(("excluded", excluded_path, "eligibility_excluded", _to_path(handoff_paths.get("excluded"))))
 
-    for decision_label, path_obj, token in entries:
+    for decision_label, path_obj, token, handoff_path_obj in entries:
         if not path_obj or not path_obj.exists():
             continue
         stats = _extract_summary_stats(path_obj)
@@ -506,6 +511,7 @@ def _update_index_from_artifact(stage: str, artifact: dict | None, attempt_index
             path_obj,
             stats,
             total_paper_count=total_input_rows,
+            handoff_path=handoff_path_obj,
         )
 
 def _ensure_qc_rows_in_index(stage: str) -> None:

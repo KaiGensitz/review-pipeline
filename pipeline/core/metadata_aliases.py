@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable
+from typing import Any
 
 
 GENERIC_METADATA_ALIASES = {
@@ -63,21 +63,6 @@ def metadata_aliases(key: str) -> list[str]:
     return deduped
 
 
-def metadata_aliases_many(keys: Iterable[str]) -> list[str]:
-    """human readable hint: combine aliases for several generic metadata keys while preserving order."""
-
-    values: list[str] = []
-    seen: set[str] = set()
-    for key in keys:
-        for alias in metadata_aliases(str(key)):
-            folded = alias.casefold()
-            if folded in seen:
-                continue
-            seen.add(folded)
-            values.append(alias)
-    return values
-
-
 def read_metadata_value(row: dict[str, Any], key: str, default: str = "") -> str:
     """human readable hint: read one metadata value without hardcoding export-specific column names."""
 
@@ -91,16 +76,6 @@ def read_metadata_value(row: dict[str, Any], key: str, default: str = "") -> str
         match = normalized.get(_normal_header(alias))
         if match and str(row.get(match) or "").strip():
             return str(row.get(match) or "").strip()
-    return default
-
-
-def read_first_metadata_value(row: dict[str, Any], keys: Iterable[str], default: str = "") -> str:
-    """human readable hint: read the first available value across multiple generic metadata keys."""
-
-    for key in keys:
-        value = read_metadata_value(row, str(key), "")
-        if value:
-            return value
     return default
 
 

@@ -5,47 +5,92 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable, Mapping
 
+from config.user_orchestrator import PROMPT_SIGNAL_SECTION_ALIASES, RETRIEVAL_SIGNAL_SETTINGS
+
 
 # human readable hint: this pattern intentionally never matches; it disables topic logic until prompts/KBs provide terms.
 NO_TOPIC_SIGNAL_PATTERN = re.compile(r"a^")
 NEVER_MATCH_PATTERN = re.compile(r"(?!)")
 
 
-# human readable hint: these are generic paper-section labels used to rescue relevant methods/results chunks.
-SECTION_RESCUE_KEYWORDS = (
-    "introduction",
-    "background",
-    "method",
-    "methods",
-    "methodology",
-    "materials and methods",
-    "participant",
-    "participants",
-    "intervention",
-    "procedure",
-    "outcome",
-    "results",
-    "discussion",
-    "conclusion",
-    "conclusions",
-    "trial",
-    "protocol",
-)
+def retrieval_terms(key: str) -> tuple[str, ...]:
+    """human readable hint: read user-editable retrieval signal terms from config without embedding them here."""
+
+    value = RETRIEVAL_SIGNAL_SETTINGS.get(key, ())
+    if not isinstance(value, (list, tuple, set)):
+        return tuple()
+    return tuple(str(item).strip() for item in value if str(item).strip())
+
+
+def retrieval_mapping(key: str) -> dict[str, tuple[str, ...]]:
+    """human readable hint: read user-editable label-to-alias retrieval settings from config."""
+
+    value = RETRIEVAL_SIGNAL_SETTINGS.get(key, {})
+    if not isinstance(value, Mapping):
+        return {}
+    mapping: dict[str, tuple[str, ...]] = {}
+    for label, aliases in value.items():
+        if not isinstance(aliases, (list, tuple, set)):
+            continue
+        clean_label = str(label).strip()
+        clean_aliases = tuple(str(alias).strip() for alias in aliases if str(alias).strip())
+        if clean_label and clean_aliases:
+            mapping[clean_label] = clean_aliases
+    return mapping
+
+
+def _literal_fragment(value: str) -> str:
+    """human readable hint: compile config terms as literal word/phrase fragments."""
+
+    return re.escape(value).replace(r"\ ", r"\s+")
+
+
+def retrieval_pattern(key: str) -> re.Pattern[str]:
+    """human readable hint: compile a config term list into a case-insensitive matcher."""
+
+    fragments = [_literal_fragment(term) for term in retrieval_terms(key)]
+    if not fragments:
+        return NEVER_MATCH_PATTERN
+    return re.compile(r"(?<!\w)(?:" + "|".join(sorted(set(fragments), key=len, reverse=True)) + r")(?!\w)", re.IGNORECASE)
+
+
+def retrieval_prefix_pattern(key: str) -> re.Pattern[str]:
+    """human readable hint: compile config prefix roots into a word-prefix matcher."""
+
+    fragments = [re.escape(term) for term in retrieval_terms(key)]
+    if not fragments:
+        return NEVER_MATCH_PATTERN
+    return re.compile(r"\b(?:" + "|".join(sorted(set(fragments), key=len, reverse=True)) + r")\w*\b", re.IGNORECASE)
+
+
+def retrieval_section_patterns(*, inline: bool = False) -> tuple[tuple[re.Pattern[str], str], ...]:
+    """human readable hint: compile configured publication-section aliases into heading matchers."""
+
+    compiled: list[tuple[re.Pattern[str], str]] = []
+    for label, aliases in retrieval_mapping("section_heading_aliases").items():
+        fragments = [_literal_fragment(alias) for alias in aliases]
+        if not fragments:
+            continue
+        joined = "|".join(sorted(set(fragments), key=len, reverse=True))
+        if inline:
+            pattern = rf"^\s*(?:\d+(?:\.\d+)*)?\s*(?:{joined})\s*[:\-]\s*(.*)$"
+        else:
+            pattern = rf"^\s*(?:\d+(?:\.\d+)*)?\s*(?:{joined})\s*:?\s*$"
+        compiled.append((re.compile(pattern, re.IGNORECASE), label))
+    return tuple(compiled)
+
+
+SECTION_RESCUE_KEYWORDS = retrieval_terms("section_rescue_terms")
 
 DEFAULT_PRIMARY_TOPIC_SIGNAL_TERMS: tuple[str, ...] = ()
 DEFAULT_SECONDARY_TOPIC_SIGNAL_TERMS: tuple[str, ...] = ()
-INTERVENTION_SIGNAL_PATTERN = NO_TOPIC_SIGNAL_PATTERN
+PRIMARY_SCOPE_SIGNAL_PATTERN = NO_TOPIC_SIGNAL_PATTERN
 PRIMARY_TOPIC_SIGNAL_PATTERN = NO_TOPIC_SIGNAL_PATTERN
 SECONDARY_TOPIC_SIGNAL_PATTERN = NO_TOPIC_SIGNAL_PATTERN
 
-MONITORING_SIGNAL_SEED_PATTERN = re.compile(
-    r"\b(monitor|assess|evaluat|feasib|usabil|acceptab|observ|classif|predict|detect|framework|protocol|pilot|measur|diagnos|benchmark)\w*\b",
-    re.IGNORECASE,
-)
-INTERVENTION_ACTION_SEED_PATTERN = re.compile(
-    r"\b(interven|randomi|trial|assign|arm|program|coach|feedback|counsel|behavior|treat|support|nudge|goal|recommend|prescrib|prompt|deliver)\w*\b",
-    re.IGNORECASE,
-)
+MONITORING_SIGNAL_SEED_PATTERN = retrieval_prefix_pattern("monitoring_seed_roots")
+PRIMARY_ACTION_SEED_PATTERN = retrieval_prefix_pattern("primary_action_seed_roots")
+PRIMARY_SCOPE_REQUIREMENT_PATTERN = retrieval_pattern("primary_scope_requirement_terms")
 KB_SIGNAL_CONTEXT_STOPWORDS = frozenset(
     {
         "the",
@@ -391,19 +436,19 @@ def build_prompt_signal_config(prompt_template: str) -> dict[str, Any]:
     """human readable hint: derive topic-sensitive retrieval signals from the active prompt."""
 
     section_aliases = _configured_prompt_signal_section_aliases()
-    intervention_include = _extract_prompt_include_terms(
+    primary_scope_include = _extract_prompt_include_terms(
         prompt_template,
         section_aliases["primary"],
     )
-    outcome_include = _extract_prompt_include_terms(prompt_template, section_aliases["secondary"])
+    secondary_include = _extract_prompt_include_terms(prompt_template, section_aliases["secondary"])
 
-    intervention_seed_terms = intervention_include
-    primary_seed_terms = intervention_include if intervention_include else list(DEFAULT_PRIMARY_TOPIC_SIGNAL_TERMS)
-    secondary_seed_terms = outcome_include if outcome_include else list(DEFAULT_SECONDARY_TOPIC_SIGNAL_TERMS)
+    primary_scope_seed_terms = primary_scope_include
+    primary_seed_terms = primary_scope_include if primary_scope_include else list(DEFAULT_PRIMARY_TOPIC_SIGNAL_TERMS)
+    secondary_seed_terms = secondary_include if secondary_include else list(DEFAULT_SECONDARY_TOPIC_SIGNAL_TERMS)
 
-    intervention_pattern, intervention_terms = _compile_signal_pattern_from_terms(
-        intervention_seed_terms,
-        INTERVENTION_SIGNAL_PATTERN,
+    primary_scope_pattern, primary_scope_terms = _compile_signal_pattern_from_terms(
+        primary_scope_seed_terms,
+        PRIMARY_SCOPE_SIGNAL_PATTERN,
     )
     primary_pattern, primary_terms = _compile_signal_pattern_from_terms(
         primary_seed_terms,
@@ -414,17 +459,17 @@ def build_prompt_signal_config(prompt_template: str) -> dict[str, Any]:
         SECONDARY_TOPIC_SIGNAL_PATTERN,
     )
 
-    source = "prompt_criteria" if intervention_include or outcome_include else "no_prompt_signals"
+    source = "prompt_criteria" if primary_scope_include or secondary_include else "no_prompt_signals"
     section_rescue_keywords = _build_section_rescue_keywords(
-        list(intervention_include) + list(outcome_include)
+        list(primary_scope_include) + list(secondary_include)
     )
 
     return {
         "source": source,
-        "intervention_pattern": intervention_pattern,
+        "primary_scope_pattern": primary_scope_pattern,
         "primary_pattern": primary_pattern,
         "secondary_pattern": secondary_pattern,
-        "intervention_terms": intervention_terms,
+        "primary_scope_terms": primary_scope_terms,
         "primary_terms": primary_terms,
         "secondary_terms": secondary_terms,
         "section_rescue_keywords": section_rescue_keywords,
@@ -439,15 +484,15 @@ def build_monitoring_signal_config(
     """human readable hint: build monitoring/action cues from prompt and user KB examples."""
 
     section_aliases = _configured_prompt_signal_section_aliases()
-    intervention_section_aliases = section_aliases["primary"]
-    outcome_section_aliases = section_aliases["secondary"]
+    primary_section_aliases = section_aliases["primary"]
+    secondary_section_aliases = section_aliases["secondary"]
 
-    prompt_intervention_terms = _extract_prompt_include_terms(
+    prompt_primary_scope_terms = _extract_prompt_include_terms(
         prompt_template,
-        intervention_section_aliases,
+        primary_section_aliases,
     )
-    prompt_outcome_terms = _extract_prompt_include_terms(prompt_template, outcome_section_aliases)
-    prompt_outcome_exclude_terms = _extract_prompt_exclude_terms(prompt_template, outcome_section_aliases)
+    prompt_secondary_terms = _extract_prompt_include_terms(prompt_template, secondary_section_aliases)
+    prompt_secondary_exclude_terms = _extract_prompt_exclude_terms(prompt_template, secondary_section_aliases)
 
     kb_examples_list = [dict(item) for item in kb_examples if isinstance(item, Mapping)]
     kb_pos_count = sum(1 for item in kb_examples_list if str(item.get("label") or "").strip().upper() == "POS")
@@ -456,7 +501,7 @@ def build_monitoring_signal_config(
     kb_pos_action_terms = _collect_kb_seed_terms(
         kb_examples_list,
         target_label="POS",
-        seed_pattern=INTERVENTION_ACTION_SEED_PATTERN,
+        seed_pattern=PRIMARY_ACTION_SEED_PATTERN,
         max_terms=80,
         min_count=1,
     )
@@ -477,31 +522,31 @@ def build_monitoring_signal_config(
         )
     )
 
-    topic_intervention_terms = tuple(topic_signal_config.get("intervention_terms") or ())
+    topic_primary_scope_terms = tuple(topic_signal_config.get("primary_scope_terms") or ())
     action_seed_terms = [
         term
-        for term in list(prompt_intervention_terms) + list(topic_intervention_terms)
-        if INTERVENTION_ACTION_SEED_PATTERN.search(term)
+        for term in list(prompt_primary_scope_terms) + list(topic_primary_scope_terms)
+        if PRIMARY_ACTION_SEED_PATTERN.search(term)
     ]
     action_seed_terms.extend(kb_pos_action_terms)
     action_seed_terms = list(_dedupe_signal_terms(action_seed_terms, max_terms=120))
 
-    intervention_action_pattern, intervention_action_terms = _compile_signal_pattern_from_terms(
+    primary_action_pattern, primary_action_terms = _compile_signal_pattern_from_terms(
         action_seed_terms,
-        topic_signal_config.get("intervention_pattern") or NEVER_MATCH_PATTERN,
+        topic_signal_config.get("primary_scope_pattern") or NEVER_MATCH_PATTERN,
         max_terms=120,
     )
 
     monitoring_prompt_terms = [
         term
-        for term in (list(prompt_outcome_terms) + list(prompt_outcome_exclude_terms))
+        for term in (list(prompt_secondary_terms) + list(prompt_secondary_exclude_terms))
         if MONITORING_SIGNAL_SEED_PATTERN.search(term)
     ]
     monitoring_seed_terms = list(monitoring_prompt_terms) + list(kb_neg_monitor_terms)
 
     action_term_set = {
         _normalize_signal_term(term)
-        for term in list(intervention_action_terms) + list(topic_intervention_terms)
+        for term in list(primary_action_terms) + list(topic_primary_scope_terms)
         if _normalize_signal_term(term)
     }
     filtered_monitoring_terms = []
@@ -522,27 +567,27 @@ def build_monitoring_signal_config(
         max_terms=120,
     )
 
-    prompt_requires_intervention = bool(prompt_intervention_terms) or bool(
-        re.search(r"\bintervention(?:[- ]first)?\b", prompt_template, re.IGNORECASE)
+    prompt_requires_primary_scope = bool(prompt_primary_scope_terms) or bool(
+        PRIMARY_SCOPE_REQUIREMENT_PATTERN.search(prompt_template or "")
     )
     kb_has_contrastive_examples = kb_pos_count > 0 and kb_neg_count > 0
     enabled = bool(
-        prompt_requires_intervention
+        prompt_requires_primary_scope
         and kb_has_contrastive_examples
         and monitoring_terms
-        and (intervention_action_terms or topic_intervention_terms)
+        and (primary_action_terms or topic_primary_scope_terms)
     )
 
     if enabled:
         source = "prompt_kb_dynamic"
-    elif not prompt_requires_intervention:
-        source = "disabled_prompt_no_intervention_scope"
+    elif not prompt_requires_primary_scope:
+        source = "disabled_prompt_no_primary_scope"
     elif not kb_has_contrastive_examples:
         source = "disabled_kb_missing_pos_neg"
     elif not monitoring_terms:
         source = "disabled_no_monitoring_terms"
     else:
-        source = "disabled_no_intervention_action_terms"
+        source = "disabled_no_primary_action_terms"
 
     if not enabled:
         monitoring_pattern = NEVER_MATCH_PATTERN
@@ -552,8 +597,8 @@ def build_monitoring_signal_config(
         "enabled": enabled,
         "monitoring_pattern": monitoring_pattern,
         "monitoring_terms": tuple(monitoring_terms),
-        "intervention_action_pattern": intervention_action_pattern,
-        "intervention_action_terms": tuple(intervention_action_terms),
+        "primary_action_pattern": primary_action_pattern,
+        "primary_action_terms": tuple(primary_action_terms),
         "kb_pos_count": kb_pos_count,
         "kb_neg_count": kb_neg_count,
     }
@@ -563,14 +608,9 @@ def _configured_prompt_signal_section_aliases() -> dict[str, set[str]]:
     """human readable hint: prompt section names are user-configured so pipeline code is not topic-specific."""
 
     defaults = {"primary": set(), "secondary": set()}
-    try:
-        from config.user_orchestrator import PROMPT_SIGNAL_SECTION_ALIASES
-
-        if isinstance(PROMPT_SIGNAL_SECTION_ALIASES, dict):
-            for key in defaults:
-                values = PROMPT_SIGNAL_SECTION_ALIASES.get(key, [])
-                if isinstance(values, (list, tuple, set)):
-                    defaults[key] = {str(value) for value in values if str(value).strip()}
-    except Exception:
-        pass
+    if isinstance(PROMPT_SIGNAL_SECTION_ALIASES, dict):
+        for key in defaults:
+            values = PROMPT_SIGNAL_SECTION_ALIASES.get(key, [])
+            if isinstance(values, (list, tuple, set)):
+                defaults[key] = {str(value) for value in values if str(value).strip()}
     return defaults

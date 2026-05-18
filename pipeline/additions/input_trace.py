@@ -1146,7 +1146,7 @@ class InputTraceRunner:
                 if _is_missing_extraction_value(value, variable):
                     missing_fields.append(field_path)
                     missing_lines.append(
-                        f"- {field_path} -> {MISSING_TEXT_VALUE}; consensus_column={variable.covidence_column_name}"
+                        f"- {field_path} -> {MISSING_TEXT_VALUE}; consensus_column={variable.consensus_column_name}"
                     )
                     terms = _trace_search_terms_for_variable(variable)
                     hits = _line_hits_for_terms(normalized_for_search, terms)

@@ -6,6 +6,7 @@ import typing
 
 from pipeline.integrations.embedding_utils import split_text_into_sentences
 from config.user_orchestrator import EMBEDDING_SETTINGS, require_setting
+from pipeline.selection.prompt_signals import retrieval_pattern, retrieval_section_patterns
 
 chunk_size = int(str(require_setting(EMBEDDING_SETTINGS, "chunk_size", "EMBEDDING_SETTINGS")))
 overlap_size = int(str(require_setting(EMBEDDING_SETTINGS, "overlap_size", "EMBEDDING_SETTINGS")))
@@ -16,28 +17,11 @@ Chunk = typing.Dict[str, typing.Any]
 class ChunkBuilder:
 	"""human readable hint: one class that groups all chunk-building methods for title/abstract and full-text."""
 
-	SUBSTANTIVE_SENTENCE_PATTERN = re.compile(
-		r"\b(methods?|participants?|intervention|procedure|analysis|results?|findings|outcome|baseline|follow[- ]?up|effect|significant|comparison)\b",
-		re.IGNORECASE,
-	)
+	SUBSTANTIVE_SENTENCE_PATTERN = retrieval_pattern("substantive_sentence_terms")
 
-	SECTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-		(re.compile(r"^\s*(?:\d+(?:\.\d+)*)?\s*(?:introduction|background)\s*:?\s*$", re.IGNORECASE), "introduction"),
-		(re.compile(r"^\s*(?:\d+(?:\.\d+)*)?\s*(?:methods?|materials?\s+and\s+methods?|methodology|study\s+design)\s*:?\s*$", re.IGNORECASE), "method"),
-		(re.compile(r"^\s*(?:\d+(?:\.\d+)*)?\s*(?:results?|findings)\s*:?\s*$", re.IGNORECASE), "results"),
-		(re.compile(r"^\s*(?:\d+(?:\.\d+)*)?\s*(?:discussion)\s*:?\s*$", re.IGNORECASE), "discussion"),
-		(re.compile(r"^\s*(?:\d+(?:\.\d+)*)?\s*(?:conclusions?|summary)\s*:?\s*$", re.IGNORECASE), "conclusion"),
-		(re.compile(r"^\s*(?:\d+(?:\.\d+)*)?\s*(?:references?|bibliography)\s*:?\s*$", re.IGNORECASE), "reference"),
-		(re.compile(r"^\s*(?:\d+(?:\.\d+)*)?\s*(?:acknowledg(?:e)?ments?)\s*:?\s*$", re.IGNORECASE), "reference"),
-	)
+	SECTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = retrieval_section_patterns()
 
-	SECTION_INLINE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-		(re.compile(r"^\s*(?:\d+(?:\.\d+)*)?\s*(?:introduction|background)\s*[:\-]\s*(.*)$", re.IGNORECASE), "introduction"),
-		(re.compile(r"^\s*(?:\d+(?:\.\d+)*)?\s*(?:methods?|materials?\s+and\s+methods?|methodology|study\s+design)\s*[:\-]\s*(.*)$", re.IGNORECASE), "method"),
-		(re.compile(r"^\s*(?:\d+(?:\.\d+)*)?\s*(?:results?|findings)\s*[:\-]\s*(.*)$", re.IGNORECASE), "results"),
-		(re.compile(r"^\s*(?:\d+(?:\.\d+)*)?\s*(?:discussion)\s*[:\-]\s*(.*)$", re.IGNORECASE), "discussion"),
-		(re.compile(r"^\s*(?:\d+(?:\.\d+)*)?\s*(?:conclusions?|summary)\s*[:\-]\s*(.*)$", re.IGNORECASE), "conclusion"),
-	)
+	SECTION_INLINE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = retrieval_section_patterns(inline=True)
 
 	@staticmethod
 	def clean_text(value: str) -> str:
@@ -279,19 +263,9 @@ class ChunkBuilder:
 		return chunks
 
 
-def _clean_text(value: str) -> str:
-	"""Trim whitespace from text fields safely."""
-	return ChunkBuilder.clean_text(value)
-
-
 def chunk_paper_sentences(paper_id: str, title: str, abstract: str, language: str) -> list[Chunk]:
 	"""Split title and abstract into sentence chunks (title sentences are always kept)."""
 	return ChunkBuilder.chunk_paper_sentences(paper_id, title, abstract, language)
-
-
-def _chunk_sentence_entries(entries: list[dict], chunk_size: int, overlap_size: int) -> list[Chunk]:
-	"""Group sentence entries into overlapping chunks with page/line spans."""
-	return ChunkBuilder.chunk_sentence_entries(entries, chunk_size=chunk_size, overlap_size=overlap_size)
 
 
 def chunk_fulltext_sentences(

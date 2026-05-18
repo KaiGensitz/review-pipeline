@@ -323,16 +323,10 @@ def _infer_negative_reason(title: str, snippet: str, signals: BootstrapSignals) 
 	lower_title = title.lower()
 	lower_text = snippet.lower()
 	joined = lower_title + " " + lower_text
+	# human readable hint: local NEG-example terms take precedence because they come from the current KB/PDF evidence.
 	matched = [term for term in signals.exclude_terms[:12] if term in joined]
 	if matched:
 		return "Negative example because the provided evidence matches local NEG-example terms: " + ", ".join(matched[:4]) + "."
-
-	if "review" in joined or "scoping" in joined:
-		return "Negative example because this paper is a review-style publication rather than direct primary evidence."
-	if "agent-based" in joined or "simulation" in joined:
-		return "Negative example because this paper focuses on simulation/modeling rather than direct participant-level evidence."
-	if "children" in joined or "adolescent" in joined:
-		return "Negative example because the target population is non-adult."
 
 	return "Negative example from the provided neg_examples set to represent non-eligible or weak-fit screening patterns."
 
@@ -516,7 +510,7 @@ def _configured_exclusion_key_lines() -> str:
 
 def _render_prompt_title_abstract(include_terms: list[str], exclude_terms: list[str]) -> str:
 	include_text = ", ".join(include_terms[:18]) if include_terms else "positive-example terms from your local PDFs"
-	exclude_text = ", ".join(exclude_terms[:18]) if exclude_terms else "review, simulation, non-adult"
+	exclude_text = ", ".join(exclude_terms[:18]) if exclude_terms else "negative-example terms from your local PDFs"
 	exclusion_key_lines = _configured_exclusion_key_lines()
 
 	return f"""SCREENING PROMPT (Title/Abstract - Suggested Bootstrap Version)
@@ -552,7 +546,7 @@ Apply strict exclusion only for explicit evidence. If information is missing but
 
 def _render_prompt_full_text(include_terms: list[str], exclude_terms: list[str]) -> str:
 	include_text = ", ".join(include_terms[:20]) if include_terms else "positive-example terms from your local PDFs"
-	exclude_text = ", ".join(exclude_terms[:20]) if exclude_terms else "review, simulation, conceptual"
+	exclude_text = ", ".join(exclude_terms[:20]) if exclude_terms else "negative-example terms from your local PDFs"
 	exclusion_key_lines = _configured_exclusion_key_lines()
 
 	return f"""SCREENING PROMPT (Full-Text - Suggested Bootstrap Version)
